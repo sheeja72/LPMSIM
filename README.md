@@ -130,3 +130,4 @@ dotnet add src/LpmSim.Web package <Package.Name>
 | Q&A "Why is allocation blocked?" etc. | `src/LpmSim.Data/LpmSim/LpmSimInvestigator.cs`                  |
 | Auth wiring                           | `src/LpmSim.Web/Program.cs`, `src/LpmSim.Web/Auth/`             |
 | Database schema                       | `src/LpmSim.Data/LpmDbContext.cs` + `db/*.sql`                  |
+

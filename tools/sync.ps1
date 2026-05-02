@@ -16,6 +16,8 @@
 #   git checkout -b feature/<short-name>
 #   .\tools\sync.ps1 "first cut of <short-name>"
 #   # Then open a PR on github.com.
+# edit anything trivial — e.g. add a blank line to README.md
+
 
 [CmdletBinding()]
 param(
