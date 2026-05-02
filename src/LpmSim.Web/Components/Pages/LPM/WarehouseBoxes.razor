@@ -1,0 +1,209 @@
+@page "/lpm/warehouse-boxes"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.Warehouse
+@using LpmSim.Data.Auditing
+@inject WarehouseQueryService Warehouse
+@inject IActionLogger ActionLog
+@inject ISnackbar Snackbar
+
+<PageTitle>Warehouse Box Details</PageTitle>
+
+<div class="lpm-page-title">Warehouse Box Details</div>
+<div class="lpm-page-subtitle">
+    UAE warehouse stock aggregated per pallet &times; box. All filters are optional (blank = All) and searchable.
+</div>
+
+<div class="lpm-section lpm-filter-bar lpm-filter-bar-lg">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="Warehouse" Value="_filter.Warehouse"
+                             ValueChanged="v => { _filter = _filter with { Warehouse = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_warehouses, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="Type Name" Value="_filter.TypeName"
+                             ValueChanged="v => { _filter = _filter with { TypeName = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_typeNames, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="Pallet Category" Value="_filter.PalletCategory"
+                             ValueChanged="v => { _filter = _filter with { PalletCategory = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_palletCategories, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudSelect T="LpmPresence" Label="LPM Status" Value="_filter.LpmStatus"
+                       ValueChanged="v => { _filter = _filter with { LpmStatus = v }; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                <MudSelectItem T="LpmPresence" Value="LpmPresence.Any">Any</MudSelectItem>
+                <MudSelectItem T="LpmPresence" Value="LpmPresence.HasLpm">Has LPM</MudSelectItem>
+                <MudSelectItem T="LpmPresence" Value="LpmPresence.NoLpm">No LPM (blank)</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="LPM Value" Value="_filter.Lpm"
+                             ValueChanged="v => { _filter = _filter with { Lpm = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_lpms, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="Any specific" />
+        </MudItem>
+        <MudItem xs="12" sm="8" md="2">
+            <MudTextField T="string" Label="Pallet / Box contains"
+                          Value="_filter.Search"
+                          ValueChanged="v => { _filter = _filter with { Search = v }; StateHasChanged(); }"
+                          Variant="Variant.Outlined" Margin="Margin.Dense" Clearable="true"
+                          Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+        </MudItem>
+        <MudItem xs="12" sm="4" md="2" Class="d-flex align-center justify-end">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Medium"
+                       StartIcon="@Icons.Material.Filled.PlayArrow"
+                       Disabled="_loading" OnClick="LoadAsync" FullWidth="true">
+                Load
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_loading)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_rows.Count > 0)
+{
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Boxes</div>
+            <div class="lpm-metric-value">@_rows.Count.ToString("N0")</div>
+            <div class="lpm-metric-sub">@(_rows.Count >= _topLimit ? "capped at " + _topLimit.ToString("N0") : "result rows")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">Pallets</div>
+            <div class="lpm-metric-value">@_rows.Select(r => r.PalletNo).Distinct().Count().ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-green">
+            <div class="lpm-metric-label">Warehouses</div>
+            <div class="lpm-metric-value">@_rows.Select(r => r.Warehouse).Distinct().Count().ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">Total Qty</div>
+            <div class="lpm-metric-value">@_rows.Sum(r => r.Qty).ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <MudTable T="WhBoxRow" Items="_rows" Hover="true" Striped="true" Dense="true"
+              FixedHeader="true" Height="62vh" AllowUnsorted="false">
+        <HeaderContent>
+            <MudTh>Country</MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Warehouse" InitialDirection="SortDirection.Ascending">Warehouse</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletNo">Pallet No</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletType">Pallet Type</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.TypeName ?? string.Empty">Type Name</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletCategory ?? string.Empty">Pallet Category</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty">Qty</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.LPM ?? string.Empty">LPM</MudTableSortLabel></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@context.Country</MudTd>
+            <MudTd>@context.Warehouse</MudTd>
+            <MudTd><code>@context.PalletNo</code></MudTd>
+            <MudTd><code>@context.BoxNo</code></MudTd>
+            <MudTd>@context.PalletType</MudTd>
+            <MudTd>@context.TypeName</MudTd>
+            <MudTd>@context.PalletCategory</MudTd>
+            <MudTd Style="text-align:right;">@context.Qty.ToString("N0")</MudTd>
+            <MudTd>@context.LPM</MudTd>
+        </RowTemplate>
+        <PagerContent>
+            <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+        </PagerContent>
+    </MudTable>
+}
+else if (_loadedOnce && !_loading)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No rows match the current filters.</MudAlert>
+}
+else if (!_loadedOnce)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+        Apply one or more filters (leave blank for All) and click <strong>Load</strong>.
+        Narrow the scope to a single Warehouse for fastest results &mdash; the underlying table has 700k+ rows.
+    </MudAlert>
+}
+
+@code {
+    private List<string> _warehouses = new();
+    private List<string> _typeNames = new();
+    private List<string> _palletCategories = new();
+    private List<string> _lpms = new();
+    private List<WhBoxRow> _rows = new();
+    private WhBoxFilter _filter = new(null, null, null, null, null, LpmPresence.Any);
+    private bool _loading;
+    private bool _loadedOnce;
+    private readonly int _topLimit = 200000;
+
+    protected override async Task OnInitializedAsync()
+    {
+        try
+        {
+            _warehouses       = await Warehouse.GetWarehousesAsync();
+            _typeNames        = await Warehouse.GetTypeNamesAsync();
+            _palletCategories = await Warehouse.GetPalletCategoriesAsync();
+            _lpms             = await Warehouse.GetLpmsAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not load filter lists: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private static Task<IEnumerable<string>> Search(List<string> source, string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<string>>(source.Take(50));
+        return Task.FromResult<IEnumerable<string>>(source
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase))
+            .Take(50));
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true; StateHasChanged();
+        var started = DateTime.Now;
+        try
+        {
+            _rows = await Warehouse.GetBoxesAsync(_filter, _topLimit);
+            _loadedOnce = true;
+            if (_rows.Count >= _topLimit)
+                Snackbar.Add($"Result capped at {_topLimit:N0} rows. Narrow the filter to see more.", Severity.Warning);
+
+            await ActionLog.LogAsync(
+                "WarehouseBoxes.Load",
+                $"{started:yyyyMMddHHmmss}",
+                new { filter = _filter, rows = _rows.Count, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
+            await ActionLog.LogAsync(
+                "WarehouseBoxes.Load",
+                $"{started:yyyyMMddHHmmss}-error",
+                new { filter = _filter, error = ex.Message });
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+}

@@ -1,0 +1,159 @@
+@page "/admin/volume-groups"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>Volume Groups</PageTitle>
+
+<div class="lpm-page-title">Volume Groups</div>
+<div class="lpm-page-subtitle">
+    Configure volume group share % used to bucket stores after Target EOM is calculated.
+    Share % should sum to 100% per country.
+</div>
+
+<div class="lpm-section lpm-filter-bar mb-3">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="9" Class="d-flex justify-end">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddAsync"
+                       Disabled="@string.IsNullOrEmpty(_country)">
+                Add Group
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+<MudTable T="LpmVolumeGroup" Items="_groups" Hover="true" Dense="true"
+          Loading="_loading" AllowUnsorted="false" Class="lpm-narrow-table" Style="max-width:900px;">
+    <HeaderContent>
+        <MudTh><MudTableSortLabel T="LpmVolumeGroup" SortBy="g => g.SortOrder" InitialDirection="SortDirection.Ascending">Order</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmVolumeGroup" SortBy="g => g.GroupCode">Code</MudTableSortLabel></MudTh>
+        <MudTh>Name</MudTh>
+        <MudTh>Share %</MudTh>
+        <MudTh>Active</MudTh>
+        <MudTh Style="width:140px;">Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd>@context.SortOrder</MudTd>
+        <MudTd><code>@context.GroupCode</code></MudTd>
+        <MudTd>@context.GroupName</MudTd>
+        <MudTd>@((context.SharePct * 100m).ToString("0.##"))%</MudTd>
+        <MudTd>
+            <MudSwitch T="bool" Value="context.IsActive" Color="Color.Success"
+                       ValueChanged="(bool v) => ToggleActiveAsync(context, v)" />
+        </MudTd>
+        <MudTd>
+            <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small"
+                           OnClick="() => OpenEditAsync(context)" />
+            <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
+                           OnClick="() => DeleteAsync(context)" />
+        </MudTd>
+    </RowTemplate>
+</MudTable>
+
+<MudText Typo="Typo.caption" Class="mt-2" Color="@(Math.Abs(ShareSum - 1m) < 0.0001m ? Color.Success : Color.Warning)">
+    Active share total for @_country: @((ShareSum * 100m).ToString("0.##"))%
+</MudText>
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private List<LpmVolumeGroup> _groups = new();
+    private bool _loading;
+
+    private decimal ShareSum => _groups.Where(g => g.IsActive).Sum(g => g.SharePct);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _groups = new(); return; }
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            _groups = await db.LpmVolumeGroups.AsNoTracking()
+                .Where(g => g.Country == _country)
+                .OrderBy(g => g.SortOrder).ToListAsync();
+        }
+        finally { _loading = false; StateHasChanged(); }
+    }
+
+    private async Task OpenAddAsync()
+    {
+        var parameters = new DialogParameters<VolumeGroupEditDialog>
+        {
+            { x => x.Model, new LpmVolumeGroup { Country = _country, SortOrder = (_groups.Count + 1) } },
+            { x => x.IsNew, true }
+        };
+        var dlg = await DialogService.ShowAsync<VolumeGroupEditDialog>($"Add volume group ({_country})", parameters);
+        var result = await dlg.Result;
+        if (result is not null && !result.Canceled) await ReloadAsync();
+    }
+
+    private async Task OpenEditAsync(LpmVolumeGroup g)
+    {
+        var copy = new LpmVolumeGroup
+        {
+            Country = g.Country, GroupCode = g.GroupCode, GroupName = g.GroupName, SortOrder = g.SortOrder,
+            SharePct = g.SharePct, IsActive = g.IsActive
+        };
+        var parameters = new DialogParameters<VolumeGroupEditDialog> { { x => x.Model, copy }, { x => x.IsNew, false } };
+        var dlg = await DialogService.ShowAsync<VolumeGroupEditDialog>($"Edit {g.Country}/{g.GroupCode}", parameters);
+        var result = await dlg.Result;
+        if (result is not null && !result.Canceled) await ReloadAsync();
+    }
+
+    private async Task ToggleActiveAsync(LpmVolumeGroup g, bool active)
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var row = await db.LpmVolumeGroups.FirstAsync(x => x.Country == g.Country && x.GroupCode == g.GroupCode);
+            row.IsActive = active;
+            await db.SaveChangesAsync();
+            g.IsActive = active;
+            Snackbar.Add($"{g.Country}/{g.GroupCode} → {(active ? "active" : "inactive")}.", Severity.Success);
+        }
+        catch (Exception ex) { Snackbar.Add($"Failed: {ex.Message}", Severity.Error); }
+    }
+
+    private async Task DeleteAsync(LpmVolumeGroup g)
+    {
+        var ok = await DialogService.ShowMessageBox("Delete volume group",
+            $"Delete {g.Country}/{g.GroupCode}? SKU Max rules referencing this group will block the delete.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var row = await db.LpmVolumeGroups.FirstAsync(x => x.Country == g.Country && x.GroupCode == g.GroupCode);
+            db.LpmVolumeGroups.Remove(row);
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Deleted {g.Country}/{g.GroupCode}.", Severity.Success);
+            await ReloadAsync();
+        }
+        catch (Exception ex) { Snackbar.Add($"Delete failed: {ex.Message}", Severity.Error); }
+    }
+}

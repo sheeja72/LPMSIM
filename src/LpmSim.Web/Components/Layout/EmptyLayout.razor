@@ -1,0 +1,16 @@
+@inherits LayoutComponentBase
+
+@*
+    Bare layout — no nav drawer, no auth context, no menu.
+    Used by the signed-out / locked screen so the user truly cannot interact
+    with the app until they reload it (which forces the Windows-Auth handshake
+    again on a fresh tab).
+*@
+<MudThemeProvider />
+<MudPopoverProvider />
+<MudDialogProvider />
+<MudSnackbarProvider />
+
+<div style="min-height:100vh;background:#0f172a;display:flex;align-items:center;justify-content:center;">
+    @Body
+</div>

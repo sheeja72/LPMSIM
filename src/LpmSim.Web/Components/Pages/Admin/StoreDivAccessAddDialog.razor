@@ -1,0 +1,126 @@
+@using System.Linq
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            Pick one or more <strong>stores</strong> and one or more <strong>divisions</strong> to
+            deactivate for <strong>@Country</strong>. Each selected pair will get a row with
+            <code>IsActive = 0</code>. Existing rows for the same pair will be flipped to inactive
+            without duplication.
+        </MudText>
+
+        <MudGrid Spacing="2">
+            <MudItem xs="12" md="6">
+                <MudText Typo="Typo.subtitle2" Class="mb-1">Stores</MudText>
+                <MudTextField T="string" Placeholder="Filter store id or name…"
+                              ValueChanged="(string v) => { _storeFilter = v ?? string.Empty; }"
+                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                              Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
+                    @foreach (var s in FilteredStores)
+                    {
+                        <div>
+                            <MudCheckBox T="bool" Value="@_pickedStores.Contains(s.StoreID)"
+                                         ValueChanged="(bool v) => ToggleStore(s.StoreID, v)"
+                                         Color="Color.Primary" Dense="true" Size="Size.Small">
+                                <code>@s.StoreID</code> · <span style="color:#475569;">@s.Name</span>
+                            </MudCheckBox>
+                        </div>
+                    }
+                </div>
+                <MudText Typo="Typo.caption" Class="mt-1" Style="color:#64748b;">
+                    @_pickedStores.Count selected
+                </MudText>
+            </MudItem>
+
+            <MudItem xs="12" md="6">
+                <MudText Typo="Typo.subtitle2" Class="mb-1">Divisions</MudText>
+                <MudTextField T="string" Placeholder="Filter division name or code…"
+                              ValueChanged="(string v) => { _divFilter = v ?? string.Empty; }"
+                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                              Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
+                    @foreach (var d in FilteredDivisions)
+                    {
+                        <div>
+                            <MudCheckBox T="bool" Value="@_pickedDivs.Contains(d.DivCode)"
+                                         ValueChanged="(bool v) => ToggleDiv(d.DivCode, v)"
+                                         Color="Color.Primary" Dense="true" Size="Size.Small">
+                                @d.Name <span style="color:#94a3b8;">(@d.DivCode)</span>
+                            </MudCheckBox>
+                        </div>
+                    }
+                </div>
+                <MudText Typo="Typo.caption" Class="mt-1" Style="color:#64748b;">
+                    @_pickedDivs.Count selected
+                </MudText>
+            </MudItem>
+        </MudGrid>
+
+        @if (_pickedStores.Count > 0 && _pickedDivs.Count > 0)
+        {
+            var pairCount = _pickedStores.Count * _pickedDivs.Count;
+            <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                Will deactivate <strong>@pairCount</strong> (Store × Division) combination(s).
+                After saving, re-run EOM Generate to apply.
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Error" Variant="Variant.Filled" DropShadow="false"
+                   Disabled="@(_pickedStores.Count == 0 || _pickedDivs.Count == 0)"
+                   OnClick="Save">
+            Deactivate
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private MudDialogInstance Dialog { get; set; } = default!;
+    [Parameter] public string Country { get; set; } = "";
+    [Parameter] public List<(string StoreID, string Name)>  Stores    { get; set; } = new();
+    [Parameter] public List<(int DivCode, string Name)>     Divisions { get; set; } = new();
+    [Parameter] public HashSet<(string StoreID, int DivCode)> Existing { get; set; } = new();
+
+    private HashSet<string> _pickedStores = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<int>    _pickedDivs   = new();
+    private string _storeFilter = "";
+    private string _divFilter   = "";
+
+    private IEnumerable<(string StoreID, string Name)> FilteredStores
+        => string.IsNullOrWhiteSpace(_storeFilter)
+            ? Stores.OrderBy(s => s.StoreID)
+            : Stores.Where(s =>
+                    s.StoreID.Contains(_storeFilter, StringComparison.OrdinalIgnoreCase) ||
+                    (s.Name ?? "").Contains(_storeFilter, StringComparison.OrdinalIgnoreCase))
+                  .OrderBy(s => s.StoreID);
+
+    private IEnumerable<(int DivCode, string Name)> FilteredDivisions
+        => string.IsNullOrWhiteSpace(_divFilter)
+            ? Divisions.OrderBy(d => d.Name)
+            : Divisions.Where(d =>
+                    (d.Name ?? "").Contains(_divFilter, StringComparison.OrdinalIgnoreCase) ||
+                    d.DivCode.ToString().Contains(_divFilter))
+                  .OrderBy(d => d.Name);
+
+    private void ToggleStore(string storeId, bool on)
+    {
+        if (on) _pickedStores.Add(storeId);
+        else    _pickedStores.Remove(storeId);
+    }
+    private void ToggleDiv(int divCode, bool on)
+    {
+        if (on) _pickedDivs.Add(divCode);
+        else    _pickedDivs.Remove(divCode);
+    }
+
+    private void Save()
+    {
+        var pairs = (from s in _pickedStores
+                     from d in _pickedDivs
+                     select (StoreID: s, DivCode: d)).ToList();
+        Dialog.Close(DialogResult.Ok(pairs));
+    }
+    private void Cancel() => Dialog.Cancel();
+}

@@ -1,0 +1,697 @@
+@page "/lpm/eom/generate"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@using LpmSim.Data.Eom
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject EomCalculator Eom
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>EOM Generate</PageTitle>
+
+<div class="lpm-page-title">EOM Generate</div>
+<div class="lpm-page-subtitle">
+    Run the end-of-month calculation for a country. The engine applies the 6-step logic from the spec and
+    writes results to <code>LPM_EOM_Output</code>. A preview is shown before anything is committed.
+</div>
+
+<MudExpansionPanels Elevation="0" Class="mb-3">
+    <MudExpansionPanel Text="Column logic — how each column is computed" Icon="@Icons.Material.Filled.Info">
+        <div style="font-size:0.86rem;line-height:1.55;color:#1f2937;">
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:18%;">Column</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">Formula / Source</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Store</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Active stores from <code>DataSettings</code> for the selected Country (<code>ActiveStore = 'Y'</code>).</td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Division</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Division name from <code>Division.DivCode → Division.Division</code>. The grid produces one row per <code>(Store, Division)</code> pair.</td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Wt Avg Sold</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Per-period (monthly) weighted average</strong> of historical sold quantity
+                            over the periods configured in <code>LPM_MonthlyWeight</code>:
+                            <br/>
+                            <code>Wt Avg Sold Qty = SUM( SoldQty(p) × WeightPct(p) ) ÷ N</code>
+                            <br/>
+                            where <code>N = COUNT of periods p in LPM_MonthlyWeight with WeightPct &gt; 0</code>.
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                We divide by the period count <strong>N</strong>, NOT by
+                                <code>SUM(WeightPct)</code>. The result is the average monthly weighted SoldQty,
+                                already on a per-period scale — easier to compare across runs that use a
+                                different number of weighting periods.
+                            </span>
+                            <br/>
+                            <strong>Worked example.</strong> 3 periods, weights 0.2 / 0.3 / 0.5:
+                            <table style="margin-top:.3rem;font-size:.82rem;border-collapse:collapse;">
+                                <tr style="background:#f1f5f9;">
+                                    <th style="padding:3px 8px;border:1px solid #e2e8f0;">Period</th>
+                                    <th style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">SoldQty</th>
+                                    <th style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">WeightPct</th>
+                                    <th style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">SoldQty × Wt</th>
+                                </tr>
+                                <tr><td style="padding:3px 8px;border:1px solid #e2e8f0;">Nov-25</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">200</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">0.20</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">40</td></tr>
+                                <tr><td style="padding:3px 8px;border:1px solid #e2e8f0;">Dec-25</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">300</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">0.30</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">90</td></tr>
+                                <tr><td style="padding:3px 8px;border:1px solid #e2e8f0;">Jan-26</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">500</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">0.50</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">250</td></tr>
+                                <tr style="font-weight:600;background:#fef9c3;">
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;">SUM</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">—</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">1.00</td>
+                                    <td style="padding:3px 8px;border:1px solid #e2e8f0;text-align:right;">380</td></tr>
+                            </table>
+                            <code>Wt Avg Sold = 380 ÷ 3 = 126.67</code>
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Wt Avg Turn</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Same recipe applied to <code>TurnsQty</code>:
+                            <br/>
+                            <code>Wt Avg Turn = SUM( TurnsQty(p) × WeightPct(p) ) ÷ N</code>
+                            <br/>
+                            where <code>N</code> = count of periods with <code>WeightPct &gt; 0</code>.
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Pri Rank</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Per-Division priority — derived from two intermediate ranks.
+                            Each rank is computed using <strong>competition ranking</strong>
+                            (ties share a rank, next distinct value skips), and is <strong>only assigned when the source value is &gt; 0</strong>;
+                            stores with a zero source value get rank = 0 (no rank).
+                            <ul style="margin:.3rem 0 .3rem 1.1rem;">
+                                <li><code>SoldQtyRank</code> — rank by <code>Wt Avg Sold</code> <strong>desc</strong> (highest seller = 1) — applied only where <code>Wt Avg Sold &gt; 0</code>.</li>
+                                <li><code>TurnsRank</code> — rank by <code>Wt Avg Turn</code> <strong>asc</strong> (lowest turn = 1) — applied only where <code>Wt Avg Turn &gt; 0</code>.</li>
+                            </ul>
+                            Then:
+                            <ul style="margin:.3rem 0 .3rem 1.1rem;">
+                                <li>Both &gt; 0 &nbsp;→ &nbsp;<code>PriorityRank = (SoldQtyRank + TurnsRank) / 2</code></li>
+                                <li>Only Sold &gt; 0 &nbsp;→ &nbsp;<code>PriorityRank = SoldQtyRank</code></li>
+                                <li>Only Turn &gt; 0 &nbsp;→ &nbsp;<code>PriorityRank = TurnsRank</code></li>
+                                <li>Both = 0 &nbsp;→ &nbsp;<code>PriorityRank = 0</code> &nbsp;(no historical signal — store is unranked)</li>
+                            </ul>
+                            Lower number = higher priority. SIM Generate fills the Division by <code>PriorityRank ASC</code>,
+                            tiebreak <code>Wt Avg Sold DESC</code>.
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Grade</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Per-Division grade bucket. Within each Division, ranked stores are ordered by
+                            <code>PriorityRank ASC, Wt Avg Sold DESC</code> and bucketed by <code>LPM_StoreGrade.SharePct</code>
+                            (e.g. top 20% → Grade A, next 30% → Grade B, …). Each grade carries a <code>MarkupPct</code>
+                            that <strong>reduces</strong> <code>Tgt Turn</code> via <code>× (1 − MarkupPct)</code> — premium
+                            grades get a lower turn target.
+                            <br/><strong>Stores with <code>PriorityRank = 0</code> are skipped</strong> — they have no
+                            historical signal (both <code>Wt Avg Sold</code> and <code>Wt Avg Turn</code> are zero), so they
+                            stay unranked: <code>Grade</code> = blank, no markup, <code>Tgt Sales = 0</code> and <code>Tgt EOM = 0</code>.
+                            SIM Generate doesn't allocate to them anyway (zero EOM headroom).
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Tgt Turn</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <code>Tgt Turn = LPM_Planned.PlannedTurn × (1 − Grade.MarkupPct)</code>
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                Starts from the per-Division <code>PlannedTurn</code> (keyed on Country + DivCode +
+                                Year + Month) and reduces it by the store's grade-specific markup, so premium
+                                grades get a lower (slower) turn target. Example: <code>PlannedTurn = 4.0</code>,
+                                <code>MarkupPct = 0.10</code> → <code>Tgt Turn = 3.6</code>.
+                                <br/>
+                                When the store has no Grade (or the Grade isn't in <code>LPM_StoreGrade</code>),
+                                <code>MarkupPct</code> defaults to 0, so <code>Tgt Turn = PlannedTurn</code>.
+                                <code>Wt Avg Turn</code> is <strong>not</strong> the base — it's only used in
+                                <code>TurnsRank</code> for the priority calculation.
+                            </span>
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Tgt Sales</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Per-Division <code>LPM_Planned.PlannedSalesQty</code> (keyed on Country + DivCode +
+                            Year + Month) apportioned across the stores in that Division by their share of
+                            the Division's weighted-average sales:
+                            <br/>
+                            <code>Tgt Sales = (Wt Avg Sold / Σ Wt Avg Sold in Division) × PlannedSalesQty</code>
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                Note: <code>Grade.SharePct</code> and <code>VolumeGroup.SharePct</code> do
+                                <strong>not</strong> appear in this formula. SharePct is used only to
+                                <em>bucket</em> stores into Grades (Step 2) and Volume Groups (Step 5);
+                                Grade then influences <code>Tgt Turn</code> via <code>MarkupPct</code>,
+                                and Volume Group drives the SKU Max range lookup. Neither shrinks
+                                <code>Tgt Sales</code>. This way, <code>Σ Tgt Sales</code> across the
+                                Division reconciles back to <code>PlannedSalesQty</code>.
+                            </span>
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Tgt EOM</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Per-store end-of-month target stock</strong>, computed in two steps so the
+                            Division total reconciles back to the plan:
+                            <ol style="margin:.3rem 0 .3rem 1.2rem;padding-left:0;">
+                                <li>
+                                    <code>Initial[store] = (Tgt Turn × Tgt Sales) / weeksInMonth</code>
+                                    <span style="color:#64748b;"> — a weeks-of-cover approximation per store.</span>
+                                </li>
+                                <li>
+                                    <code>Tgt EOM[store] = (Initial[store] / Σ Initial in Division) × LPM_Planned.PlannedEOM</code>
+                                    <span style="color:#64748b;"> — proportional re-distribution so
+                                        <code>Σ Tgt EOM(Division) = PlannedEOM(Division)</code>.</span>
+                                </li>
+                            </ol>
+                            <code>weeksInMonth = max(1, DaysInMonth / 7)</code> (e.g. 4 for a 31-day month).
+                            <br/>
+                            <strong>SIM use:</strong> this is the hard cap SIM Generate honours when filling boxes —
+                            the per-store EOM headroom is <code>TargetEOM − DivSOH</code>; SIM stops adding to a
+                            (Store, Div) the moment cumulative allocation reaches that.
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                Why <em>not</em> simply <code>Tgt Sales × Tgt Turn</code>: that yields a per-store
+                                stock estimate but doesn't add up to the planned <code>PlannedEOM</code> at the
+                                Division level. The two-step proportional split above guarantees reconciliation.
+                            </span>
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Vol Grp</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Per-Division volume-group bucket. Stores in each Division are sorted by
+                            <code>Tgt EOM DESC</code> and bucketed by <code>LPM_VolumeGroup.SharePct</code>
+                            (top X% → Group A, next Y% → Group B, …).
+                            <br/>
+                            <strong>Used only for the <code>SKU Max</code> rule lookup</strong> — the
+                            <code>(Country, DivCode, GroupCode, WHStock range)</code> key picks the per-item cap.
+                            It does <strong>not</strong> appear in <code>Tgt Sales</code> or <code>Tgt EOM</code>;
+                            both of those have already been computed by Step 4.
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>WH Summer / WH Winter</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Eligible warehouse stock per Division, computed <strong>live from <code>racks.dbo.whboxitems</code></strong>
+                            using the same eligibility filters SIM Generate uses:
+                            <ul style="margin:.3rem 0 .3rem 1.1rem;">
+                                <li><code>pt.PalletCategory = 'ELIGIBLE'</code></li>
+                                <li><code>ShopEligible &lt;&gt; 'E'</code></li>
+                                <li><strong>LPM</strong>: <code>LPMDt</code> set AND year/month on or before run period &nbsp;·&nbsp;
+                                    <strong>Non-LPM</strong>: <code>LPMDt IS NULL</code> &nbsp;(both included)</li>
+                            </ul>
+                            Split by <code>pallettype.Season</code>: <code>'W'</code> → Winter column, otherwise Summer.
+                            Item → Division comes from <code>Datareporting.upc_subclass × subclassmaster × Division</code>
+                            (<code>MIN(DivCode)</code> per item — same rule SIM uses).
+                            <br/>The legacy <code>LPM_WHStock</code> table is no longer consulted by EOM. The combined
+                            value <code>WHStock = Summer + Winter</code> still drives the SKU Max range lookup below.
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>SKU Max</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            From <code>LPM_SKUMaxRule</code> matched on <code>(Country, VolumeGroup, DivCode)</code>. Per-(Store, Item) cap inside SIM Generate (<code>SKUMax − SOH − cumulative allocated</code>).
+                            <br/>
+                            <strong>Override:</strong> any (Country, Store, Division) row in <code>LPM_StoreDivAccess</code>
+                            with <code>IsActive = 0</code> forces <code>SKUMax = 0</code> for that combination, so SIM cannot
+                            allocate the division's items to that store. Manage these on
+                            <strong>Planning Config → Store / Division Access</strong>; re-run EOM Generate to apply changes.
+                        </td></tr>
+                </tbody>
+            </table>
+
+            <div style="margin-top:0.75rem;padding:0.6rem 0.8rem;background:#fef9c3;border-radius:6px;border:1px solid #facc15;">
+                <strong>Order of evaluation</strong> — each column is computed in this dependency order so a row's later
+                columns can reuse earlier ones:&nbsp;
+                <code>Store → Division → Wt Avg Sold/Turn → Pri Rank → Grade → Tgt Turn → Vol Grp → Tgt Sales → Tgt EOM → SKU Max</code>.
+                <br/>SIM Generate then consumes <code>Tgt EOM</code> (hard cap), <code>Pri Rank</code> (fill order),
+                and <code>SKU Max</code> (per-store-item cap) from this output.
+            </div>
+        </div>
+    </MudExpansionPanel>
+</MudExpansionPanels>
+
+<div class="lpm-section">
+    <MudGrid Spacing="3">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await CheckAsync(); }"
+                       Variant="Variant.Outlined" Clearable="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" md="2">
+            <MudNumericField T="int" Label="Year" Value="_year"
+                             ValueChanged="async (int v) => { _year = v; await CheckAsync(); }"
+                             Min="2020" Max="2100" Variant="Variant.Outlined" />
+        </MudItem>
+        <MudItem xs="6" md="2">
+            <MudSelect T="int" Label="Month" Value="_month"
+                       ValueChanged="async (int v) => { _month = v; await CheckAsync(); }"
+                       Variant="Variant.Outlined">
+                @for (int m = 1; m <= 12; m++)
+                {
+                    var mv = m;
+                    <MudSelectItem Value="mv">@(new DateTime(2000, mv, 1).ToString("MMM")) (@mv)</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="5" Class="d-flex justify-end gap-2 flex-wrap">
+            <MudButton Variant="Variant.Outlined" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Refresh"
+                       Disabled="@(string.IsNullOrEmpty(_country))" OnClick="CheckAsync">
+                Re-check
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Color="Color.Tertiary" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.History"
+                       Disabled="@(string.IsNullOrEmpty(_country) || _running)"
+                       OnClick="ViewSavedAsync">
+                View Saved
+            </MudButton>
+            <MudButton Variant="Variant.Filled" Color="Color.Secondary" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Visibility"
+                       Disabled="@(_readiness?.IsReady != true || _running)"
+                       OnClick="PreviewAsync">
+                Preview
+            </MudButton>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.PlayArrow"
+                       Disabled="@(_readiness?.IsReady != true || _running)"
+                       OnClick="GenerateAsync">
+                Generate
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_running)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_readiness is not null)
+{
+    <div class="lpm-section-title mb-2">Input readiness</div>
+    <MudGrid Spacing="2" Class="mb-3">
+        @foreach (var item in _readiness.All)
+        {
+            <MudItem xs="12" sm="6" md="4" lg="3">
+                <div class="lpm-metric-card @(item.Ok ? "lpm-accent-green" : "lpm-accent-rose")">
+                    <div class="d-flex align-center justify-space-between">
+                        <div class="lpm-metric-label">@item.Label</div>
+                        @if (item.Ok)
+                        {
+                            <span class="lpm-status lpm-status-ok">
+                                <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Size="Size.Small" /> Ready
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="lpm-status lpm-status-err">
+                                <MudIcon Icon="@Icons.Material.Filled.ErrorOutline" Size="Size.Small" /> Blocked
+                            </span>
+                        }
+                    </div>
+                    <div class="lpm-metric-sub" style="margin-top:0.5rem;">@item.Detail</div>
+                </div>
+            </MudItem>
+        }
+    </MudGrid>
+
+    @if (!_readiness.IsReady)
+    {
+        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-3">
+            Resolve the <strong>Blocked</strong> items above before previewing or generating.
+        </MudAlert>
+    }
+}
+
+@if (_preview.Count > 0)
+{
+    <div class="lpm-section-title mb-2 d-flex align-center gap-2">
+        <span>@_previewLabel &mdash; @_preview.Count rows</span>
+        @if (_savedAt is not null)
+        {
+            <span class="lpm-status lpm-status-ok">
+                <MudIcon Icon="@Icons.Material.Filled.History" Size="Size.Small" />
+                Generated @_savedAt?.ToString("yyyy-MM-dd HH:mm")
+            </span>
+        }
+        else
+        {
+            <span class="lpm-status lpm-status-warn">
+                <MudIcon Icon="@Icons.Material.Filled.Visibility" Size="Size.Small" />
+                Live preview &mdash; not saved
+            </span>
+        }
+    </div>
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Stores</div>
+            <div class="lpm-metric-value">@_preview.Select(r => r.StoreID).Distinct().Count()</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">Divisions</div>
+            <div class="lpm-metric-value">@_preview.Select(r => r.DivCode).Distinct().Count()</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">Total Target Sales</div>
+            <div class="lpm-metric-value">@_preview.Sum(r => r.TargetSales).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-cyan">
+            <div class="lpm-metric-label">Total Target EOM</div>
+            <div class="lpm-metric-value">@_preview.Sum(r => r.TargetEOM).ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <div class="lpm-section">
+        <MudGrid Spacing="2" Class="mb-2">
+            <MudItem xs="12" md="3">
+                <MudSelect T="int" Label="Filter Division" @bind-Value="_filterDiv" Variant="Variant.Outlined">
+                    <MudSelectItem T="int" Value="0">All Divisions</MudSelectItem>
+                    @foreach (var d in _preview.Select(r => (r.DivCode, r.DivisionName)).Distinct().OrderBy(x => x.DivCode))
+                    {
+                        <MudSelectItem T="int" Value="d.DivCode">@d.DivisionName</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="4">
+                <MudAutocomplete T="string" Label="Filter Store"
+                                 Value="_filterStore"
+                                 ValueChanged="OnStoreFilterChanged"
+                                 SearchFunc="SearchStores"
+                                 Variant="Variant.Outlined"
+                                 CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                                 Placeholder="All stores" />
+            </MudItem>
+        </MudGrid>
+
+        @{
+            // Totals across whatever the filter currently shows. Average columns
+            // (Wt Avg Turn, Pri Rank, Tgt Turn) skip the totals row — summing
+            // averages doesn't mean anything.
+            var fp           = FilteredPreview.ToList();
+            var totalSold    = fp.Sum(r => (long)r.WtAvgSoldQty);
+            var totalTgtSales= fp.Sum(r => (long)r.TargetSales);
+            var totalTgtEom  = fp.Sum(r => (long)r.TargetEOM);
+            var totalSkuMax  = fp.Sum(r => (long)r.SKUMax);
+            var rowCount     = fp.Count;
+
+            // WH Summer / Winter are per-DIVISION values repeated on every
+            // store row inside that division, so a flat Sum() multiplies the
+            // real warehouse stock by the store count. Group by DivCode and
+            // take the value once per division to get the actual stock totals
+            // visible in the current filter.
+            var wsBySeason   = fp.GroupBy(r => r.DivCode)
+                                 .Select(g => new { Summer = g.First().WHStockSummer,
+                                                    Winter = g.First().WHStockWinter })
+                                 .ToList();
+            var totalWhSummer = wsBySeason.Sum(x => (long)x.Summer);
+            var totalWhWinter = wsBySeason.Sum(x => (long)x.Winter);
+        }
+
+        <MudTable T="EomRow" Items="fp" Hover="true" Striped="true" Dense="true"
+                  FixedHeader="true" Height="65vh" AllowUnsorted="false"
+                  Class="lpm-eom-preview">
+            @* Each header label carries a `title` attribute → hovering it
+               shows the formula that produces the column. The HTML entity
+               `&#10;` renders as a line break in the native browser tooltip,
+               so multi-step formulas split cleanly. The long-form
+               explanation lives in the expansion panel above. *@
+            <HeaderContent>
+                <MudTh Style="width:11%;"><div class="th-total">@rowCount.ToString("N0") rows</div><span title="Source: db.DataSettings&#10;Filter: ActiveStore = 'Y' AND Country = @@country">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:9%;"><div class="th-total">&nbsp;</div><span title="Source: dbo.Division&#10;One row per (Store × Division) pair">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:6%;"><div class="th-total">@totalSold.ToString("N0")</div><span title="Wt Avg Sold Qty[store, div]  (per-period monthly average)&#10;= SUM( SoldQty(p) × WeightPct(p) )  /  N&#10;where N = COUNT of periods p in LPM_MonthlyWeight with WeightPct > 0.&#10;Example: 3 periods, weights 0.2/0.3/0.5, qty 200/300/500&#10;→ (40 + 90 + 250) / 3 = 126.67">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.WtAvgSoldQty">Wt<br />Avg<br />Sold</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="Wt Avg Turn[store, div]  (per-period monthly average)&#10;= SUM( TurnsQty(p) × WeightPct(p) )  /  N&#10;where N = COUNT of periods p in LPM_MonthlyWeight with WeightPct > 0.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.WtAvgTurn">Wt<br />Avg<br />Turn</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div><span title="SoldQtyRank = competition rank of Wt Avg Sold DESC within the Division&#10;(highest seller = 1, ties share)&#10;If Wt Avg Sold = 0 → rank = 0 (unranked)">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.SoldQtyRank">Sold<br />Qty<br />Rank</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div><span title="TurnsRank = competition rank of Wt Avg Turn ASC within the Division&#10;(lowest turn = 1, ties share)&#10;If Wt Avg Turn = 0 → rank = 0 (unranked)">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.TurnsRank">Turns<br />Rank</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="PriorityRank — depends on which ranks apply:&#10;• Both > 0 → (SoldQtyRank + TurnsRank) ÷ 2&#10;• Only Sold > 0 → SoldQtyRank&#10;• Only Turn > 0 → TurnsRank&#10;• Both = 0 → 0 (unranked, skipped from Grade bucketing)&#10;Lower number = higher SIM priority">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.PriorityRank">Pri<br />Rank</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="Per-Division grade bucket&#10;Stores with PriorityRank > 0 are sorted by PriorityRank ASC, Wt Avg Sold DESC&#10;Bucketed by LPM_StoreGrade.SharePct (top SharePct → first grade, etc.)&#10;PriorityRank = 0 → Grade stays blank (no allocation)">Grade</span></MudTh>
+
+                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="Tgt Turn = LPM_Planned.PlannedTurn × (1 − Grade.MarkupPct)&#10;Higher MarkupPct → lower Tgt Turn (premium grades turn slower)&#10;Blank Grade → MarkupPct = 0 → Tgt Turn = PlannedTurn">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.TargetTurn">Tgt<br />Turn</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:8%;"><div class="th-total">@totalTgtSales.ToString("N0")</div><span title="Tgt Sales[store] = (Wt Avg Sold[store] ÷ Σ Wt Avg Sold across stores in the Division) × LPM_Planned.PlannedSalesQty&#10;Σ Tgt Sales over the Division = LPM_Planned.PlannedSalesQty (reconciles)">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.TargetSales">Tgt<br />Sales</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:8%;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="Tgt EOM is computed in two steps so the Division total reconciles to the plan:&#10;1) Initial[store] = (Tgt Turn × Tgt Sales) ÷ weeksInMonth&#10;2) Tgt EOM[store] = (Initial[store] ÷ Σ Initial across stores in the Division) × LPM_Planned.PlannedEOM&#10;weeksInMonth = max(1, DaysInMonth ÷ 7)">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.TargetEOM">Tgt<br />EOM</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="Per-Division volume group&#10;Stores in the Division sorted by Tgt EOM DESC, then bucketed by LPM_VolumeGroup.SharePct&#10;Used ONLY for the SKU Max range lookup — does NOT change Tgt Sales / Tgt EOM">Vol<br />Grp</span></MudTh>
+
+                <MudTh Style="width:6%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhSummer.ToString("N0")</div><span title="WH Summer per Division&#10;= SUM(racks.dbo.whboxitems.Qty) for items mapped to this Division where:&#10;• pt.PalletCategory = 'ELIGIBLE'&#10;• ShopEligible <> 'E'&#10;• LPMDt is set AND year/month ≤ run period, OR LPMDt IS NULL&#10;• ISNULL(pt.Season,'') ≠ 'W'  (Summer side)">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.WHStockSummer">WH<br />Summer</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:6%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhWinter.ToString("N0")</div><span title="WH Winter per Division&#10;Same eligibility filters as WH Summer, but ISNULL(pt.Season,'') = 'W'">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.WHStockWinter">WH<br />Winter</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total">@totalSkuMax.ToString("N0")</div><span title="SKU Max — per-(Store, Item) cap inside SIM Generate&#10;Lookup: LPM_SKUMaxRule WHERE Country=@@country AND DivCode=@@div AND GroupCode=Vol Grp AND (WH Summer + WH Winter) BETWEEN WHStockFrom AND WHStockTo&#10;Override: any LPM_StoreDivAccess row with IsActive = 0 forces SKU Max = 0 for that (Store, Div)">SKU<br />Max</span></MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>
+                    <div style="font-weight:500;"><code>@context.StoreID</code></div>
+                    <MudText Typo="Typo.caption" Color="Color.Secondary">@context.StoreName</MudText>
+                </MudTd>
+                <MudTd>@context.DivisionName</MudTd>
+                <MudTd>@context.WtAvgSoldQty.ToString("N0")</MudTd>
+                <MudTd>@context.WtAvgTurn.ToString("N1")</MudTd>
+                <MudTd>@context.SoldQtyRank</MudTd>
+                <MudTd>@context.TurnsRank</MudTd>
+                <MudTd title="@($"({context.SoldQtyRank} + {context.TurnsRank}) / 2")">@context.PriorityRank.ToString("0.#")</MudTd>
+                <MudTd><MudChip T="string" Size="Size.Small" Color="Color.Primary">@context.Grade</MudChip></MudTd>
+                <MudTd>@context.TargetTurn.ToString("N1")</MudTd>
+                <MudTd>@context.TargetSales.ToString("N0")</MudTd>
+                <MudTd>@context.TargetEOM.ToString("N0")</MudTd>
+                <MudTd><MudChip T="string" Size="Size.Small" Color="Color.Info">@context.VolumeGroup</MudChip></MudTd>
+                <MudTd>@context.WHStockSummer.ToString("N0")</MudTd>
+                <MudTd>@context.WHStockWinter.ToString("N0")</MudTd>
+                <MudTd>@context.SKUMax</MudTd>
+            </RowTemplate>
+            <PagerContent>
+                <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+            </PagerContent>
+        </MudTable>
+    </div>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private int _year = DateTime.Today.Year;
+    private int _month = DateTime.Today.Month;
+
+    private EomReadiness? _readiness;
+    private List<EomRow> _preview = new();
+    private bool _running;
+
+    private int _filterDiv;
+    private string _filterStore = "";
+    private string _previewLabel = "Preview";
+    private DateTime? _savedAt;
+
+    private IEnumerable<EomRow> FilteredPreview
+    {
+        get
+        {
+            IEnumerable<EomRow> q = _preview;
+            if (_filterDiv > 0) q = q.Where(r => r.DivCode == _filterDiv);
+            if (!string.IsNullOrWhiteSpace(_filterStore))
+            {
+                // _filterStore is normalised by OnStoreFilterChanged to JUST the
+                // StoreID part (the em-dash is stripped at the moment the user
+                // picks a value from the autocomplete). So filtering is simply
+                // a Contains/Equals on StoreID or a Contains on StoreName.
+                var f = _filterStore.Trim();
+                q = q.Where(r =>
+                    r.StoreID.Contains(f, StringComparison.OrdinalIgnoreCase) ||
+                    r.StoreName.Contains(f, StringComparison.OrdinalIgnoreCase));
+            }
+            return q;
+        }
+    }
+
+    /// <summary>
+    /// Normalise the autocomplete value: when the user picks a suggestion like
+    /// "BFL DXB Shopping center  (BFL-DXB)", extract the StoreID from inside
+    /// the trailing parentheses and store ONLY that. When the user types free
+    /// text (no parens), store as-is.
+    /// This way <see cref="FilteredPreview"/> filters with a simple Contains.
+    /// </summary>
+    private void OnStoreFilterChanged(string? v)
+    {
+        if (string.IsNullOrWhiteSpace(v)) { _filterStore = ""; }
+        else
+        {
+            var s = v.Trim();
+            // Pull out the "(BFL-DXB)" suffix if present.
+            var open  = s.LastIndexOf('(');
+            var close = s.LastIndexOf(')');
+            if (open >= 0 && close > open && close == s.Length - 1)
+                _filterStore = s.Substring(open + 1, close - open - 1).Trim();
+            else
+                _filterStore = s;
+        }
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Returns suggestions formatted as "BFL DXB Shopping center  (BFL-DXB)" so
+    /// the human-friendly store NAME is what the planner reads first; the
+    /// StoreID is shown in parentheses for disambiguation when multiple stores
+    /// share a similar name. Both fields are searchable.
+    /// </summary>
+    private Task<IEnumerable<string>> SearchStores(string? value, CancellationToken ct)
+    {
+        var all = _preview
+            .Select(r => $"{r.StoreName}  ({r.StoreID})")
+            .Distinct()
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<string>>(all.Take(50));
+        return Task.FromResult<IEnumerable<string>>(all
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase))
+            .Take(50));
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+
+        // Default to the latest saved month: prefer generated LPM_EOM_Output;
+        // fall back to the latest monthly-weight run configured for this country.
+        var latestOut = await db.LpmEomOutputs.AsNoTracking()
+            .Where(e => e.Country == _country)
+            .OrderByDescending(e => e.Year1).ThenByDescending(e => e.Month1)
+            .Select(e => new { e.Year1, e.Month1 })
+            .FirstOrDefaultAsync();
+        if (latestOut is not null)
+        {
+            _year = latestOut.Year1; _month = latestOut.Month1;
+        }
+        else
+        {
+            var latestW = await db.LpmMonthlyWeights.AsNoTracking()
+                .Where(w => w.Country == _country)
+                .OrderByDescending(w => w.RunYear).ThenByDescending(w => w.RunMonth)
+                .Select(w => new { w.RunYear, w.RunMonth })
+                .FirstOrDefaultAsync();
+            if (latestW is not null) { _year = latestW.RunYear; _month = latestW.RunMonth; }
+        }
+
+        if (!string.IsNullOrEmpty(_country)) await CheckAsync();
+    }
+
+    private async Task CheckAsync()
+    {
+        _preview.Clear();
+        _savedAt = null;
+        _readiness = null;
+        if (string.IsNullOrEmpty(_country)) { StateHasChanged(); return; }
+
+        _running = true; StateHasChanged();
+        try
+        {
+            _readiness = await Eom.CheckAsync(_country, _year, _month);
+            // Auto-load any saved EOM output for this scope so user sees it immediately.
+            var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
+            if (rows.Count > 0)
+            {
+                _preview = rows;
+                _savedAt = last;
+                _previewLabel = "Saved Output";
+            }
+        }
+        finally { _running = false; StateHasChanged(); }
+    }
+
+    private async Task PreviewAsync()
+    {
+        _running = true; _preview.Clear(); StateHasChanged();
+        try
+        {
+            _preview = await Eom.PreviewAsync(_country, _year, _month);
+            _previewLabel = "Live Preview";
+            _savedAt = null;
+            Snackbar.Add($"Preview ready: {_preview.Count} rows (not yet saved).", Severity.Info);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Preview failed: {ex.Message}", Severity.Error);
+        }
+        finally { _running = false; StateHasChanged(); }
+    }
+
+    private async Task ViewSavedAsync()
+    {
+        _running = true; _preview.Clear(); StateHasChanged();
+        try
+        {
+            var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
+            _preview = rows;
+            _savedAt = last;
+            _previewLabel = "Saved Output";
+            if (rows.Count == 0)
+                Snackbar.Add($"No saved EOM output for {_country} {_year}/{_month:D2}. Click Generate first.", Severity.Info);
+            else
+                Snackbar.Add($"Loaded {rows.Count:N0} saved rows.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load saved failed: {ex.Message}", Severity.Error);
+        }
+        finally { _running = false; StateHasChanged(); }
+    }
+
+    private async Task GenerateAsync()
+    {
+        var ok = await DialogService.ShowMessageBox("Generate EOM",
+            $"This will REPLACE any existing LPM_EOM_Output rows for {_country} {_year}/{_month:D2}. Continue?",
+            yesText: "Generate", cancelText: "Cancel");
+        if (ok != true) return;
+
+        _running = true; StateHasChanged();
+        try
+        {
+            var count = await Eom.GenerateAsync(_country, _year, _month, CurrentUser.Name);
+            Snackbar.Add($"Generated {count} rows for {_country} {_year}/{_month:D2}.", Severity.Success);
+            var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
+            _preview = rows;
+            _savedAt = last;
+            _previewLabel = "Saved Output";
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Generate failed: {ex.Message}", Severity.Error);
+        }
+        finally { _running = false; StateHasChanged(); }
+    }
+}

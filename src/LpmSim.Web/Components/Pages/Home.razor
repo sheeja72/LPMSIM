@@ -1,0 +1,64 @@
+@page "/"
+
+<PageTitle>LPM SIM</PageTitle>
+
+<MudText Typo="Typo.h3" Class="mb-2">LPM SIM</MudText>
+<MudText Typo="Typo.subtitle1" Color="Color.Secondary" Class="mb-6">Internal LPM simulator &amp; data entry.</MudText>
+
+<AuthorizeView>
+    <Authorized>
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-4">
+            Signed in as <strong>@context.User.Identity?.Name</strong>.
+        </MudAlert>
+    </Authorized>
+</AuthorizeView>
+
+<MudGrid>
+    <MudItem xs="12" md="6" lg="4">
+        <MudCard Elevation="3">
+            <MudCardContent>
+                <MudIcon Icon="@Icons.Material.Filled.GridOn" Color="Color.Primary" Size="Size.Large" />
+                <MudText Typo="Typo.h6" Class="mt-2">Division Max Entry</MudText>
+                <MudText Typo="Typo.body2" Color="Color.Secondary">
+                    Enter max quantities per store and division.
+                </MudText>
+            </MudCardContent>
+            <MudCardActions>
+                <MudButton Href="lpm/div-max" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
+            </MudCardActions>
+        </MudCard>
+    </MudItem>
+
+    <AuthorizeView Roles="Admin" Context="adminCtx">
+        <Authorized>
+            <MudItem xs="12" md="6" lg="4">
+                <MudCard Elevation="3">
+                    <MudCardContent>
+                        <MudIcon Icon="@Icons.Material.Filled.People" Color="Color.Primary" Size="Size.Large" />
+                        <MudText Typo="Typo.h6" Class="mt-2">User Access</MudText>
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">
+                            Manage who can sign in and what they can do.
+                        </MudText>
+                    </MudCardContent>
+                    <MudCardActions>
+                        <MudButton Href="admin/users" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
+                    </MudCardActions>
+                </MudCard>
+            </MudItem>
+            <MudItem xs="12" md="6" lg="4">
+                <MudCard Elevation="3">
+                    <MudCardContent>
+                        <MudIcon Icon="@Icons.Material.Filled.History" Color="Color.Primary" Size="Size.Large" />
+                        <MudText Typo="Typo.h6" Class="mt-2">Audit Log</MudText>
+                        <MudText Typo="Typo.body2" Color="Color.Secondary">
+                            Every insert, update, and delete across the app.
+                        </MudText>
+                    </MudCardContent>
+                    <MudCardActions>
+                        <MudButton Href="admin/audit" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
+                    </MudCardActions>
+                </MudCard>
+            </MudItem>
+        </Authorized>
+    </AuthorizeView>
+</MudGrid>

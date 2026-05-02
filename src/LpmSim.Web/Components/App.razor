@@ -1,0 +1,35 @@
+@inject Microsoft.Extensions.Configuration.IConfiguration Cfg
+@{
+    // OIDC mode → real Entra sign-out; otherwise show the local "Signed out"
+    // lock screen (Negotiate can't actually drop Windows credentials).
+    var signOutUrl = string.Equals(Cfg["Auth:Mode"]?.Trim(), "OIDC",
+                        StringComparison.OrdinalIgnoreCase)
+        ? "/MicrosoftIdentity/Account/SignOut"
+        : "/signed-out";
+}
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="lpm-signout-url" content="@signOutUrl" />
+    <base href="/" />
+    <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
+    <link rel="stylesheet" href="_content/MudBlazor/MudBlazor.min.css" />
+    <link rel="stylesheet" href="@Assets["app.css"]" />
+    <link rel="stylesheet" href="@Assets["LpmSim.Web.styles.css"]" />
+    <ImportMap />
+    <link rel="icon" type="image/png" href="favicon.png" />
+    <HeadOutlet @rendermode="InteractiveServer" />
+</head>
+
+<body>
+    <Routes @rendermode="InteractiveServer" />
+    <script src="_framework/blazor.web.js"></script>
+    <script src="_content/MudBlazor/MudBlazor.min.js"></script>
+    <script src="@Assets["lpm-download.js"]"></script>
+    <script src="@Assets["lpm-idle.js"]"></script>
+</body>
+
+</html>

@@ -1,0 +1,117 @@
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ISnackbar Snackbar
+
+<MudDialog>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudSelect T="string" Value="Model.Country"
+                       ValueChanged="v => Model.Country = v ?? string.Empty"
+                       Label="Country" Variant="Variant.Outlined" Required="true">
+                @foreach (var c in Countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+            <MudSelect T="int" Value="Model.DivCode"
+                       ValueChanged="(int v) => Model.DivCode = v"
+                       Label="Division" Variant="Variant.Outlined" Required="true">
+                @foreach (var d in Divisions)
+                {
+                    <MudSelectItem T="int" Value="d.DivCode">@d.Name</MudSelectItem>
+                }
+            </MudSelect>
+            <MudSelect T="string" Value="Model.GroupCode"
+                       ValueChanged="v => Model.GroupCode = v ?? string.Empty"
+                       Label="Volume Group" Variant="Variant.Outlined" Required="true">
+                @foreach (var g in Groups)
+                {
+                    <MudSelectItem Value="@g.GroupCode">@g.GroupCode</MudSelectItem>
+                }
+            </MudSelect>
+            <MudNumericField T="int" Value="Model.WHStockFrom"
+                             ValueChanged="(int v) => Model.WHStockFrom = v"
+                             Label="WH Stock From" Variant="Variant.Outlined" Min="0" />
+            <MudNumericField T="int" Value="Model.WHStockTo"
+                             ValueChanged="(int v) => Model.WHStockTo = v"
+                             Label="WH Stock To" Variant="Variant.Outlined" Min="0" />
+            <MudNumericField T="int" Value="Model.SKUMax"
+                             ValueChanged="(int v) => Model.SKUMax = v"
+                             Label="SKU Max" Variant="Variant.Outlined" Min="0" />
+            <MudSwitch T="bool" Value="Model.IsActive"
+                       ValueChanged="(bool v) => Model.IsActive = v"
+                       Label="Active" Color="Color.Success" />
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                   OnClick="SaveAsync" Disabled="_saving">
+            @(IsNew ? "Add" : "Save")
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private MudDialogInstance MudDialog { get; set; } = null!;
+
+    [Parameter] public LpmSKUMaxRule Model { get; set; } = new();
+    [Parameter] public List<LpmVolumeGroup> Groups { get; set; } = new();
+    [Parameter] public List<Division> Divisions { get; set; } = new();
+    [Parameter] public List<string> Countries { get; set; } = new();
+    [Parameter] public bool IsNew { get; set; }
+
+    private bool _saving;
+
+    private async Task SaveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Model.Country))
+        {
+            Snackbar.Add("Country is required.", Severity.Error);
+            return;
+        }
+        if (Model.DivCode <= 0)
+        {
+            Snackbar.Add("Division is required.", Severity.Error);
+            return;
+        }
+        if (Model.WHStockTo < Model.WHStockFrom)
+        {
+            Snackbar.Add("WH Stock To must be ≥ From.", Severity.Error);
+            return;
+        }
+        _saving = true;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            if (IsNew)
+            {
+                db.LpmSKUMaxRules.Add(new LpmSKUMaxRule
+                {
+                    Country = Model.Country, DivCode = Model.DivCode,
+                    GroupCode = Model.GroupCode,
+                    WHStockFrom = Model.WHStockFrom, WHStockTo = Model.WHStockTo,
+                    SKUMax = Model.SKUMax, IsActive = Model.IsActive,
+                    CreateTS = DateTime.Now,
+                });
+            }
+            else
+            {
+                var row = await db.LpmSKUMaxRules.FirstAsync(x => x.RuleId == Model.RuleId);
+                row.Country = Model.Country;
+                row.DivCode = Model.DivCode;
+                row.GroupCode = Model.GroupCode;
+                row.WHStockFrom = Model.WHStockFrom;
+                row.WHStockTo = Model.WHStockTo;
+                row.SKUMax = Model.SKUMax;
+                row.IsActive = Model.IsActive;
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add("Saved.", Severity.Success);
+            MudDialog.Close(DialogResult.Ok(true));
+        }
+        catch (Exception ex) { Snackbar.Add($"Save failed: {ex.Message}", Severity.Error); }
+        finally { _saving = false; }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+}

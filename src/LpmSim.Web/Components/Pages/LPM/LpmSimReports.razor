@@ -1,0 +1,319 @@
+@page "/lpm/lpm-sim/reports"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.LpmSim
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject LpmSimReportService Reports
+@inject ISnackbar Snackbar
+
+<PageTitle>LPM SIM Reports</PageTitle>
+
+<div class="lpm-page-title">LPM SIM Reports</div>
+<div class="lpm-page-subtitle">
+    Three views of an LPM SIM batch: EOM-level summary, Box-level allocations, and Item-level details.
+</div>
+
+<div class="lpm-section lpm-filter-bar" style="max-width:1200px;">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="3" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await ReloadBatchesAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="3" md="3">
+            <MudDatePicker Label="SIM Run Date (optional)" Date="_runDate"
+                           DateChanged="OnRunDateChanged"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Clearable />
+        </MudItem>
+        <MudItem xs="12" sm="3" md="3">
+            <MudSelect T="long" Label="Batch No" Value="_batchNo"
+                       ValueChanged="async (long v) => { _batchNo = v; await LoadActiveTabAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @foreach (var b in _batches)
+                {
+                    <MudSelectItem T="long" Value="b.LPMBatchNo">
+                        @($"#{b.LPMBatchNo} · {b.RunDate:yyyy-MM-dd} · {b.Status} · {b.LinesGenerated:N0} lines")
+                    </MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="3" md="2">
+            <MudTextField T="string" Label="Filter Store" Value="_filterStore"
+                          ValueChanged="v => _filterStore = v ?? string.Empty"
+                          Variant="Variant.Outlined" Margin="Margin.Dense" Immediate Clearable />
+        </MudItem>
+        <MudItem xs="12" sm="3" md="2">
+            <MudTextField T="string" Label="Filter Division" Value="_filterDiv"
+                          ValueChanged="v => _filterDiv = v ?? string.Empty"
+                          Variant="Variant.Outlined" Margin="Margin.Dense" Immediate Clearable />
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_busy)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_batchNo == 0)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:1200px;">
+        Pick a country (and optionally a date) to see available batches, then choose one.
+    </MudAlert>
+}
+else
+{
+    <MudTabs Elevation="0" Rounded="true" Border="true"
+             ApplyEffectsToContainer="true" PanelClass="pa-4" Class="mud-paper"
+             ActivePanelIndexChanged="OnTabChanged" Style="max-width:1200px;">
+
+        <MudTabPanel Text="EOM Summary" Icon="@Icons.Material.Filled.Insights">
+            @if (_eomRows.Count > 0)
+            {
+                <MudTable T="EomSummaryRow" Items="FilteredEom" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh>Batch</MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreID">Store ID</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreName">Store Name</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.EOM ?? 0m">EOM</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.Balance ?? 0m">Balance</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.LpmSimQty">LPM SIM Qty</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>#@context.LPMBatchNo</MudTd>
+                        <MudTd><code>@context.StoreID</code></MudTd>
+                        <MudTd>@context.StoreName</MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd>@(context.EOM?.ToString("N0"))</MudTd>
+                        <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd>@(context.Balance?.ToString("N0"))</MudTd>
+                        <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_busy)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No EOM summary rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="SIM Boxes" Icon="@Icons.Material.Filled.Inventory2">
+            <MudSwitch T="bool" Value="_rollupBoxOnly"
+                       ValueChanged="async (bool v) => { _rollupBoxOnly = v; await LoadBoxesAsync(); }"
+                       Color="Color.Primary" Label="Roll up to Box (without Store / Div)" Class="mb-2" />
+
+            @if (_boxRows.Count > 0)
+            {
+                <MudTable T="BoxDetailRow" Items="FilteredBoxes" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh>Batch</MudTh>
+                        @if (!_rollupBoxOnly)
+                        {
+                            <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.StoreID ?? string.Empty">Store</MudTableSortLabel></MudTh>
+                            <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.DivisionName ?? string.Empty">Division</MudTableSortLabel></MudTh>
+                        }
+                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Box Qty</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">Allocated Qty</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.SkuUsabilityPct ?? 0m">SKU Usability %</MudTableSortLabel></MudTh>
+                        <MudTh>Pallet Type</MudTh>
+                        <MudTh>Type Name</MudTh>
+                        <MudTh>Pallet Category</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>#@context.LPMBatchNo</MudTd>
+                        @if (!_rollupBoxOnly)
+                        {
+                            <MudTd>
+                                @if (!string.IsNullOrEmpty(context.StoreID))
+                                {
+                                    <code>@context.StoreID</code>
+                                    <br />
+                                    <MudText Typo="Typo.caption" Color="Color.Secondary">@context.StoreName</MudText>
+                                }
+                            </MudTd>
+                            <MudTd>@context.DivisionName</MudTd>
+                        }
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd>@(context.BoxQty?.ToString("N0"))</MudTd>
+                        <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.SkuUsabilityPct?.ToString("0.0") ?? "—")%</MudTd>
+                        <MudTd>@context.PalletType</MudTd>
+                        <MudTd>@context.TypeName</MudTd>
+                        <MudTd>@context.PalletCategory</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_busy)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No box rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Item Details" Icon="@Icons.Material.Filled.ListAlt">
+            @if (_itemRows.Count > 0)
+            {
+                <MudTable T="ItemDetailRow" Items="FilteredItems" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh>Batch</MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.StoreID">Store</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Itemcode">Item</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">Qty</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SKUMax ?? 0">SKU Max</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.LpmQty">LPM Qty</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>#@context.LPMBatchNo</MudTd>
+                        <MudTd>
+                            <code>@context.StoreID</code>
+                            <br />
+                            <MudText Typo="Typo.caption" Color="Color.Secondary">@context.StoreName</MudText>
+                        </MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd><code>@context.Itemcode</code></MudTd>
+                        <MudTd>@(context.BoxItemQty?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.SKUMax?.ToString("N0"))</MudTd>
+                        <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd>@context.LpmQty.ToString("N0")</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_busy)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No item rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+    </MudTabs>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private DateTime? _runDate;
+    private long _batchNo;
+    private List<BatchHeader> _batches = new();
+    private string _filterStore = "";
+    private string _filterDiv = "";
+    private int _activeTab;
+    private bool _busy;
+    private bool _rollupBoxOnly;
+
+    private List<EomSummaryRow> _eomRows = new();
+    private List<BoxDetailRow> _boxRows = new();
+    private List<ItemDetailRow> _itemRows = new();
+
+    private IEnumerable<EomSummaryRow> FilteredEom =>
+        _eomRows.Where(r => MatchStore(r.StoreID, r.StoreName) && MatchDiv(r.DivisionName));
+    private IEnumerable<BoxDetailRow> FilteredBoxes =>
+        _boxRows.Where(r => MatchStore(r.StoreID ?? "", r.StoreName ?? "") && MatchDiv(r.DivisionName ?? ""));
+    private IEnumerable<ItemDetailRow> FilteredItems =>
+        _itemRows.Where(r => MatchStore(r.StoreID, r.StoreName) && MatchDiv(r.DivisionName));
+
+    private bool MatchStore(string storeId, string storeName)
+    {
+        if (string.IsNullOrWhiteSpace(_filterStore)) return true;
+        var f = _filterStore.Trim();
+        return storeId.Contains(f, StringComparison.OrdinalIgnoreCase)
+            || storeName.Contains(f, StringComparison.OrdinalIgnoreCase);
+    }
+    private bool MatchDiv(string divName)
+    {
+        if (string.IsNullOrWhiteSpace(_filterDiv)) return true;
+        return divName.Contains(_filterDiv.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        await ReloadBatchesAsync();
+    }
+
+    private async Task OnRunDateChanged(DateTime? d)
+    {
+        _runDate = d;
+        await ReloadBatchesAsync();
+    }
+
+    private async Task ReloadBatchesAsync()
+    {
+        _eomRows.Clear(); _boxRows.Clear(); _itemRows.Clear();
+        if (string.IsNullOrEmpty(_country)) { _batches = new(); _batchNo = 0; StateHasChanged(); return; }
+        try
+        {
+            _batches = await Reports.ListBatchesAsync(_country, _runDate);
+            _batchNo = _batches.FirstOrDefault()?.LPMBatchNo ?? 0;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed to list batches: {ex.Message}", Severity.Error);
+            _batches = new(); _batchNo = 0;
+        }
+        await LoadActiveTabAsync();
+    }
+
+    private async Task OnTabChanged(int idx)
+    {
+        _activeTab = idx;
+        await LoadActiveTabAsync();
+    }
+
+    private async Task LoadActiveTabAsync()
+    {
+        if (_batchNo == 0) { StateHasChanged(); return; }
+        switch (_activeTab)
+        {
+            case 0: await LoadEomAsync();   break;
+            case 1: await LoadBoxesAsync(); break;
+            case 2: await LoadItemsAsync(); break;
+        }
+    }
+
+    private async Task LoadEomAsync()
+    {
+        _busy = true; StateHasChanged();
+        try { _eomRows = await Reports.GetEomSummaryAsync(_batchNo); }
+        catch (Exception ex) { Snackbar.Add($"EOM Summary failed: {ex.Message}", Severity.Error); _eomRows = new(); }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task LoadBoxesAsync()
+    {
+        _busy = true; StateHasChanged();
+        try { _boxRows = await Reports.GetBoxDetailsAsync(_batchNo, _rollupBoxOnly); }
+        catch (Exception ex) { Snackbar.Add($"Box report failed: {ex.Message}", Severity.Error); _boxRows = new(); }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task LoadItemsAsync()
+    {
+        _busy = true; StateHasChanged();
+        try { _itemRows = await Reports.GetItemDetailsAsync(_batchNo); }
+        catch (Exception ex) { Snackbar.Add($"Item report failed: {ex.Message}", Severity.Error); _itemRows = new(); }
+        finally { _busy = false; StateHasChanged(); }
+    }
+}

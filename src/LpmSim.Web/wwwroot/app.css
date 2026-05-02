@@ -1,0 +1,684 @@
+:root {
+    --lpm-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    --lpm-bg: #f4f6fa;
+    --lpm-drawer-bg: #1e293b;
+    --lpm-drawer-bg-strong: #0f172a;
+    --lpm-drawer-text: #e2e8f0;
+    --lpm-drawer-muted: #94a3b8;
+    --lpm-accent: #2563eb;
+    --lpm-border: #e5e7eb;
+    --lpm-table-head: #0f172a;
+}
+
+html, body {
+    font-family: var(--lpm-font);
+    background-color: var(--lpm-bg);
+}
+
+/* Force system font across MudBlazor text surfaces. */
+.mud-typography,
+.mud-input-control,
+.mud-input-label,
+.mud-button-label,
+.mud-button-root,
+.mud-input,
+.mud-table,
+.mud-nav-link,
+.mud-list-item-text,
+.mud-chip,
+.mud-alert-message,
+.mud-dialog,
+.mud-autocomplete,
+.mud-select {
+    font-family: var(--lpm-font) !important;
+}
+
+/* --------------- Layout --------------- */
+.lpm-main {
+    background-color: var(--lpm-bg);
+    min-height: 100vh;
+}
+
+.lpm-drawer.mud-drawer {
+    background-color: var(--lpm-drawer-bg) !important;
+    color: var(--lpm-drawer-text) !important;
+    border-right: none !important;
+}
+
+/* --------------- Sidebar brand --------------- */
+.lpm-brand {
+    padding: 1.25rem 1.25rem 1rem;
+    background: var(--lpm-drawer-bg-strong);
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+
+.lpm-brand-title {
+    color: #ffffff;
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: 0.01em;
+}
+
+.lpm-brand-user {
+    margin-top: 0.5rem;
+}
+
+.lpm-role-badge {
+    display: inline-block;
+    background: var(--lpm-accent);
+    color: #fff;
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+}
+
+.lpm-brand-username {
+    margin-top: 0.45rem;
+    color: var(--lpm-drawer-muted);
+    font-size: 0.78rem;
+    word-break: break-all;
+}
+
+.lpm-brand-signout {
+    margin-top: 0.6rem;
+}
+
+.lpm-signout-btn {
+    background: transparent;
+    border: 1px solid rgba(226, 232, 240, 0.35);
+    color: #e2e8f0;
+    padding: 0.32rem 0.85rem;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 500;
+    transition: background-color 0.15s, color 0.15s;
+}
+
+.lpm-signout-btn:hover {
+    background: #fef9c3;
+    color: #1f2937;
+    border-color: #ca8a04;
+}
+
+/* --------------- Nav menu --------------- */
+.lpm-nav {
+    padding-top: 0.5rem;
+}
+
+.lpm-nav-section {
+    color: var(--lpm-drawer-muted);
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    padding: 1.25rem 1.25rem 0.5rem;
+}
+
+.lpm-drawer .mud-nav-link {
+    color: var(--lpm-drawer-text) !important;
+    padding: 0.55rem 1.25rem !important;
+    border-radius: 0 !important;
+    font-size: 0.92rem !important;
+}
+
+.lpm-drawer .mud-nav-link:hover {
+    background-color: #fef9c3 !important; /* light yellow on hover (matches active) */
+    color: #1f2937 !important;
+}
+
+.lpm-drawer .mud-nav-link:hover .mud-nav-link-icon {
+    color: #ca8a04 !important; /* amber icon when hovering */
+}
+
+/* ---- Active (clicked / current page) ----
+   Higher-specificity selectors so this wins over any hover state when the
+   user moves the mouse away — the clicked menu item must STAY yellow while
+   we're on that page. We also match aria-current="page" which MudNavLink
+   sets on the actual <a> in addition to the .mud-nav-link-active class,
+   to be robust against MudBlazor changing its class name. */
+.lpm-drawer .mud-nav-link.mud-nav-link-active,
+.lpm-drawer .mud-nav-link.active-item,
+.lpm-drawer a.mud-nav-link[aria-current="page"],
+.lpm-drawer .mud-nav-link.mud-nav-link-active:hover,
+.lpm-drawer .mud-nav-link.active-item:hover,
+.lpm-drawer a.mud-nav-link[aria-current="page"]:hover {
+    background-color: #fef9c3 !important; /* light yellow */
+    color: #1f2937 !important;            /* dark slate for contrast */
+    font-weight: 600 !important;
+    border-left: 3px solid #ca8a04 !important;
+    padding-left: calc(1.25rem - 3px) !important;
+}
+
+/* Slightly deeper yellow when hovering the active item (mouse over the
+   selected page itself). Lives AFTER the rule above so the hover wins
+   only when both apply. */
+.lpm-drawer .mud-nav-link.mud-nav-link-active:hover,
+.lpm-drawer .mud-nav-link.active-item:hover,
+.lpm-drawer a.mud-nav-link[aria-current="page"]:hover {
+    background-color: #fde68a !important;
+}
+
+.lpm-drawer .mud-nav-link .mud-nav-link-icon {
+    color: var(--lpm-drawer-muted) !important;
+}
+
+.lpm-drawer .mud-nav-link.mud-nav-link-active .mud-nav-link-icon,
+.lpm-drawer .mud-nav-link.active-item .mud-nav-link-icon,
+.lpm-drawer a.mud-nav-link[aria-current="page"] .mud-nav-link-icon {
+    color: #ca8a04 !important;
+}
+
+/* --------------- Cards / Papers --------------- */
+.mud-paper {
+    border-radius: 10px;
+}
+
+.mud-paper.mud-paper-outlined {
+    border: 1px solid var(--lpm-border);
+    background: #ffffff;
+}
+
+.lpm-card-title {
+    font-weight: 600;
+    color: #0f172a;
+    font-size: 1rem;
+    margin-bottom: 0.25rem;
+}
+
+/* --------------- Tables --------------- */
+.mud-table {
+    border-radius: 10px;
+    overflow: hidden;
+    border: 1px solid var(--lpm-border);
+}
+
+.mud-table-head th {
+    background-color: var(--lpm-table-head) !important;
+    color: #ffffff !important;
+    font-weight: 600 !important;
+    font-size: 0.78rem !important;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+    height: auto !important;
+}
+
+.mud-table-head .mud-table-sort-label,
+.mud-table-head .mud-button-label {
+    color: #ffffff !important;
+}
+
+/* Sub-line above a column header — used to display column totals on the SIM Generate tabs. */
+.mud-table-head th .th-total {
+    display: block;
+    font-size: 0.7rem !important;
+    font-weight: 500 !important;
+    color: #fef9c3 !important;
+    letter-spacing: 0;
+    text-transform: none;
+    line-height: 1.1;
+    margin-bottom: 2px;
+    min-height: 12px;
+}
+
+/* --------------- SIM Generate report tabs (green theme) --------------- */
+/* MudBlazor 7 selectors: the tab strip is .mud-tabs-tabbar (NOT
+   .mud-tabs-toolbar from older versions). We paint the strip dark green
+   and force every nested label, icon and slot to readable white. */
+.lpm-sim-tabs .mud-tabs-tabbar,
+.lpm-sim-tabs .mud-tabs-tabbar-content,
+.lpm-sim-tabs .mud-tabs-tabbar-inner,
+.lpm-sim-tabs .mud-tabs-tabbar-wrapper {
+    background-color: #15803d !important;   /* green-700 — solid, readable */
+    border-radius: 10px 10px 0 0;
+}
+
+/* Tab labels — white on green, never muted */
+.lpm-sim-tabs .mud-tab,
+.lpm-sim-tabs .mud-tab *,
+.lpm-sim-tabs .mud-tab .mud-button-label,
+.lpm-sim-tabs .mud-tab .mud-button-root,
+.lpm-sim-tabs .mud-tab .mud-icon-root,
+.lpm-sim-tabs .mud-tab .mud-typography {
+    color: #ffffff !important;
+    fill: #ffffff !important;
+    font-weight: 600 !important;
+    letter-spacing: 0.02em;
+    opacity: 1 !important;
+}
+
+/* Inactive tabs are still readable, just dimmer */
+.lpm-sim-tabs .mud-tab:not(.mud-tab-active) {
+    color: rgba(255, 255, 255, 0.78) !important;
+}
+.lpm-sim-tabs .mud-tab:not(.mud-tab-active) *,
+.lpm-sim-tabs .mud-tab:not(.mud-tab-active) .mud-icon-root {
+    color: rgba(255, 255, 255, 0.85) !important;
+    fill: rgba(255, 255, 255, 0.85) !important;
+}
+
+/* Active tab — pale-yellow slab with dark-green text. Stands out sharply
+   against the dark-green strip and inactive (white-on-green) siblings. */
+.lpm-sim-tabs .mud-tab.mud-tab-active {
+    background-color: #fef9c3 !important;   /* yellow-100 — soft, readable */
+    border-radius: 8px 8px 0 0;
+    box-shadow: 0 -2px 0 #facc15 inset;      /* yellow-400 top-edge highlight */
+}
+.lpm-sim-tabs .mud-tab.mud-tab-active,
+.lpm-sim-tabs .mud-tab.mud-tab-active *,
+.lpm-sim-tabs .mud-tab.mud-tab-active .mud-button-label,
+.lpm-sim-tabs .mud-tab.mud-tab-active .mud-icon-root,
+.lpm-sim-tabs .mud-tab.mud-tab-active .mud-typography {
+    color: #14532d !important;               /* green-900 text on pale-yellow */
+    fill: #14532d !important;
+    font-weight: 700 !important;
+    opacity: 1 !important;
+}
+
+/* Underline slider in bright yellow so it matches the active tab */
+.lpm-sim-tabs .mud-tabs-tabbar-slider,
+.lpm-sim-tabs .mud-tab-slider {
+    background-color: #facc15 !important;   /* yellow-400 — highly visible */
+    height: 3px !important;
+}
+
+/* Hover on inactive tabs — subtle white wash so user gets feedback */
+.lpm-sim-tabs .mud-tab:not(.mud-tab-active):hover {
+    background-color: rgba(255, 255, 255, 0.14) !important;
+}
+
+/* Outer paper border in matching green */
+.lpm-sim-tabs.mud-paper {
+    border: 1px solid #15803d !important;
+}
+
+.mud-table-head .mud-table-sort-label-icon {
+    color: #cbd5e1 !important;
+}
+
+.mud-table-body tr:hover {
+    background-color: #f8fafc !important;
+}
+
+/* Compact rows across every table by default. */
+.mud-table-body .mud-table-cell,
+.mud-table-body .mud-table-row .mud-table-cell {
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+    font-size: 0.82rem !important;
+    line-height: 1.2 !important;
+}
+
+/* MudTable with Dense="true" — even tighter. */
+.mud-table-dense-row .mud-table-cell,
+.mud-table.mud-table-dense .mud-table-cell {
+    padding-top: 1px !important;
+    padding-bottom: 1px !important;
+}
+
+/* Shrink inline inputs inside tables so rows compact around them. */
+.mud-table .mud-input-control,
+.mud-table .mud-input-control-margin-dense {
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
+}
+
+.mud-table .mud-input-root,
+.mud-table .mud-input-root-margin-dense {
+    min-height: 28px !important;
+    height: 28px !important;
+    font-size: 0.82rem !important;
+}
+
+.mud-table .mud-input-slot,
+.mud-table .mud-input-input-control,
+.mud-table .mud-input-outlined-input {
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+    min-height: 26px !important;
+}
+
+.mud-table .mud-input-label,
+.mud-table .mud-input-outlined .mud-input-label {
+    font-size: 0.78rem !important;
+}
+
+.mud-table .mud-switch-base {
+    padding: 2px !important;
+}
+
+.mud-table .mud-button-root {
+    min-height: 28px !important;
+    height: 28px !important;
+    padding: 0 8px !important;
+}
+
+.mud-table .mud-icon-button {
+    padding: 2px !important;
+    min-width: 28px !important;
+    height: 28px !important;
+    width: 28px !important;
+}
+
+/* --------------- Buttons --------------- */
+.mud-button-root {
+    text-transform: none !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+}
+
+/* --------------- Section headings --------------- */
+.lpm-page-title {
+    font-size: 1.4rem;
+    font-weight: 700;
+    color: #0f172a;
+    margin-bottom: 0.25rem;
+}
+
+.lpm-page-subtitle {
+    color: #64748b;
+    font-size: 0.9rem;
+    margin-bottom: 1.25rem;
+}
+
+/* --------------- Metric cards (colored accent) --------------- */
+.lpm-metric-card {
+    background: #ffffff;
+    border: 1px solid var(--lpm-border);
+    border-left: 4px solid var(--lpm-accent);
+    border-radius: 10px;
+    padding: 1rem 1.25rem;
+    transition: box-shadow .15s ease;
+}
+.lpm-metric-card:hover { box-shadow: 0 2px 8px rgba(15, 23, 42, 0.06); }
+
+.lpm-metric-label {
+    font-size: 0.72rem;
+    color: #64748b;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 0.35rem;
+}
+
+.lpm-metric-value {
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.2;
+}
+
+.lpm-metric-sub {
+    font-size: 0.78rem;
+    color: #64748b;
+    margin-top: 0.35rem;
+}
+
+.lpm-accent-blue   { border-left-color: #2563eb; }
+.lpm-accent-green  { border-left-color: #16a34a; }
+.lpm-accent-amber  { border-left-color: #d97706; }
+.lpm-accent-purple { border-left-color: #7c3aed; }
+.lpm-accent-rose   { border-left-color: #e11d48; }
+.lpm-accent-cyan   { border-left-color: #0891b2; }
+
+/* --------------- Section panel --------------- */
+.lpm-section {
+    background: #fff;
+    border: 1px solid var(--lpm-border);
+    border-radius: 10px;
+    padding: 1.25rem 1.5rem;
+    margin-bottom: 1rem;
+}
+.lpm-section-title {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #0f172a;
+    margin-bottom: 0.25rem;
+}
+.lpm-section-sub {
+    font-size: 0.82rem;
+    color: #64748b;
+    margin-bottom: 1rem;
+}
+
+/* --------------- Status pill --------------- */
+.lpm-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    padding: 0.2rem 0.6rem;
+    border-radius: 999px;
+}
+.lpm-status-ok   { background: #dcfce7; color: #166534; }
+.lpm-status-warn { background: #fef3c7; color: #92400e; }
+.lpm-status-err  { background: #fee2e2; color: #991b1b; }
+
+/* --------------- Compact filter bar --------------- */
+.lpm-filter-bar {
+    padding: 0.75rem 1rem !important;
+    margin-bottom: 1rem;
+}
+.lpm-filter-bar .mud-input-root {
+    font-size: 0.85rem !important;
+}
+.lpm-filter-bar .mud-input-label {
+    font-size: 0.82rem !important;
+}
+.lpm-filter-bar .mud-button-root {
+    font-size: 0.85rem !important;
+    height: 38px;
+}
+
+/* Compact variant — used by SIM Generate. Tightens vertical rhythm so the
+   filter bar fits on two rows instead of four. */
+.lpm-filter-compact {
+    padding: 0.5rem 1rem !important;
+}
+.lpm-filter-compact .mud-grid-spacing-xs-2 {
+    margin: -4px !important;
+}
+.lpm-filter-compact .mud-grid-spacing-xs-2 > .mud-grid-item {
+    padding: 4px !important;
+}
+.lpm-filter-compact .mud-input-helper-text { display: none !important; }
+.lpm-fb-group {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.05;
+}
+.lpm-fb-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: 600;
+    color: #475569;
+    letter-spacing: 0.02em;
+    margin-bottom: 2px;
+}
+/* Force the radio group to lay out horizontally and compact. */
+.lpm-fb-radio {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: wrap;
+    gap: 4px 8px;
+}
+.lpm-fb-radio .mud-radio { margin: 0 !important; padding: 0 !important; }
+.lpm-fb-radio .mud-radio-label { font-size: 0.78rem !important; }
+
+/* Large variant: bigger labels/fields (e.g. Warehouse Box report) */
+.lpm-filter-bar-lg .mud-input-root,
+.lpm-filter-bar-lg .mud-input-root-margin-dense {
+    font-size: 1rem !important;
+    min-height: 44px !important;
+    height: 44px !important;
+}
+.lpm-filter-bar-lg .mud-input-label,
+.lpm-filter-bar-lg .mud-input-outlined .mud-input-label {
+    font-size: 1rem !important;
+    font-weight: 600;
+    color: #0f172a !important;
+}
+.lpm-filter-bar-lg .mud-input-slot,
+.lpm-filter-bar-lg .mud-input-outlined-input {
+    min-height: 40px !important;
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+}
+.lpm-filter-bar-lg .mud-button-root {
+    font-size: 0.95rem !important;
+    height: 44px !important;
+    min-height: 44px !important;
+}
+
+/* Keep long table headers on one line so they stay readable */
+.lpm-nowrap-headers .mud-table-head th {
+    white-space: nowrap !important;
+}
+
+/* EOM preview: force ALL 12 columns to fit the viewport with no horizontal scroll.
+   Headings wrap to 2-3 lines; cells use a fixed layout. */
+.lpm-eom-preview,
+.lpm-eom-preview .mud-table-container,
+.lpm-eom-preview .mud-table-root {
+    width: 100% !important;
+    max-width: 100% !important;
+    min-width: 0 !important;
+}
+.lpm-eom-preview .mud-table-root {
+    table-layout: fixed !important;
+}
+.lpm-eom-preview .mud-table-container,
+.lpm-eom-preview .mud-xs-table-responsive {
+    overflow-x: hidden !important;
+}
+.lpm-eom-preview .mud-table-head th {
+    white-space: normal !important;
+    word-break: break-word !important;
+    overflow-wrap: anywhere !important;
+    line-height: 1.25 !important;
+    vertical-align: middle !important;
+    padding: 10px 4px !important;
+    font-size: 0.72rem !important;
+    letter-spacing: 0.03em !important;
+    height: auto !important;
+}
+/* MudTableSortLabel wraps text in a flex container — let it wrap too. */
+.lpm-eom-preview .mud-table-head th .mud-table-sort-label,
+.lpm-eom-preview .mud-table-head th .mud-button-root,
+.lpm-eom-preview .mud-table-head th .mud-button-label {
+    min-width: 0 !important;
+    white-space: normal !important;
+    word-break: break-word !important;
+    line-height: 1.05 !important;
+    text-align: left !important;
+    justify-content: flex-start !important;
+    padding: 0 !important;
+}
+.lpm-eom-preview .mud-table-cell {
+    padding-left: 4px !important;
+    padding-right: 4px !important;
+    font-size: 0.74rem !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+    white-space: nowrap !important;
+}
+.lpm-eom-preview .mud-table-body tr td:first-child {
+    white-space: normal !important;
+}
+/* Shrink chips so Grade / Vol Group fit narrow columns. */
+.lpm-eom-preview .mud-chip {
+    min-width: 0 !important;
+    height: 18px !important;
+    padding: 0 6px !important;
+    font-size: 0.65rem !important;
+}
+
+/* --------------- Narrow-table wrapper (config pages) --------------- */
+.lpm-narrow-table {
+    max-width: 1100px;
+}
+
+/* --------------- Compact table for small-cell editors --------------- */
+.lpm-weights-table .mud-table-cell {
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    padding-left: 12px !important;
+    padding-right: 12px !important;
+}
+.lpm-weights-table .mud-input-root {
+    font-size: 0.85rem !important;
+}
+.lpm-weights-table .mud-table-head th {
+    padding-top: 6px !important;
+    padding-bottom: 6px !important;
+}
+
+/* Extra-small rows: fit 13 periods on one screen */
+.lpm-weights-table-xs .mud-table-cell {
+    padding: 2px 10px !important;
+    height: 34px !important;
+}
+.lpm-weights-table-xs .mud-input-root {
+    font-size: 0.82rem !important;
+    min-height: 28px !important;
+}
+.lpm-weights-table-xs .mud-input-root-dense {
+    padding: 0 8px !important;
+}
+.lpm-weights-table-xs .mud-table-head th {
+    padding: 4px 10px !important;
+    height: 32px !important;
+}
+
+/* Small metric cards for tight dashboards */
+.lpm-metric-card-sm {
+    background: #ffffff;
+    border: 1px solid var(--lpm-border);
+    border-left: 4px solid var(--lpm-accent);
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+}
+.lpm-metric-value-sm {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: #0f172a;
+    line-height: 1.2;
+}
+
+/* --------------- Drop zone --------------- */
+.lpm-dropzone {
+    border: 2px dashed #cbd5e1;
+    border-radius: 10px;
+    padding: 2rem;
+    text-align: center;
+    background: #fafbff;
+    transition: background .15s ease, border-color .15s ease;
+}
+.lpm-dropzone:hover { background: #f1f5ff; border-color: var(--lpm-accent); }
+
+/* --------------- Misc (Blazor defaults) --------------- */
+.valid.modified:not([type=checkbox]) {
+    outline: 1px solid #26b050;
+}
+
+.invalid {
+    outline: 1px solid #e50000;
+}
+
+.validation-message {
+    color: #e50000;
+}
+
+.blazor-error-boundary {
+    padding: 1rem 1rem 1rem 3.7rem;
+    color: white;
+    background: #b32121;
+}
+
+.blazor-error-boundary::after {
+    content: "An error has occurred.";
+}

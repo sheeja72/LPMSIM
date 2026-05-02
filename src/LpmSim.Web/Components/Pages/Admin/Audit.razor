@@ -1,0 +1,126 @@
+@page "/admin/audit"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.Admin)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+
+<PageTitle>Audit Log</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-1">Audit Log</MudText>
+<MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+    Every insert, update, and delete performed through the app.
+</MudText>
+
+<MudPaper Class="pa-4 mb-4" Elevation="1">
+    <MudGrid Spacing="3">
+        <MudItem xs="12" md="3">
+            <MudTextField T="string" Value="_filterEntity"
+                          ValueChanged="v => _filterEntity = v"
+                          Label="Entity" Placeholder="e.g. LPMDivMax"
+                          Variant="Variant.Outlined" Clearable="true" />
+        </MudItem>
+        <MudItem xs="12" md="3">
+            <MudTextField T="string" Value="_filterUser"
+                          ValueChanged="v => _filterUser = v"
+                          Label="Changed by" Variant="Variant.Outlined" Clearable="true" />
+        </MudItem>
+        <MudItem xs="12" md="3">
+            <MudDatePicker Label="From" @bind-Date="_fromDate" Variant="Variant.Outlined" />
+        </MudItem>
+        <MudItem xs="12" md="3">
+            <MudDatePicker Label="To" @bind-Date="_toDate" Variant="Variant.Outlined" />
+        </MudItem>
+        <MudItem xs="12" Class="d-flex justify-end">
+            <MudButton Variant="Variant.Filled" Color="Color.Primary"
+                       StartIcon="@Icons.Material.Filled.FilterAlt"
+                       OnClick="ReloadAsync">Apply filters</MudButton>
+        </MudItem>
+    </MudGrid>
+</MudPaper>
+
+<MudTable T="LpmAuditLog" Items="_logs" Hover="true" Striped="true" Dense="true"
+          Loading="_loading" Breakpoint="Breakpoint.Sm" AllowUnsorted="false">
+    <HeaderContent>
+        <MudTh><MudTableSortLabel T="LpmAuditLog" SortBy="r => r.ChangedTS" InitialDirection="SortDirection.Descending">When</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmAuditLog" SortBy="r => r.ChangedBy">Who</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmAuditLog" SortBy="r => r.EntityName">Entity</MudTableSortLabel></MudTh>
+        <MudTh>Key</MudTh>
+        <MudTh>Action</MudTh>
+        <MudTh>Changes</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd>@context.ChangedTS.ToString("yyyy-MM-dd HH:mm:ss")</MudTd>
+        <MudTd><code>@context.ChangedBy</code></MudTd>
+        <MudTd>@context.EntityName</MudTd>
+        <MudTd><code>@context.EntityKey</code></MudTd>
+        <MudTd>
+            @if (context.Action == 'I')
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Success">Insert</MudChip>
+            }
+            else if (context.Action == 'U')
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Info">Update</MudChip>
+            }
+            else if (context.Action == 'D')
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Error">Delete</MudChip>
+            }
+            else if (context.Action == 'R')
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Default">Read</MudChip>
+            }
+            else
+            {
+                <MudChip T="string" Size="Size.Small">@context.Action</MudChip>
+            }
+        </MudTd>
+        <MudTd>
+            <MudText Typo="Typo.caption"
+                     Style="max-width:400px; white-space:pre-wrap; word-break:break-word; display:block;">
+                @context.ChangesJson
+            </MudText>
+        </MudTd>
+    </RowTemplate>
+    <PagerContent>
+        <MudTablePager PageSizeOptions="new[] { 25, 50, 100, 200 }" />
+    </PagerContent>
+</MudTable>
+
+@code {
+    private List<LpmAuditLog> _logs = new();
+    private string? _filterEntity;
+    private string? _filterUser;
+    private DateTime? _fromDate = DateTime.Today.AddDays(-7);
+    private DateTime? _toDate   = DateTime.Today;
+    private bool _loading;
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var q = db.LpmAuditLogs.AsNoTracking().AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(_filterEntity))
+                q = q.Where(x => x.EntityName.Contains(_filterEntity));
+            if (!string.IsNullOrWhiteSpace(_filterUser))
+                q = q.Where(x => x.ChangedBy.Contains(_filterUser));
+            if (_fromDate.HasValue)
+                q = q.Where(x => x.ChangedTS >= _fromDate.Value);
+            if (_toDate.HasValue)
+            {
+                var end = _toDate.Value.AddDays(1);
+                q = q.Where(x => x.ChangedTS < end);
+            }
+
+            _logs = await q.OrderByDescending(x => x.ChangedTS).Take(2000).ToListAsync();
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+}

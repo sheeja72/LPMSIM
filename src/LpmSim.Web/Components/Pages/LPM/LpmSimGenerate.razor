@@ -1,0 +1,2300 @@
+@page "/lpm/lpm-sim/generate"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.LpmSim
+@using LpmSim.Core.Entities
+@using ClosedXML.Excel
+@using System.IO
+@using System.Diagnostics
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject LpmSimGenerator Sim
+@inject LpmSimReportService Reports
+@inject LpmSimInvestigator Investigator
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject IJSRuntime JS
+
+<PageTitle>LPM SIM Generate</PageTitle>
+
+<div class="lpm-page-title">LPM SIM Generate</div>
+<div class="lpm-page-subtitle">
+    Allocate eligible-pallet items to stores using the current month's EOM rules. Each run produces a Draft batch
+    that must be Approved to finalize. To rerun, Delete the existing batch (it's archived to the backup tables).
+</div>
+
+<MudExpansionPanels Elevation="0" Class="mb-3">
+    <MudExpansionPanel Text="SIM logic — how the allocator works" Icon="@Icons.Material.Filled.Info">
+        <div style="font-size:0.86rem;line-height:1.55;color:#1f2937;">
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Inputs the engine reads</h4>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:.9rem;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:22%;">Source</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">What it provides</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Source boxes</strong> — <code>racks.dbo.whboxitems</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Filters: <code>pt.PalletCategory = 'ELIGIBLE'</code>, <code>ShopEligible &lt;&gt; 'E'</code>, season clause,
+                            warehouse multi-select, and LPMDt clause (LPM = current/elapsed, Non-LPM = NULL).
+                        </td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Candidate stores</strong> — <code>LPM_EOM_Output</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <code>WHERE Country = @@country AND Year1=@@y AND Month1=@@m</code>, plus a defensive
+                            <code>INNER JOIN DataSettings (Country)</code> so non-UAE stores cannot leak in.
+                            Provides <code>SKUMax</code>, <code>TargetEOM</code>, <code>PriorityRank</code>, <code>WtAvgSoldQty</code>.
+                        </td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>SOH per (Store, Item)</strong> — <code>racks.LPM_LocStock</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Country resolved via <code>DataSettings</code> JOIN (LocStock.Country has empty-string drift). Used to compute SKU and Div balance headroom.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Item → Division map</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Primary: <code>LocStock.DivCode</code>. Fallback for new items not yet stocked: <code>upc_subclass → subclassmaster → Division MIN(DivCode)</code>.</td></tr>
+                </tbody>
+            </table>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">The two caps (always honoured)</h4>
+            <ul style="margin:0 0 .9rem 1.1rem;">
+                <li><strong>SKU Max balance</strong> &nbsp;= <code>SKUMax − SOH(Store,Item) − cumItem</code> &nbsp;
+                    where <code>cumItem</code> is everything already allocated to this (Store,Item) across all phases (normal + RR + every prior box).</li>
+                <li><strong>EOM Div balance</strong> &nbsp;= <code>TargetEOM − DivSOH(Store,Div) − cumDiv</code> &nbsp;
+                    where <code>cumDiv</code> spans every phase. <strong>Hard ceiling</strong> — leftover qty in a box stays unallocated when this hits zero.</li>
+            </ul>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Phase 1a / 2a fill strategies</h4>
+            <p style="margin:.1rem 0 .5rem;">
+                The radio in the filter bar controls how each box-line spreads units across the eligible
+                stores in its Division. Both modes honour SKU Max + EOM Div caps every cycle — they only
+                differ in <em>which</em> store gets the next unit.
+            </p>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:.6rem;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:22%;">Strategy</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">How a unit is placed</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;vertical-align:top;">
+                            <strong>Equal qty / store</strong><br/>
+                            <span style="color:#64748b;font-size:.78rem;">(default)</span>
+                        </td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Recipe:</strong> walk stores in <code>PriorityRank ASC, WtAvgSoldQty DESC</code> order
+                            and give <strong>1 unit per store per cycle</strong>. Repeat cycles until the line is exhausted
+                            or every store is capped.
+                            <br/><strong>Aim:</strong> equal <em>shipment qty</em> across stores per item line.
+                            <br/><strong>What it produces:</strong> stores receive the same per-line qty until their
+                            SKUMax/EOM caps stop them. Stores with smaller caps top out first; stores with bigger caps keep
+                            taking. Division-level FillRate% can therefore vary widely.
+                            <br/><strong>Pick this when:</strong> planning wants every store to carry roughly the same
+                            number of pieces of the same item — fairest by shipment count.
+                        </td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;vertical-align:top;">
+                            <strong>Equal fill-rate %</strong>
+                        </td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Recipe:</strong> on every cycle, scan eligible stores, compute
+                            <code>FillRate% = cumDiv ÷ EomBalance</code> for each, and give the unit to the store with the
+                            <em>lowest</em> FillRate%. Tie-break: <code>PriorityRank ASC</code>.
+                            <br/><strong>Aim:</strong> equal <em>Division-level FillRate%</em> across stores.
+                            <br/><strong>What it produces:</strong> the laggard store always gets the next unit, so every
+                            store converges toward the same proportional fill of its EOM headroom. Big-EOM stores get more
+                            qty, small-EOM stores get less, but the percentages line up.
+                            <br/><strong>Pick this when:</strong> planning wants comparable shelf-presence across stores —
+                            fairest by share of plan.
+                        </td></tr>
+                </tbody>
+            </table>
+
+            <p style="margin:.4rem 0 .25rem;color:#475569;">
+                <strong>Worked example</strong> — Div "Bags", line qty = 80, EomBalance per store = [7000, 4000, 2000]:
+            </p>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:.9rem;font-size:.82rem;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:5px 10px;border:1px solid #e2e8f0;">Store</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">EomBalance</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal qty / store → qty</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal fill-rate % → qty</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal-qty FillRate%</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal-rate FillRate%</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:5px 10px;border:1px solid #e2e8f0;">A</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">7,000</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">~27</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">~43</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">0.4%</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">0.6%</td></tr>
+                    <tr><td style="padding:5px 10px;border:1px solid #e2e8f0;">B</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">4,000</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">~27</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">~25</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">0.7%</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">0.6%</td></tr>
+                    <tr><td style="padding:5px 10px;border:1px solid #e2e8f0;">C</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">2,000</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">~26</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">~12</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">1.3%</td>
+                        <td style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">0.6%</td></tr>
+                </tbody>
+            </table>
+            <p style="margin:.1rem 0 .9rem;color:#64748b;font-size:.78rem;">
+                Equal qty / store → all three stores get nearly identical qty (~27 each), but FillRate% spreads from 0.4% to 1.3%.
+                Equal fill-rate % → qty scales with EomBalance, so all three stores land at the same ~0.6% fill.
+            </p>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Phase order</h4>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:.9rem;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:14%;">Step</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:18%;">Output Phase tag</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">Logic</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Phase 1a</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>P1</code> &nbsp;<code>IsRoundRobin=0</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>LPM boxes, round-robin fill.</strong> Behaviour depends on the
+                            <em>Phase 1a / 2a fill</em> radio in the filter bar:
+                            <ul style="margin:.3rem 0 .3rem 1.1rem;">
+                                <li><strong>Equal qty / store</strong> (default) — walk stores in
+                                    <code>PriorityRank ASC, WtAvgSoldQty DESC</code> order and deal
+                                    <strong>1 unit per store per cycle</strong>. Same per-line qty across stores; per-store
+                                    cap differences mean Division-level FillRate% can still skew.</li>
+                                <li><strong>Equal fill-rate %</strong> — each unit goes to the eligible store with the
+                                    <em>lowest current FillRate %</em> (= <code>cumDiv ÷ EomBalance</code>),
+                                    tiebreak <code>PriorityRank ASC</code>. This pulls every store toward the same
+                                    Division-level fill share rather than the same shipment qty.</li>
+                            </ul>
+                            Both modes honour SKU Max + EOM Div caps every cycle. Output Phase tag stays <code>P1</code>
+                            with <code>IsRoundRobin=0</code> — the round-robin cycling is just the fill mechanism, this is
+                            still the "normal" pass.
+                        </td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Phase 1b RR</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>P1_RR</code> &nbsp;<code>IsRoundRobin=1</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Eligibility gate:</strong> only runs when post-1a box usability % ≥
+                            <em>Round Robin Box Usability %</em> (user input). Otherwise the box's leftover stays unallocated.
+                            <br/>When it runs: deals 1 unit per store per cycle in priority order, honouring
+                            <strong>both</strong> caps (SKU Max + EOM Div), cumulative against prior allocations.
+                        </td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Phase 2a</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>P2</code> &nbsp;<code>IsRoundRobin=0</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Non-LPM boxes, round-robin fill.</strong> Same per-line distribution as 1a (1 unit per store per cycle),
+                            with two extra outer sorts: box <code>TotalQty DESC</code>, then <code>OverlapWithPhase1Items DESC</code>
+                            (boxes whose items already started filling SKU caps in Phase 1 come first among similar-sized boxes).
+                        </td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Phase 2b RR</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>P2_RR</code> &nbsp;<code>IsRoundRobin=1</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            Same shape as Phase 1b — usability gate, both caps cumulative.
+                        </td></tr>
+                </tbody>
+            </table>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Per-store fill order inside a box</h4>
+            <p style="margin:.1rem 0 .9rem;">
+                Stores within a Division are sorted by <code>PriorityRank ASC, WtAvgSoldQty DESC</code>. PriorityRank itself
+                comes from EOM Generate as <code>(SoldQtyRank + TurnsRank) / 2</code>: lowest = highest priority, gets the first
+                unit each cycle. Because both the normal and RR phases now distribute <strong>1 unit per store per cycle</strong>,
+                the priority order determines the order within a cycle — every eligible store still receives units even when
+                higher-priority stores haven't yet hit their cap.
+            </p>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Trace decisions written to <code>LPMSIM_AllocTrace</code></h4>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:.9rem;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:18%;">Decision</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">Meaning</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>ALLOC</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Normal allocation succeeded — Phase 1a or 2a.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>ALLOC_RR</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Round-robin allocation succeeded — Phase 1b or 2b.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>SKIP_SKUMAX</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">SKU Max cap reached for this (Store, Item). (Suppressed when "Verbose trace" is off.)</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>SKIP_TARGET</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">EOM Div balance reached for this (Store, Div). (Suppressed when "Verbose trace" is off.)</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>SKIP_NO_DIV</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Item couldn't be mapped to a Division (not in LocStock and not in upc_subclass) — line skipped.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>SKIP_NO_EOM</code></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">No EOM rows for the item's Division (no candidate stores) — line skipped.</td></tr>
+                </tbody>
+            </table>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Tables written by every run</h4>
+            <ul style="margin:0 0 .25rem 1.1rem;">
+                <li><code>LPMSIM_Output</code> — final allocation lines (one row per Box × Item × Store), tagged Phase + IsRoundRobin.</li>
+                <li><code>LPMSIM_AllocTrace</code> — every decision considered (ALLOC / SKIP_*).</li>
+                <li><code>LPMSIM_StoreItemBalance</code> — per-(Store, Item) snapshot: SOH + per-phase allocations + remaining SKU balance.</li>
+                <li><code>LPMSIM_StoreDivBalance</code> — per-(Store, Div) snapshot: DivSOH + per-phase allocations + remaining EOM balance.</li>
+                <li><code>LPMSIM_BoxBalance</code> — per-Box snapshot: BoxQty + per-phase allocations + Usability % + LeftOver qty.</li>
+            </ul>
+
+            <div style="margin-top:0.85rem;padding:0.6rem 0.8rem;background:#fef9c3;border-radius:6px;border:1px solid #facc15;">
+                <strong>One-line summary:</strong>
+                <em>For each box (LPM first, then Non-LPM), distribute units to UAE stores
+                <strong>1 unit per store per cycle</strong> in PriorityRank order — guaranteeing equal fill across stores —
+                respecting SKU Max and EOM Div caps cumulatively. If a box is at least
+                <code>Round Robin Box Usability %</code> full after the normal pass, top it up via the named
+                Round Robin step (same cycling, same caps). Boxes that hit either ceiling stop; no allocation ever crosses them.</em>
+            </div>
+        </div>
+    </MudExpansionPanel>
+</MudExpansionPanels>
+
+@if (!string.IsNullOrEmpty(_lastError))
+{
+    <MudAlert Severity="Severity.Error" Variant="Variant.Filled" Class="mb-3"
+              ShowCloseIcon="true" CloseIconClicked="() => _lastError = string.Empty">
+        <MudText Typo="Typo.subtitle2"><strong>Error</strong></MudText>
+        <pre style="white-space:pre-wrap; word-break:break-word; margin:0; font-family:inherit;">@_lastError</pre>
+    </MudAlert>
+}
+
+@if (_lastRunDuration is TimeSpan dur)
+{
+    <MudAlert Severity="Severity.Success" Variant="Variant.Outlined" Dense="true" Class="mb-3"
+              ShowCloseIcon="true" CloseIconClicked="() => _lastRunDuration = null">
+        <MudIcon Icon="@Icons.Material.Filled.Timer" Size="Size.Small" Class="mr-1" />
+        Last Generate took <strong>@FormatDuration(dur)</strong>
+        @if (_lastRunSummary is string s) { <span> · @s</span> }
+        @if (_busy)
+        {
+            <span style="margin-left:.5rem;color:#ca8a04;font-weight:600;">
+                · Loading results…
+            </span>
+        }
+    </MudAlert>
+}
+
+<div class="lpm-section lpm-filter-bar lpm-filter-compact">
+    <MudGrid Spacing="2" Class="align-center">
+        @* ─── Row 1 (md = 2+2+2+2+2+2 = 12): the most-changed inputs ─── *@
+        <MudItem xs="6" sm="4" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await LoadStoresForCountryAsync(); await CheckAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="4" md="2">
+            <MudDatePicker Label="Run Date" Date="_runDate"
+                           DateChanged="OnRunDateChanged"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" />
+        </MudItem>
+
+        <MudItem xs="6" sm="4" md="2">
+            <div class="lpm-fb-group">
+                <span class="lpm-fb-label">Box Source</span>
+                <div class="d-flex flex-wrap gap-2 align-center">
+                    <MudCheckBox T="bool" Value="_srcLpm" ValueChanged="async (bool v) => { _srcLpm = v; await CheckAsync(); }"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small">LPM</MudCheckBox>
+                    <MudCheckBox T="bool" Value="_srcNonLpm" ValueChanged="async (bool v) => { _srcNonLpm = v; await CheckAsync(); }"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small">Non-LPM</MudCheckBox>
+                </div>
+            </div>
+        </MudItem>
+
+        <MudItem xs="6" sm="4" md="2">
+            <div class="lpm-fb-group">
+                <span class="lpm-fb-label">Season</span>
+                <div class="d-flex flex-wrap gap-2 align-center">
+                    <MudCheckBox T="bool" Value="_seasonSummer" ValueChanged="async (bool v) => { _seasonSummer = v; await CheckAsync(); }"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small">Summer</MudCheckBox>
+                    <MudCheckBox T="bool" Value="_seasonWinter" ValueChanged="async (bool v) => { _seasonWinter = v; await CheckAsync(); }"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small">Winter</MudCheckBox>
+                </div>
+            </div>
+        </MudItem>
+
+        @* RR Usability % — gates Phase 1b / 2b. Tooltip replaces the helper
+           text to save vertical space. *@
+        <MudItem xs="6" sm="4" md="2">
+            <MudTooltip Text="Round-robin runs only for boxes whose post-normal usability % is ≥ this value. Both SKU Max and EOM Div remain hard caps." Placement="Placement.Top">
+                <MudNumericField T="int" Label="RR Usability %"
+                                 Value="_overridePct"
+                                 ValueChanged="(int v) => _overridePct = v"
+                                 Min="0" Max="100" Step="5"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+            </MudTooltip>
+        </MudItem>
+
+        <MudItem xs="6" sm="4" md="2">
+            <div class="lpm-fb-group">
+                <span class="lpm-fb-label">Phase 1a / 2a fill</span>
+                <MudRadioGroup T="LpmSimFillStrategy" Value="_fillStrategy"
+                               ValueChanged="(LpmSimFillStrategy v) => _fillStrategy = v"
+                               Class="lpm-fb-radio">
+                    <MudRadio T="LpmSimFillStrategy" Value="LpmSimFillStrategy.EqualPerStore"
+                              Color="Color.Primary" Dense="true" Size="Size.Small">Equal qty</MudRadio>
+                    <MudRadio T="LpmSimFillStrategy" Value="LpmSimFillStrategy.EqualFillRate"
+                              Color="Color.Primary" Dense="true" Size="Size.Small">Equal fill %</MudRadio>
+                </MudRadioGroup>
+            </div>
+        </MudItem>
+
+        @* ─── Row 2 (md = 4+2+6 = 12): warehouses, verbose, action buttons ─── *@
+        <MudItem xs="12" sm="6" md="4">
+            <MudSelect T="string" Label="Warehouses"
+                       SelectedValues="_selectedWarehouses"
+                       SelectedValuesChanged="async (IEnumerable<string> vs) => { _selectedWarehouses = vs?.ToHashSet() ?? new(); await CheckAsync(); }"
+                       MultiSelection="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Clearable
+                       Placeholder="(All warehouses)"
+                       SelectAll="true" SelectAllText="All warehouses"
+                       MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedWarehousesText))">
+                @foreach (var w in _allWarehouses)
+                {
+                    <MudSelectItem T="string" Value="@w">@w</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+
+        <MudItem xs="6" sm="3" md="2" Class="d-flex align-center">
+            <MudCheckBox T="bool" @bind-Value="_verboseTrace" Color="Color.Primary"
+                         Dense="true" Size="Size.Small">
+                Verbose trace
+            </MudCheckBox>
+        </MudItem>
+
+        <MudItem xs="12" sm="9" md="6" Class="d-flex align-center gap-2 justify-end flex-wrap">
+            @* Re-check forces a full refresh by clearing the batch cache. *@
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Refresh"
+                       Disabled="@(string.IsNullOrEmpty(_country) || _busy)"
+                       OnClick="@(async () => { _loadedBatchNo = null; await CheckAsync(); })">
+                Re-check
+            </MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.PlayArrow"
+                       Disabled="@(_readiness?.CanGenerate != true || _busy)" OnClick="GenerateAsync">
+                Generate
+            </MudButton>
+            <MudButton Color="Color.Success" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.CheckCircle"
+                       Disabled="@(_readiness?.CanApprove != true || _busy)" OnClick="ApproveAsync">
+                Approve
+            </MudButton>
+            <MudButton Color="Color.Error" Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.DeleteForever"
+                       Disabled="@(_readiness?.CanDelete != true || _busy)" OnClick="DeleteAsync">
+                Delete
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_busy)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_readiness is not null)
+{
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="12" sm="6" md="3">
+            <div class="lpm-metric-card @(_readiness.EomReady ? "lpm-accent-green" : "lpm-accent-rose")">
+                <div class="lpm-metric-label">EOM Output</div>
+                <div class="lpm-metric-sub">@_readiness.EomDetail</div>
+            </div>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <div class="lpm-metric-card @(_readiness.LocStockReady ? "lpm-accent-green" : "lpm-accent-amber")">
+                <div class="lpm-metric-label">SOH (LPM_LocStock)</div>
+                <div class="lpm-metric-sub">@_readiness.LocStockDetail</div>
+            </div>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <div class="lpm-metric-card @(_readiness.BoxesReady ? "lpm-accent-green" : "lpm-accent-rose")">
+                <div class="lpm-metric-label">Eligible Boxes (Selected)</div>
+                <div class="lpm-metric-sub">@_readiness.BoxesDetail</div>
+            </div>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <div class="lpm-metric-card @CurrentBatchAccent()">
+                <div class="lpm-metric-label">Current Batch</div>
+                <div class="lpm-metric-sub">
+                    @if (_readiness.CurrentBatchNo is null)
+                    {
+                        <span>No batch yet for @_country on @_runDate?.ToString("yyyy-MM-dd")</span>
+                    }
+                    else
+                    {
+                        <span>#@_readiness.CurrentBatchNo · <strong>@_readiness.CurrentStatus</strong></span>
+                        if (_readiness.ExistingApproved && _readiness.CurrentApprovedTS is not null)
+                        {
+                            <br />
+                            <span>Approved @_readiness.CurrentApprovedTS?.ToString("yyyy-MM-dd HH:mm") by @_readiness.CurrentApprovedBy</span>
+                        }
+                    }
+                </div>
+            </div>
+        </MudItem>
+    </MudGrid>
+
+    @if (_readiness.BoxSegments is BoxSegmentCounts seg)
+    {
+        <div class="lpm-section mb-3" style="padding:0.6rem 1rem;">
+            <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                All eligible boxes (PalletCategory = ELIGIBLE, ShopEligible &lt;&gt; 'E')
+            </MudText>
+            <MudText Typo="Typo.caption" Style="display:block;color:#64748b;font-size:0.72rem;margin-top:.15rem;">
+                <strong>LPM</strong>: LPMDt is set AND its Year/Month is on or before the run period
+                (current or elapsed) &nbsp;·&nbsp;
+                <strong>Non-LPM</strong>: LPMDt IS NULL.
+                Season is read from <code>pallettype.Season</code> (<code>'W'</code> = Winter, otherwise Summer).
+            </MudText>
+            <MudSimpleTable Dense Hover Bordered Class="lpm-seg-table mt-1" Style="font-size:0.82rem;">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th class="text-right">LPM</th>
+                        <th class="text-right">Non-LPM</th>
+                        <th class="text-right" style="background:#f1f5f9;font-weight:600;">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>Summer</strong></td>
+                        <td class="text-right">@seg.LpmSummerBoxes.ToString("N0") <span class="text-muted">(@seg.LpmSummerQty.ToString("N0"))</span></td>
+                        <td class="text-right">@seg.NonLpmSummerBoxes.ToString("N0") <span class="text-muted">(@seg.NonLpmSummerQty.ToString("N0"))</span></td>
+                        <td class="text-right" style="background:#f1f5f9;">
+                            <strong>@seg.TotalSummerBoxes.ToString("N0")</strong>
+                            <span class="text-muted">(@seg.TotalSummerQty.ToString("N0"))</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>Winter</strong></td>
+                        <td class="text-right">@seg.LpmWinterBoxes.ToString("N0") <span class="text-muted">(@seg.LpmWinterQty.ToString("N0"))</span></td>
+                        <td class="text-right">@seg.NonLpmWinterBoxes.ToString("N0") <span class="text-muted">(@seg.NonLpmWinterQty.ToString("N0"))</span></td>
+                        <td class="text-right" style="background:#f1f5f9;">
+                            <strong>@seg.TotalWinterBoxes.ToString("N0")</strong>
+                            <span class="text-muted">(@seg.TotalWinterQty.ToString("N0"))</span>
+                        </td>
+                    </tr>
+                    <tr style="background:#f8fafc;font-weight:600;">
+                        <td>Total</td>
+                        <td class="text-right">@((seg.LpmSummerBoxes + seg.LpmWinterBoxes).ToString("N0")) <span class="text-muted">(@((seg.LpmSummerQty + seg.LpmWinterQty).ToString("N0")))</span></td>
+                        <td class="text-right">@((seg.NonLpmSummerBoxes + seg.NonLpmWinterBoxes).ToString("N0")) <span class="text-muted">(@((seg.NonLpmSummerQty + seg.NonLpmWinterQty).ToString("N0")))</span></td>
+                        <td class="text-right" style="background:#e2e8f0;">
+                            @seg.TotalBoxes.ToString("N0") <span class="text-muted">(@seg.TotalQty.ToString("N0"))</span>
+                        </td>
+                    </tr>
+                </tbody>
+            </MudSimpleTable>
+            <MudText Typo="Typo.caption" Style="color:#64748b;">Counts are Boxes; quantity in parentheses.</MudText>
+        </div>
+    }
+
+    @if (_readiness.ExistingApproved)
+    {
+        <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-3">
+            This run is <strong>Approved</strong> &mdash; rerun is blocked. Click <strong>Delete</strong> to archive it
+            to the backup tables, then Generate again.
+        </MudAlert>
+    }
+    else if (_readiness.ExistingDraft)
+    {
+        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-3">
+            A <strong>Draft</strong> batch already exists. Click <strong>Generate</strong> to overwrite it,
+            or <strong>Approve</strong> to finalize.
+        </MudAlert>
+    }
+    else if (!_readiness.EomReady)
+    {
+        <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-3">
+            EOM Output must be generated for @_country @_runDate?.ToString("yyyy-MM") before LPM SIM can run.
+        </MudAlert>
+    }
+}
+
+@if (_readiness?.CurrentBatchNo is long currentBn)
+{
+    <MudText Typo="Typo.h6" Class="mb-1">
+        Result preview &mdash; batch #@currentBn (@(_readiness?.CurrentStatus))
+    </MudText>
+    <div class="lpm-page-subtitle" style="margin-bottom: 0.6rem; font-size:0.82rem;">
+        @{
+            var rs   = _readiness?.CurrentBatchSources;
+            var rsea = _readiness?.CurrentBatchSeasons;
+            var rover= _readiness?.CurrentBatchOverrideUsabilityPct;
+            var rwh  = _readiness?.CurrentBatchWarehouses;
+            var rfs  = _readiness?.CurrentBatchFillStrategy;
+        }
+        Generated with:
+        <strong>Sources:</strong> @(string.IsNullOrEmpty(rs) ? "(unknown — pre-snapshot batch)" : rs)
+        &nbsp;·&nbsp; <strong>Seasons:</strong> @(string.IsNullOrEmpty(rsea) ? "(unknown)" : rsea)
+        &nbsp;·&nbsp; <strong>RR Usability %:</strong> @(rover?.ToString() ?? "—")
+        &nbsp;·&nbsp; <strong>Fill:</strong> @(string.IsNullOrEmpty(rfs) ? "—" : (rfs == "EqualFillRate" ? "Equal fill-rate %" : "Equal qty / store"))
+        &nbsp;·&nbsp; <strong>Warehouses:</strong> @(string.IsNullOrEmpty(rwh) ? "(All)" : rwh)
+        @if (!FilterMatchesCurrent())
+        {
+            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined" Class="ml-2">
+                Current checkboxes differ — Generate again to apply
+            </MudChip>
+        }
+    </div>
+
+    @if (_aggregates is BatchAggregates ba)
+    {
+        <div class="lpm-section mb-3" style="padding:0.6rem 1rem;">
+            <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                Allocation result — split by source
+            </MudText>
+            <MudSimpleTable Dense Hover Bordered Class="lpm-seg-table mt-1" Style="font-size:0.85rem;">
+                <thead>
+                    <tr>
+                        <th></th>
+                        <th class="text-right">Lines</th>
+                        <th class="text-right">Stores</th>
+                        <th class="text-right">Boxes</th>
+                        <th class="text-right">Total Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><strong>LPM</strong> <span class="text-muted">(Phase 1)</span></td>
+                        <td class="text-right">@ba.LpmLines.ToString("N0")</td>
+                        <td class="text-right">@ba.LpmStores.ToString("N0")</td>
+                        <td class="text-right">@ba.LpmBoxes.ToString("N0")</td>
+                        <td class="text-right">@ba.LpmQty.ToString("N0")</td>
+                    </tr>
+                    <tr>
+                        <td><strong>Non-LPM</strong> <span class="text-muted">(Phase 2)</span></td>
+                        <td class="text-right">@ba.NonLpmLines.ToString("N0")</td>
+                        <td class="text-right">@ba.NonLpmStores.ToString("N0")</td>
+                        <td class="text-right">@ba.NonLpmBoxes.ToString("N0")</td>
+                        <td class="text-right">@ba.NonLpmQty.ToString("N0")</td>
+                    </tr>
+                    <tr style="background:#f8fafc;font-weight:600;">
+                        <td>Total</td>
+                        <td class="text-right">@ba.Lines.ToString("N0")</td>
+                        <td class="text-right">@ba.Stores.ToString("N0")</td>
+                        <td class="text-right">@ba.Boxes.ToString("N0")</td>
+                        <td class="text-right" style="background:#fef9c3;">@ba.TotalQty.ToString("N0")</td>
+                    </tr>
+                </tbody>
+            </MudSimpleTable>
+            <MudText Typo="Typo.caption" Style="color:#64748b;">
+                Stores column is distinct count per source — same store can appear in both rows.
+            </MudText>
+        </div>
+    }
+
+    <MudTabs Elevation="0" Rounded="true" Border="true"
+             ApplyEffectsToContainer="true" PanelClass="pa-4" Class="mud-paper lpm-sim-tabs"
+             ActivePanelIndexChanged="OnTabChanged">
+
+        <MudTabPanel Text="Summary (per Store × Division)" Icon="@Icons.Material.Filled.Insights">
+            @if (_loadingSummary)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="3">
+                    <MudAutocomplete T="string" Label="Filter Store" Value="_filterStore"
+                                     ValueChanged="v => { _filterStore = v ?? string.Empty; StateHasChanged(); }"
+                                     SearchFunc="@((s, c) => SearchAllStores(s))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable Placeholder="All stores" />
+                </MudItem>
+                <MudItem xs="12" md="3">
+                    <MudAutocomplete T="string" Label="Filter Division" Value="_filterDivision"
+                                     ValueChanged="v => { _filterDivision = v ?? string.Empty; StateHasChanged(); }"
+                                     SearchFunc="@((s, c) => SearchAllDivisions(s))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable Placeholder="All divisions" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Min Box Usability %"
+                                     Value="_minUsability"
+                                     ValueChanged="async (decimal? v) => { _minUsability = v; await ReloadActiveTabAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="5m" Clearable
+                                     HelperText="Server-side filter applied to all tabs" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Max Box Usability %"
+                                     Value="_maxUsability"
+                                     ValueChanged="async (decimal? v) => { _maxUsability = v; await ReloadActiveTabAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="2" Class="d-flex align-end justify-end">
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_summary.Count == 0)" OnClick="ExportSummaryAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_summary.Count > 0)
+            {
+                var sumEom    = FilteredSummary.Sum(r => r.EOM ?? 0m);
+                var sumSoh    = FilteredSummary.Sum(r => (long)r.SOH);
+                var sumBal    = FilteredSummary.Sum(r => r.Balance ?? 0m);
+                var sumSimQty = FilteredSummary.Sum(r => r.LpmSimQty);
+                var sumRrQty  = FilteredSummary.Sum(r => r.RoundRobinQty);
+
+                <MudTable T="EomSummaryRow" Items="FilteredSummary" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreName" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumEom.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.EOM ?? 0m">EOM</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumSoh.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumBal.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.Balance ?? 0m">Balance</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumSimQty.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.LpmSimQty">LPM SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumRrQty.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>Use %</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>@context.StoreName</MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd>@(context.EOM?.ToString("N0"))</MudTd>
+                        <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd>@(context.Balance?.ToString("N0"))</MudTd>
+                        <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
+                        <MudTd>@(SummaryUsability(context)?.ToString("0.0") ?? "—")%</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_loadingSummary)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    No summary rows. The batch may have produced 0 allocations.
+                </MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Store Summary" Icon="@Icons.Material.Filled.Store">
+            @if (_loadingStoreSummary)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="3">
+                    <MudTextField T="string" Label="Store (contains)" @bind-Value="_storeSummaryFilter"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                  Clearable Immediate="true" DebounceInterval="300" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Min Box Usability %"
+                                     Value="_minUsability"
+                                     ValueChanged="async (decimal? v) => { _minUsability = v; await ReloadStoreSummaryAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     Min="0m" Max="100m" Step="5m" Clearable
+                                     HelperText="e.g. 50 to count only boxes ≥50% used" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Max Box Usability %"
+                                     Value="_maxUsability"
+                                     ValueChanged="async (decimal? v) => { _maxUsability = v; await ReloadStoreSummaryAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="5" Class="d-flex align-end justify-end gap-2">
+                    <MudButton Variant="Variant.Text" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.FilterAltOff"
+                               Disabled="@(_minUsability is null && _maxUsability is null && string.IsNullOrEmpty(_storeSummaryFilter))"
+                               OnClick="ClearStoreSummaryFilters">
+                        Clear filters
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_storeSummary.Count == 0)" OnClick="ExportStoreSummaryAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_storeSummary.Count > 0)
+            {
+                var ssRows  = FilteredStoreSummary.ToList();
+                var sumEom  = ssRows.Sum(r => r.EOM);
+                var sumSoh  = ssRows.Sum(r => r.SOH);
+                var sumDiff = ssRows.Sum(r => r.EomDiff);
+                var sumSim  = ssRows.Sum(r => r.SimQty);
+                var sumRr   = ssRows.Sum(r => r.RrQty);
+
+                <MudTable T="StoreSummaryRow" Items="ssRows" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@ssRows.Count.ToString("N0") rows</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.StoreName">Store Name</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumEom.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.EOM">EOM</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumSoh.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumDiff.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.EomDiff">EOM Diff</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumSim.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@sumRr.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.RrQty">RR Qty</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.StoreID</code></MudTd>
+                        <MudTd>@context.StoreName</MudTd>
+                        <MudTd>@context.EOM.ToString("N0")</MudTd>
+                        <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd style="@(context.EomDiff < 0 ? "color:#dc2626;" : "")">@context.EomDiff.ToString("N0")</MudTd>
+                        <MudTd>@context.SimQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.RrQty > 0 ? context.RrQty.ToString("N0") : "—")</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+                <MudText Typo="Typo.caption" Class="mt-2" Style="color:#64748b;">
+                    Negative <strong>EOM Diff</strong> = store is over-stocked relative to plan (SOH &gt; EOM).
+                    Positive = headroom. <strong>SIM Qty</strong> = total allocated to this store this run; <strong>RR Qty</strong> = subset that came from round-robin.
+                </MudText>
+            }
+            else if (!_loadingStoreSummary)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No store rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="SIM Boxes" Icon="@Icons.Material.Filled.Inventory2">
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="2">
+                    <MudTextField T="string" Label="Box No (contains)" @bind-Value="_boxNoFilter"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                  Clearable Immediate="true" DebounceInterval="300" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudSelect T="string" Label="Kind" @bind-Value="_boxKindFilter"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("LPM")">LPM</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("Non-LPM")">Non-LPM</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudSelect T="string" Label="Warehouse" @bind-Value="_boxWarehouseFilter"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+                        @foreach (var w in BoxWarehouseOptions)
+                        {
+                            <MudSelectItem T="string" Value="@w">@w</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Min Use %"
+                                     Value="_minUsability"
+                                     ValueChanged="async (decimal? v) => { _minUsability = v; await ReloadActiveTabAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Max Use %"
+                                     Value="_maxUsability"
+                                     ValueChanged="async (decimal? v) => { _maxUsability = v; await ReloadActiveTabAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="2" Class="d-flex align-end gap-2">
+                    <MudButton Variant="Variant.Text" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.FilterAltOff"
+                               OnClick="ClearBoxFilters">
+                        Clear filters
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_boxRows.Count == 0)" OnClick="ExportBoxesAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_loadingBoxes)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (_boxRows.Count > 0)
+            {
+                var filteredBoxes = FilteredBoxes.ToList();
+                var totalBoxQty  = filteredBoxes.Sum(r => r.BoxQty ?? 0);
+                var totalSimQty  = filteredBoxes.Sum(r => r.LpmSimQty);
+                var totalRrQty   = filteredBoxes.Sum(r => r.RoundRobinQty);
+                var avgUsability = totalBoxQty > 0 ? Math.Round((decimal)totalSimQty * 100m / totalBoxQty, 1) : 0m;
+
+                <MudTable T="BoxDetailRow" Items="filteredBoxes" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@filteredBoxes.Count.ToString("N0") rows</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxKind ?? string.Empty">Kind</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>Pallet Type</MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>Type Name</MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.TrnDate ?? DateTime.MinValue">Trn Date</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.Warehouse ?? string.Empty">Warehouse</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.Rack ?? string.Empty">Rack</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalBoxQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Total Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalSimQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalRrQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@avgUsability.ToString("0.0")%</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.SkuUsabilityPct ?? 0m">Usability %</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd>
+                            @if (context.BoxKind == "LPM")
+                            {
+                                <span class="lpm-status lpm-status-ok">LPM</span>
+                            }
+                            else if (context.BoxKind == "Non-LPM")
+                            {
+                                <span class="lpm-status lpm-status-warn">Non-LPM</span>
+                            }
+                        </MudTd>
+                        <MudTd>@context.PalletType</MudTd>
+                        <MudTd>@context.TypeName</MudTd>
+                        <MudTd>@(context.TrnDate?.ToString("yyyy-MM-dd"))</MudTd>
+                        <MudTd>@context.Warehouse</MudTd>
+                        <MudTd>@context.Rack</MudTd>
+                        <MudTd>@(context.BoxQty?.ToString("N0"))</MudTd>
+                        <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
+                        <MudTd>@(context.SkuUsabilityPct?.ToString("0.0") ?? "—")%</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_loadingBoxes)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No box rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Item Details" Icon="@Icons.Material.Filled.ListAlt">
+            @if (_loadingItems)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Min Box Usability %"
+                                     Value="_minUsability"
+                                     ValueChanged="async (decimal? v) => { _minUsability = v; await ReloadActiveTabAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Max Box Usability %"
+                                     Value="_maxUsability"
+                                     ValueChanged="async (decimal? v) => { _maxUsability = v; await ReloadActiveTabAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="2" Class="d-flex align-end">
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_itemRows.Count == 0)" OnClick="ExportItemsAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_itemRows.Count > 0)
+            {
+                var filteredItems  = FilteredItems.ToList();
+                var totalItemQty   = filteredItems.Sum(r => r.BoxItemQty ?? 0);
+                var totalSkuMax    = filteredItems.Sum(r => (long)(r.SKUMax ?? 0));
+                var totalSohItem   = filteredItems.Sum(r => (long)r.SOH);
+                var totalLpmQty    = filteredItems.Sum(r => (long)r.LpmQty);
+                var totalRrItem    = filteredItems.Sum(r => (long)r.RoundRobinQty);
+
+                <MudTable T="ItemDetailRow" Items="filteredItems" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@filteredItems.Count.ToString("N0") rows</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.StoreID">Store</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Itemcode">Item</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalItemQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalSkuMax.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SKUMax ?? 0">SKU Max</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalSohItem.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalLpmQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.LpmQty">LPM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalRrItem.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Phase ?? string.Empty">Phase</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>Use %</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>
+                            <code>@context.StoreID</code><br />
+                            <MudText Typo="Typo.caption" Color="Color.Secondary">@context.StoreName</MudText>
+                        </MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd><code>@context.Itemcode</code></MudTd>
+                        <MudTd>@(context.BoxItemQty?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.SKUMax?.ToString("N0"))</MudTd>
+                        <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd>@context.LpmQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
+                        <MudTd><span class="lpm-status @PhaseClass(context.Phase)">@(context.Phase ?? "—")</span></MudTd>
+                        <MudTd>@(ItemUsability(context)?.ToString("0.0") ?? "—")%</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_loadingItems)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No item rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Allocation Trace" Icon="@Icons.Material.Filled.FactCheck">
+            @if (_traceCounts is AllocTraceCounts tc)
+            {
+                <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                    Decision counts (per Box × Item × Store attempt)
+                </MudText>
+                <MudGrid Spacing="2" Class="mb-2 mt-1">
+                    <MudItem xs="6" md="2"><div class="lpm-metric-card-sm lpm-accent-green">
+                        <div class="lpm-metric-label">ALLOC</div>
+                        <div class="lpm-metric-value-sm">@tc.Alloc.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="2"><div class="lpm-metric-card-sm lpm-accent-green">
+                        <div class="lpm-metric-label">ALLOC_RR</div>
+                        <div class="lpm-metric-value-sm">@tc.AllocRr.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="2"><div class="lpm-metric-card-sm lpm-accent-rose">
+                        <div class="lpm-metric-label">SKIP_SKUMAX</div>
+                        <div class="lpm-metric-value-sm">@tc.SkipSkuMax.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="2"><div class="lpm-metric-card-sm lpm-accent-amber">
+                        <div class="lpm-metric-label">SKIP_TARGET</div>
+                        <div class="lpm-metric-value-sm">@tc.SkipTarget.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="2"><div class="lpm-metric-card-sm lpm-accent-purple">
+                        <div class="lpm-metric-label">SKIP_NO_DIV</div>
+                        <div class="lpm-metric-value-sm">@tc.SkipNoDiv.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="2"><div class="lpm-metric-card-sm lpm-accent-cyan">
+                        <div class="lpm-metric-label">SKIP_NO_EOM</div>
+                        <div class="lpm-metric-value-sm">@tc.SkipNoEom.ToString("N0")</div>
+                    </div></MudItem>
+                </MudGrid>
+
+                long inputBoxQty    = _readiness?.EligibleQty ?? 0;
+                long allocatedQty   = tc.TotalAllocatedQty;
+                long discardedQty   = tc.TotalDiscardedQty;
+                long unaccountedQty = inputBoxQty - allocatedQty - discardedQty;
+                <MudText Typo="Typo.caption" Class="mt-3" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                    Qty reconciliation (allocated + discarded + unaccounted = input box qty)
+                </MudText>
+                <MudGrid Spacing="2" Class="mb-3 mt-1">
+                    <MudItem xs="6" md="3"><div class="lpm-metric-card-sm lpm-accent-blue">
+                        <div class="lpm-metric-label">Input Box Qty (selection)</div>
+                        <div class="lpm-metric-value-sm">@inputBoxQty.ToString("N0")</div>
+                        <div class="lpm-metric-sub">eligible boxes for current filter</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="3"><div class="lpm-metric-card-sm lpm-accent-green">
+                        <div class="lpm-metric-label">Allocated Qty</div>
+                        <div class="lpm-metric-value-sm">@allocatedQty.ToString("N0")</div>
+                        <div class="lpm-metric-sub">ALLOC @tc.AllocQty.ToString("N0") + RR @tc.AllocRrQty.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="3"><div class="lpm-metric-card-sm lpm-accent-purple">
+                        <div class="lpm-metric-label">Discarded Qty (Unmappable)</div>
+                        <div class="lpm-metric-value-sm">@discardedQty.ToString("N0")</div>
+                        <div class="lpm-metric-sub">no-div @tc.DiscardedNoDivQty.ToString("N0") + no-eom @tc.DiscardedNoEomQty.ToString("N0")</div>
+                    </div></MudItem>
+                    <MudItem xs="6" md="3"><div class="lpm-metric-card-sm @(unaccountedQty == 0 ? "lpm-accent-green" : "lpm-accent-amber")">
+                        <div class="lpm-metric-label">Unaccounted</div>
+                        <div class="lpm-metric-value-sm">@unaccountedQty.ToString("N0")</div>
+                        <div class="lpm-metric-sub">should be 0 if filter matches batch</div>
+                    </div></MudItem>
+                </MudGrid>
+            }
+
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="6" md="2">
+                    <MudTextField T="string" Label="Box No" @bind-Value="_traceBoxFilter"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense" Clearable />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudTextField T="string" Label="Item Code" @bind-Value="_traceItemFilter"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense" Clearable />
+                </MudItem>
+                <MudItem xs="6" md="3">
+                    <MudAutocomplete T="string" Label="Store ID" Value="_traceStoreFilter"
+                                     ValueChanged="v => _traceStoreFilter = v ?? string.Empty"
+                                     SearchFunc="@((s, c) => SearchAllStoreIDs(s))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable Placeholder="All stores" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudSelect T="string" Label="Decision" Value="_traceDecisionFilter"
+                               ValueChanged="v => _traceDecisionFilter = v ?? string.Empty"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                        <MudSelectItem T="string" Value="@string.Empty">(All)</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("ALLOC")">ALLOC</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("ALLOC_RR")">ALLOC_RR</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_SKUMAX")">SKIP_SKUMAX</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_TARGET")">SKIP_TARGET</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_DIV")">SKIP_NO_DIV</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_EOM")">SKIP_NO_EOM</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="12" md="3" Class="d-flex align-end gap-2">
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Search"
+                               Disabled="@_loadingTrace" OnClick="LoadTraceAsync">
+                        Apply
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Color="Color.Primary" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_loadingTrace || _readiness?.CurrentBatchNo is null)" OnClick="ExportTraceAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_loadingTrace)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (_traceRows.Count > 0)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mb-2">
+                    Showing @_traceRows.Count.ToString("N0") rows (capped at @_traceTop.ToString("N0")).
+                    Use the Excel button to download the full filtered set.
+                </MudAlert>
+
+                <MudTable T="AllocTraceRow" Items="_traceRows" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh>Phase</MudTh>
+                        <MudTh>Decision</MudTh>
+                        <MudTh>Box</MudTh>
+                        <MudTh>Item</MudTh>
+                        <MudTh>Division</MudTh>
+                        <MudTh>Store</MudTh>
+                        <MudTh>SKUMax</MudTh>
+                        <MudTh>SOH (Item)</MudTh>
+                        <MudTh>SKU Bal</MudTh>
+                        <MudTh>Target EOM</MudTh>
+                        <MudTh>Div SOH</MudTh>
+                        <MudTh>Already</MudTh>
+                        <MudTh>Tgt Remain</MudTh>
+                        <MudTh>Line Qty</MudTh>
+                        <MudTh>Take</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><span class="lpm-status @PhaseClass(context.Phase)">@context.Phase</span></MudTd>
+                        <MudTd>
+                            <span class="lpm-status @TraceClass(context.Decision)">@context.Decision</span>
+                        </MudTd>
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd><code>@context.ItemCode</code></MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd>
+                            @if (!string.IsNullOrEmpty(context.StoreID))
+                            {
+                                <code>@context.StoreID</code><br />
+                                <MudText Typo="Typo.caption" Color="Color.Secondary">@context.StoreName</MudText>
+                            }
+                        </MudTd>
+                        <MudTd>@(context.SKUMax?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.SOH_Item?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.SkuBalance?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.TargetEOM?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.DivSOH?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.AlreadyAllocated?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.TargetRemain?.ToString("N0"))</MudTd>
+                        <MudTd>@context.LineQty.ToString("N0")</MudTd>
+                        <MudTd>@context.Take.ToString("N0")</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (!_loadingTrace)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    No trace rows. Click Apply to load — or this batch was generated before trace was added (regenerate to populate trace).
+                </MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Q&amp;A" Icon="@Icons.Material.Filled.QuestionAnswer">
+            <MudText Typo="Typo.subtitle2" Class="mb-1">Investigate this batch's results</MudText>
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-3">
+                Pick a question, fill the parameters, and click Ask. The answer is computed live from this batch's data
+                (Output, AllocTrace, StoreItem/StoreDivBalance) — no LLM calls; everything stays on-prem.
+            </MudText>
+
+            <MudGrid Spacing="2" Class="mb-3">
+                <MudItem xs="12" md="4">
+                    <MudSelect T="string" Label="Question" Value="_qaQuestion"
+                               ValueChanged="v => { _qaQuestion = v ?? string.Empty; _qaResult = null; StateHasChanged(); }"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                        <MudSelectItem T="string" Value="@("StoreDivGap")">Why did (Store, Division) get partial allocation?</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("BoxLow")">Why is this Box under-utilised?</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("StoreOverview")">What did this Store receive overall?</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("BatchBlockers")">What's blocking allocation in this batch?</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+
+                @if (_qaQuestion is "StoreDivGap" or "StoreOverview")
+                {
+                    <MudItem xs="12" md="3">
+                        <MudAutocomplete T="string" Label="Store"
+                                         Value="_qaStoreInput"
+                                         ValueChanged="v => _qaStoreInput = v ?? string.Empty"
+                                         SearchFunc="@((s, c) => SearchAllStores(s))"
+                                         Variant="Variant.Outlined" Margin="Margin.Dense"
+                                         CoerceText="true" Clearable />
+                    </MudItem>
+                }
+                @if (_qaQuestion == "StoreDivGap")
+                {
+                    <MudItem xs="12" md="3">
+                        <MudAutocomplete T="string" Label="Division"
+                                         Value="_qaDivisionInput"
+                                         ValueChanged="v => _qaDivisionInput = v ?? string.Empty"
+                                         SearchFunc="@((s, c) => SearchAllDivisions(s))"
+                                         Variant="Variant.Outlined" Margin="Margin.Dense"
+                                         CoerceText="true" Clearable />
+                    </MudItem>
+                }
+                @if (_qaQuestion == "BoxLow")
+                {
+                    <MudItem xs="12" md="3">
+                        <MudTextField T="string" Label="Box No" @bind-Value="_qaBoxInput"
+                                      Variant="Variant.Outlined" Margin="Margin.Dense" Clearable />
+                    </MudItem>
+                }
+                <MudItem xs="12" md="2" Class="d-flex align-end gap-2">
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Search"
+                               Disabled="@(_qaBusy || string.IsNullOrEmpty(_qaQuestion))"
+                               OnClick="AskInvestigationAsync">
+                        Ask
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_qaBusy)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (_qaResult is InvestigationResult ir)
+            {
+                <div class="lpm-section mb-3">
+                    <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                        Question
+                    </MudText>
+                    <MudText Typo="Typo.body2" Class="mb-2">@ir.Question</MudText>
+
+                    <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                        Answer
+                    </MudText>
+                    <MudText Typo="Typo.body1" Class="mb-3" Style="font-weight:600;color:#0f172a;">@ir.Headline</MudText>
+
+                    @if (ir.Metrics.Count > 0)
+                    {
+                        <MudGrid Spacing="2" Class="mb-3">
+                            @foreach (var m in ir.Metrics)
+                            {
+                                <MudItem xs="6" md="2">
+                                    <div class="lpm-metric-card-sm @m.Accent">
+                                        <div class="lpm-metric-label">@m.Label</div>
+                                        <div class="lpm-metric-value-sm">@m.Value</div>
+                                    </div>
+                                </MudItem>
+                            }
+                        </MudGrid>
+                    }
+
+                    @if (ir.Findings.Count > 0)
+                    {
+                        <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                            Findings
+                        </MudText>
+                        <ul style="font-size:0.88rem;color:#334155;padding-left:1.2rem;margin-bottom:1rem;">
+                            @foreach (var f in ir.Findings)
+                            {
+                                <li class="mb-1">@f</li>
+                            }
+                        </ul>
+                    }
+
+                    @if (ir.Rows.Count > 0)
+                    {
+                        <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                            Supporting data (@ir.Rows.Count rows)
+                        </MudText>
+                        <MudSimpleTable Dense Hover Bordered Class="mt-1" Style="font-size:0.82rem;">
+                            <thead>
+                                <tr>
+                                    @foreach (var col in ir.Columns)
+                                    {
+                                        <th>@col</th>
+                                    }
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (var row in ir.Rows)
+                                {
+                                    <tr>
+                                        @foreach (var cell in row)
+                                        {
+                                            <td>@cell</td>
+                                        }
+                                    </tr>
+                                }
+                            </tbody>
+                        </MudSimpleTable>
+                    }
+                </div>
+            }
+            else if (!_qaBusy)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    Pick a question and click <strong>Ask</strong>. Each answer is computed live from this batch's data —
+                    no AI / LLM calls, everything stays inside your network.
+                </MudAlert>
+            }
+        </MudTabPanel>
+    </MudTabs>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private DateTime? _runDate = DateTime.Today;
+    private bool _srcLpm = true;
+    private bool _srcNonLpm = false;
+    private bool _seasonSummer = true;
+    private bool _seasonWinter = false;
+    private int _overridePct = 60;
+    private bool _verboseTrace = false;   // off by default — drops ~90% of trace insert time
+    private LpmSimFillStrategy _fillStrategy = LpmSimFillStrategy.EqualPerStore;
+    private List<string> _allWarehouses = new();
+    private HashSet<string> _selectedWarehouses = new(StringComparer.OrdinalIgnoreCase);
+
+    private string SelectedWarehousesText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0)            return "(All warehouses)";
+        if (selected.Count == _allWarehouses.Count)             return "All warehouses";
+        if (selected.Count <= 3)                                return string.Join(", ", selected);
+        return $"{selected.Count} of {_allWarehouses.Count} selected";
+    }
+    private LpmSimReadiness? _readiness;
+    private string _lastError = "";
+    private TimeSpan? _lastRunDuration;
+    private string? _lastRunSummary;
+
+    private LpmSimSourceFlags CurrentSources =>
+        (_srcLpm    ? LpmSimSourceFlags.LpmBoxes    : LpmSimSourceFlags.None)
+      | (_srcNonLpm ? LpmSimSourceFlags.NonLpmBoxes : LpmSimSourceFlags.None);
+
+    private LpmSimSeasonFlags CurrentSeasons =>
+        (_seasonSummer ? LpmSimSeasonFlags.Summer : LpmSimSeasonFlags.None)
+      | (_seasonWinter ? LpmSimSeasonFlags.Winter : LpmSimSeasonFlags.None);
+    private List<(string StoreID, string StoreName)> _allStores = new();
+    private List<string> _allDivisions = new();
+    private decimal? _minUsability;
+    private decimal? _maxUsability;
+    // SIM Boxes tab filters
+    private string _boxNoFilter        = "";
+    private string _boxKindFilter      = "";   // "" = All, "LPM", "Non-LPM"
+    private string _boxWarehouseFilter = "";
+    private List<LpmSimOutput> _lines = new();
+    private bool _busy;
+
+    private string _filterStore = "";
+    private string _filterItem = "";
+    private string _filterBox = "";
+    private string _filterDivision = "";
+    private int _activeTab;
+    private bool _loadingSummary;
+    private bool _loadingStoreSummary;
+    private List<StoreSummaryRow> _storeSummary = new();
+    private string _storeSummaryFilter = "";
+    // Note: Box Usability % filter (_minUsability / _maxUsability) is declared
+    // earlier and is shared across all report tabs.
+
+    private IEnumerable<StoreSummaryRow> FilteredStoreSummary
+    {
+        get
+        {
+            if (string.IsNullOrWhiteSpace(_storeSummaryFilter)) return _storeSummary;
+            var f = _storeSummaryFilter.Trim();
+            return _storeSummary.Where(r =>
+                r.StoreID.Contains(f, StringComparison.OrdinalIgnoreCase) ||
+                r.StoreName.Contains(f, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+    private bool _loadingBoxes;
+    private bool _loadingItems;
+    private List<EomSummaryRow> _summary = new();
+    // Tracks which batch's results are currently loaded into _summary / _aggregates.
+    // CheckAsync re-runs on every filter change, but only the readiness counters
+    // need refreshing when the batch number stays the same — the tab data is
+    // identical, so we skip the heavy LoadSummaryAsync round-trip.
+    private long? _loadedBatchNo;
+    private List<BoxDetailRow> _boxRows = new();
+    private List<ItemDetailRow> _itemRows = new();
+    private BatchAggregates? _aggregates;
+
+    // Q&A (Investigate) tab state
+    private string _qaQuestion       = "BatchBlockers";   // default question
+    private string _qaStoreInput     = "";                 // "BFL DXB Shopping center" or just "BFL-DXB"
+    private string _qaDivisionInput  = "";                 // division NAME
+    private string _qaBoxInput       = "";
+    private bool   _qaBusy;
+    private InvestigationResult? _qaResult;
+
+    private async Task AskInvestigationAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn) { Snackbar.Add("No current batch.", Severity.Warning); return; }
+        _qaBusy = true; _qaResult = null; StateHasChanged();
+        try
+        {
+            switch (_qaQuestion)
+            {
+                case "StoreDivGap":
+                    var sid = ResolveStoreId(_qaStoreInput);
+                    var div = ResolveDivCode(_qaDivisionInput);
+                    if (string.IsNullOrEmpty(sid) || div is null)
+                    {
+                        Snackbar.Add("Pick both a Store and a Division.", Severity.Warning);
+                        return;
+                    }
+                    _qaResult = await Investigator.StoreDivisionGapAsync(bn, sid, div.Value);
+                    break;
+
+                case "BoxLow":
+                    if (string.IsNullOrWhiteSpace(_qaBoxInput))
+                    {
+                        Snackbar.Add("Enter a Box No.", Severity.Warning);
+                        return;
+                    }
+                    _qaResult = await Investigator.BoxUtilisationAsync(bn, _qaBoxInput.Trim());
+                    break;
+
+                case "StoreOverview":
+                    var sid2 = ResolveStoreId(_qaStoreInput);
+                    if (string.IsNullOrEmpty(sid2))
+                    {
+                        Snackbar.Add("Pick a Store.", Severity.Warning);
+                        return;
+                    }
+                    _qaResult = await Investigator.StoreOverviewAsync(bn, sid2);
+                    break;
+
+                case "BatchBlockers":
+                    _qaResult = await Investigator.BatchBlockersAsync(bn);
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Investigation failed: {(ex.InnerException?.Message ?? ex.Message)}", Severity.Error,
+                cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+        }
+        finally { _qaBusy = false; StateHasChanged(); }
+    }
+
+    /// <summary>Resolve a free-text store input to a StoreID. Handles "Name (ID)" autocomplete output too.</summary>
+    private string ResolveStoreId(string input)
+    {
+        var s = (input ?? "").Trim();
+        if (string.IsNullOrEmpty(s)) return "";
+        // Try exact StoreID match first
+        if (_allStores.Any(x => string.Equals(x.StoreID, s, StringComparison.OrdinalIgnoreCase)))
+            return _allStores.First(x => string.Equals(x.StoreID, s, StringComparison.OrdinalIgnoreCase)).StoreID;
+        // Try by name
+        var byName = _allStores.FirstOrDefault(x => string.Equals(x.StoreName, s, StringComparison.OrdinalIgnoreCase));
+        if (byName.StoreID is not null) return byName.StoreID;
+        // Last resort — return as-is so the user gets a clean "no rows" answer rather than nothing
+        return s;
+    }
+
+    private int? ResolveDivCode(string input)
+    {
+        var s = (input ?? "").Trim();
+        if (string.IsNullOrEmpty(s)) return null;
+        // Try integer first
+        if (int.TryParse(s, out var n)) return n;
+        // Look up by name in our cached divisions list
+        var idx = _allDivisions.FindIndex(d => string.Equals(d, s, StringComparison.OrdinalIgnoreCase));
+        if (idx < 0) return null;
+        // We have division NAMES but need codes — query DB
+        try
+        {
+            using var db = DbFactory.CreateDbContext();
+            var d = db.Divisions.AsNoTracking().FirstOrDefault(x => x.Name == _allDivisions[idx]);
+            return d?.DivCode;
+        }
+        catch { return null; }
+    }
+
+    // Allocation Trace tab state
+    private bool _loadingTrace;
+    private List<AllocTraceRow> _traceRows = new();
+    private AllocTraceCounts? _traceCounts;
+    private string _traceBoxFilter = "";
+    private string _traceItemFilter = "";
+    private string _traceStoreFilter = "";
+    private string _traceDecisionFilter = "";
+    private const int _traceTop = 5000;
+
+    private Task<IEnumerable<string>> SearchAllStoreIDs(string? value)
+    {
+        var all = _allStores.Select(s => s.StoreID).Where(id => !string.IsNullOrEmpty(id)).Distinct().OrderBy(s => s);
+        if (string.IsNullOrWhiteSpace(value)) return Task.FromResult<IEnumerable<string>>(all);
+        return Task.FromResult<IEnumerable<string>>(all
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static string TraceClass(string d) => d switch
+    {
+        "ALLOC"       => "lpm-status-ok",
+        "ALLOC_RR"    => "lpm-status-ok",
+        "SKIP_SKUMAX" => "lpm-status-err",
+        "SKIP_TARGET" => "lpm-status-warn",
+        _              => "lpm-status-warn",
+    };
+
+    private static string PhaseClass(string? p) => p switch
+    {
+        "P1"     => "lpm-status-ok",
+        "P1_RR"  => "lpm-status-warn",
+        "P1_OVR" => "lpm-status-err",       // cap-busting RR — visually distinct
+        "P2"     => "lpm-status-ok",
+        "P2_RR"  => "lpm-status-warn",
+        "P2_OVR" => "lpm-status-err",
+        _        => "lpm-status-warn",
+    };
+
+    private Task<IEnumerable<string>> SearchAllStores(string? value)
+    {
+        var all = _allStores.Select(s => s.StoreName).Where(n => !string.IsNullOrEmpty(n)).Distinct().OrderBy(s => s);
+        if (string.IsNullOrWhiteSpace(value)) return Task.FromResult<IEnumerable<string>>(all);
+        return Task.FromResult<IEnumerable<string>>(all
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private Task<IEnumerable<string>> SearchAllDivisions(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return Task.FromResult<IEnumerable<string>>(_allDivisions);
+        return Task.FromResult<IEnumerable<string>>(_allDivisions
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    private static decimal? SummaryUsability(EomSummaryRow r) =>
+        r.EOM is decimal eom && eom > 0 ? Math.Round((decimal)r.LpmSimQty * 100m / eom, 1) : null;
+
+    private static decimal? ItemUsability(ItemDetailRow r) =>
+        r.BoxItemQty is long q && q > 0 ? Math.Round((decimal)r.LpmQty * 100m / q, 1) : null;
+
+    /// <summary>
+    /// Re-fetch the currently-visible tab using the latest Box Usability
+    /// filter values. Called when Min/Max Box Usability % changes on any tab.
+    /// Other tabs invalidate their cached data so they refetch on next switch.
+    /// </summary>
+    private async Task ReloadActiveTabAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn) return;
+        // Refresh the source-split matrix so it always reflects the same box
+        // population the tabs are showing. When _minUsability is null/0 the
+        // CTE filter is open-ended so every box is counted (matches the
+        // "show all" behaviour the user expects).
+        try { _aggregates = await Reports.GetBatchAggregatesAsync(bn, _minUsability, _maxUsability); }
+        catch { /* surfaced by tab load below */ }
+        // Invalidate other tabs' cached data — next OnTabChanged will refetch.
+        if (_activeTab != 0) _summary.Clear();
+        if (_activeTab != 2) _boxRows.Clear();
+        if (_activeTab != 3) _itemRows.Clear();
+        if (_activeTab != 4) _traceRows.Clear();
+        // Refresh the visible tab now.
+        switch (_activeTab)
+        {
+            case 0: await LoadSummaryAsync(bn); break;
+            case 1: await LoadStoreSummaryAsync(bn); break;
+            case 2: await LoadBoxesAsync(bn);   break;
+            case 3: await LoadItemsAsync(bn);   break;
+            case 4: await LoadTraceAsync();      break;
+        }
+    }
+
+    private bool UsabilityInRange(decimal? pct)
+    {
+        if (_minUsability is decimal lo && (pct is null || pct < lo)) return false;
+        if (_maxUsability is decimal hi && (pct is null || pct > hi)) return false;
+        return true;
+    }
+
+    private IEnumerable<LpmSimOutput> FilteredLines
+    {
+        get
+        {
+            IEnumerable<LpmSimOutput> q = _lines;
+            if (!string.IsNullOrWhiteSpace(_filterStore))
+                q = q.Where(l => l.StoreID.Contains(_filterStore.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(_filterItem))
+                q = q.Where(l => l.Itemcode.Contains(_filterItem.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(_filterBox))
+                q = q.Where(l => l.BoxNo.Contains(_filterBox.Trim(), StringComparison.OrdinalIgnoreCase));
+            return q;
+        }
+    }
+
+    private IEnumerable<EomSummaryRow> FilteredSummary
+    {
+        get
+        {
+            // Box Usability filter is now SERVER-side (the SQL only returns rows
+            // for qualifying boxes), so we don't apply UsabilityInRange here.
+            // Store / Division filters stay client-side.
+            IEnumerable<EomSummaryRow> q = _summary;
+            if (!string.IsNullOrWhiteSpace(_filterStore))
+            {
+                var f = _filterStore.Trim();
+                q = q.Where(r => r.StoreName.Contains(f, StringComparison.OrdinalIgnoreCase));
+            }
+            if (!string.IsNullOrWhiteSpace(_filterDivision))
+                q = q.Where(r => r.DivisionName.Contains(_filterDivision.Trim(), StringComparison.OrdinalIgnoreCase));
+            return q;
+        }
+    }
+
+    /// <summary>
+    /// SIM Boxes tab — combined client-side filter: Box No (contains), Kind
+    /// (LPM / Non-LPM), Warehouse, plus existing Min/Max Usability %.
+    /// </summary>
+    private IEnumerable<BoxDetailRow> FilteredBoxes
+    {
+        get
+        {
+            IEnumerable<BoxDetailRow> q = _boxRows;
+            if (!string.IsNullOrWhiteSpace(_boxNoFilter))
+            {
+                var f = _boxNoFilter.Trim();
+                q = q.Where(r => !string.IsNullOrEmpty(r.BoxNo)
+                              && r.BoxNo.Contains(f, StringComparison.OrdinalIgnoreCase));
+            }
+            if (!string.IsNullOrEmpty(_boxKindFilter))
+                q = q.Where(r => string.Equals(r.BoxKind, _boxKindFilter, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrEmpty(_boxWarehouseFilter))
+                q = q.Where(r => string.Equals(r.Warehouse, _boxWarehouseFilter, StringComparison.OrdinalIgnoreCase));
+            q = q.Where(r => UsabilityInRange(r.SkuUsabilityPct));
+            return q;
+        }
+    }
+
+    /// <summary>Distinct warehouses that actually appear in the loaded box rows (only the relevant subset).</summary>
+    private IEnumerable<string> BoxWarehouseOptions =>
+        _boxRows.Select(r => r.Warehouse ?? "")
+                .Where(w => !string.IsNullOrEmpty(w))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(w => w, StringComparer.OrdinalIgnoreCase);
+
+    private void ClearBoxFilters()
+    {
+        _boxNoFilter        = "";
+        _boxKindFilter      = "";
+        _boxWarehouseFilter = "";
+        _minUsability       = null;
+        _maxUsability       = null;
+        StateHasChanged();
+    }
+
+    // Box Usability filter is server-side for Item Details too — no client-side
+    // re-filter. The list returned from the server is already box-filtered.
+    private IEnumerable<ItemDetailRow> FilteredItems => _itemRows;
+
+    private async Task OnTabChanged(int idx)
+    {
+        _activeTab = idx;
+        if (_readiness?.CurrentBatchNo is not long bn) return;
+        // Tab indices match the order they're declared in the razor:
+        //   0 = Summary (Store × Division)
+        //   1 = Store Summary  (NEW)
+        //   2 = SIM Boxes
+        //   3 = Item Details
+        //   4 = Allocation Trace
+        switch (idx)
+        {
+            case 0: if (_summary.Count == 0)      await LoadSummaryAsync(bn);     break;
+            case 1: if (_storeSummary.Count == 0) await LoadStoreSummaryAsync(bn); break;
+            case 2: if (_boxRows.Count == 0)      await LoadBoxesAsync(bn);        break;
+            case 3: if (_itemRows.Count == 0)     await LoadItemsAsync(bn);        break;
+            case 4:
+                if (_traceCounts is null) _traceCounts = await Reports.GetAllocTraceCountsAsync(bn);
+                if (_traceRows.Count == 0) await LoadTraceAsync();
+                break;
+        }
+    }
+
+    private async Task LoadStoreSummaryAsync(long batchNo)
+    {
+        _loadingStoreSummary = true; StateHasChanged();
+        try { _storeSummary = await Reports.GetStoreSummaryAsync(batchNo, _minUsability, _maxUsability); }
+        catch (Exception ex) { Snackbar.Add($"Store Summary failed: {ex.Message}", Severity.Error); _storeSummary = new(); }
+        finally { _loadingStoreSummary = false; StateHasChanged(); }
+    }
+
+    /// <summary>Re-runs the Store Summary fetch with the current usability filter values.</summary>
+    private async Task ReloadStoreSummaryAsync()
+    {
+        if (_readiness?.CurrentBatchNo is long bn) await LoadStoreSummaryAsync(bn);
+    }
+
+    private async Task ClearStoreSummaryFilters()
+    {
+        _storeSummaryFilter        = "";
+        _minUsability  = null;
+        _maxUsability  = null;
+        await ReloadStoreSummaryAsync();
+    }
+
+    private async Task LoadTraceAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn) return;
+        _loadingTrace = true; StateHasChanged();
+        try
+        {
+            _traceRows = await Reports.GetAllocTraceAsync(
+                bn,
+                _traceBoxFilter, _traceItemFilter, _traceStoreFilter, _traceDecisionFilter,
+                _minUsability, _maxUsability,
+                top: _traceTop);
+            _traceCounts ??= await Reports.GetAllocTraceCountsAsync(bn);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Trace failed: {ex.Message}", Severity.Error);
+            _traceRows = new();
+        }
+        finally { _loadingTrace = false; StateHasChanged(); }
+    }
+
+    private async Task LoadSummaryAsync(long batchNo)
+    {
+        _loadingSummary = true; StateHasChanged();
+        try { _summary = await Reports.GetEomSummaryAsync(batchNo, _minUsability, _maxUsability); }
+        catch (Exception ex) { Snackbar.Add($"Summary failed: {ex.Message}", Severity.Error); _summary = new(); }
+        finally { _loadingSummary = false; StateHasChanged(); }
+    }
+
+    private async Task LoadBoxesAsync(long batchNo)
+    {
+        _loadingBoxes = true; StateHasChanged();
+        try { _boxRows = await Reports.GetBoxDetailsAsync(batchNo, rollupToBoxOnly: true); }
+        catch (Exception ex) { Snackbar.Add($"Boxes failed: {ex.Message}", Severity.Error); _boxRows = new(); }
+        finally { _loadingBoxes = false; StateHasChanged(); }
+    }
+
+    private async Task LoadItemsAsync(long batchNo)
+    {
+        _loadingItems = true; StateHasChanged();
+        try { _itemRows = await Reports.GetItemDetailsAsync(batchNo, _minUsability, _maxUsability); }
+        catch (Exception ex) { Snackbar.Add($"Items failed: {ex.Message}", Severity.Error); _itemRows = new(); }
+        finally { _loadingItems = false; StateHasChanged(); }
+    }
+
+    private string CurrentBatchAccent() =>
+        _readiness?.ExistingApproved == true ? "lpm-accent-purple"
+        : _readiness?.ExistingDraft == true ? "lpm-accent-amber"
+        : "lpm-accent-blue";
+
+    private async Task OnRunDateChanged(DateTime? date)
+    {
+        var prev = _runDate;
+        _runDate = date;
+        // Day-of-month doesn't affect any readiness counter (the box / EOM /
+        // SOH queries all key on Year+Month), so when the user just changes
+        // the day inside the same month we can skip the heavy readiness
+        // re-query and only refresh the existing-batch lookup. The full path
+        // still runs on Country / Year / Month / Sources / Season changes.
+        if (date is DateTime nd && prev is DateTime pd
+            && nd.Year == pd.Year && nd.Month == pd.Month
+            && _readiness is not null)
+        {
+            await RefreshExistingBatchOnlyAsync();
+            return;
+        }
+        await CheckAsync();
+    }
+
+    // Cheap follow-up: just look up the (Country, RunDate) batch row to
+    // refresh the bottom-line "Current batch" card. The expensive box /
+    // SOH counters are reused from the previous CheckAsync result.
+    private async Task RefreshExistingBatchOnlyAsync()
+    {
+        if (string.IsNullOrEmpty(_country) || _runDate is null) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var rd = _runDate.Value.Date;
+        var existing = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.Country == _country && b.RunDate == rd)
+            .OrderByDescending(b => b.LPMBatchNo)
+            .FirstOrDefaultAsync();
+        if (_readiness is not null)
+        {
+            _readiness = _readiness with
+            {
+                ExistingDraft     = existing is { Status: "Draft"    },
+                ExistingApproved  = existing is { Status: "Approved" },
+                CurrentBatchNo    = existing?.LPMBatchNo,
+                CurrentStatus     = existing?.Status,
+                CurrentApprovedTS = existing?.ApprovedTS,
+                CurrentApprovedBy = existing?.ApprovedBy,
+            };
+        }
+        // Keep tab data in sync with whichever batch is now "current".
+        if (existing?.LPMBatchNo != _loadedBatchNo)
+        {
+            if (existing is not null)
+            {
+                _summary.Clear(); _storeSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
+                _traceCounts = null;
+                _aggregates = await Reports.GetBatchAggregatesAsync(existing.LPMBatchNo, _minUsability, _maxUsability);
+                _ = LoadSummaryAsync(existing.LPMBatchNo);
+            }
+            else
+            {
+                _summary = new(); _storeSummary = new(); _boxRows = new();
+                _itemRows = new(); _traceRows = new(); _traceCounts = null;
+                _aggregates = null;
+            }
+            _loadedBatchNo = existing?.LPMBatchNo;
+        }
+        StateHasChanged();
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        _allDivisions = await db.Divisions.AsNoTracking()
+            .Select(d => d.Name ?? "")
+            .Where(n => n != "")
+            .OrderBy(n => n)
+            .ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        // Distinct warehouses (from racks.dbo.whboxitems) for the multi-select.
+        try { _allWarehouses = await Reports.GetDistinctWarehousesAsync(); }
+        catch { _allWarehouses = new(); }
+        await LoadStoresForCountryAsync();
+        if (!string.IsNullOrEmpty(_country)) await CheckAsync();
+    }
+
+    private async Task LoadStoresForCountryAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _allStores = new(); return; }
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var rows = await db.DataSettings.AsNoTracking()
+            .Where(s => s.ActiveStore == "Y" && s.Country == _country
+                     && s.StoreID != null && s.PBFullname != null)
+            .Select(s => new { s.StoreID, s.PBFullname })
+            .Distinct()
+            .OrderBy(s => s.PBFullname)
+            .ToListAsync();
+        _allStores = rows.Select(x => (x.StoreID!, x.PBFullname!)).ToList();
+    }
+
+    // Tracks "user changed something while a Check was running" — when the
+    // current call finishes we pass through the loop one more time so the
+    // final readiness reflects the latest filter state. Without this, rapid
+    // clicks during a slow Check would land on stale data.
+    private bool _checkPending;
+
+    private async Task CheckAsync()
+    {
+        if (string.IsNullOrEmpty(_country) || _runDate is null) { _readiness = null; _lines.Clear(); StateHasChanged(); return; }
+
+        // Reentrancy guard. If a Check is already running, just flag that one
+        // more pass is needed and return — the in-flight call will loop again.
+        if (_busy) { _checkPending = true; return; }
+        _busy = true; StateHasChanged();
+        try
+        {
+            // Trailing-debounce loop: re-run while the user kept changing
+            // inputs during a Check. Reads filter state fresh on every pass
+            // so the final readiness reflects the latest UI.
+            do
+            {
+                _checkPending = false;
+                var d = _runDate.Value.Date;
+                _readiness = await Sim.CheckAsync(_country, d.Year, d.Month, d, CurrentSources, CurrentSeasons, _selectedWarehouses.ToList());
+                var bnNow = _readiness.CurrentBatchNo;
+
+                // Only reload the heavy result tabs when the batch number
+                // actually changes (new draft, switched country/date, batch
+                // deleted). Filter tweaks like Box Source / Season / Warehouse
+                // change the readiness counters at the top but do NOT change
+                // the existing batch's tab data — re-running LoadSummaryAsync
+                // on every checkbox click was costing a round-trip per click.
+                if (bnNow != _loadedBatchNo)
+                {
+                    if (bnNow is long bn)
+                    {
+                        _summary.Clear(); _storeSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
+                        _traceCounts = null;
+                        _aggregates = await Reports.GetBatchAggregatesAsync(bn, _minUsability, _maxUsability);
+
+                        // Summary tab load runs in the background — its own
+                        // _loadingSummary flag drives the progress bar inside
+                        // the tab. We don't await it here so changing the
+                        // run-date doesn't lock the page on the heavy Summary
+                        // CTE; the user can switch to other tabs, click
+                        // Generate, etc., while Summary fills in.
+                        _ = LoadSummaryAsync(bn);
+                    }
+                    else
+                    {
+                        _lines = new List<LpmSimOutput>();
+                        _summary = new List<EomSummaryRow>();
+                        _storeSummary = new List<StoreSummaryRow>();
+                        _boxRows = new List<BoxDetailRow>();
+                        _itemRows = new List<ItemDetailRow>();
+                        _traceRows = new List<AllocTraceRow>();
+                        _traceCounts = null;
+                        _aggregates = null;
+                    }
+                    _loadedBatchNo = bnNow;
+                }
+            } while (_checkPending);
+        }
+        catch (Exception ex)
+        {
+            _lastError = FormatError("Check failed", ex);
+            Snackbar.Add($"Check failed: {(ex.InnerException?.Message ?? ex.Message)}", Severity.Error,
+                cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task GenerateAsync()
+    {
+        if (_runDate is null || string.IsNullOrEmpty(_country)) return;
+
+        if (_readiness?.ExistingDraft == true)
+        {
+            var ok = await DialogService.ShowMessageBox("Overwrite Draft",
+                "A Draft batch already exists for this country and date. Generate will replace it. Continue?",
+                yesText: "Generate", cancelText: "Cancel");
+            if (ok != true) return;
+        }
+
+        _lastError = "";
+        _lastRunDuration = null;
+        _lastRunSummary = null;
+        _busy = true; StateHasChanged();
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var d = _runDate.Value.Date;
+            var result = await Sim.GenerateAsync(new LpmSimGenerateRequest
+            {
+                Country              = _country,
+                RunYear              = d.Year,
+                RunMonth             = d.Month,
+                RunDate              = d,
+                User                 = CurrentUser.Name,
+                Sources              = CurrentSources,
+                Seasons              = CurrentSeasons,
+                OverrideUsabilityPct = _overridePct,
+                Warehouses           = _selectedWarehouses.ToList(),
+                VerboseTrace         = _verboseTrace,
+                FillStrategy         = _fillStrategy,
+            });
+            sw.Stop();
+            _lastRunDuration = sw.Elapsed;
+            // Show qty + per-phase + timing breakdown so the user can see where
+            // the time went without leaving the page.
+            _lastRunSummary  =
+                $"Batch #{result.LPMBatchNo} · {result.LinesGenerated:N0} lines · {result.BoxesProcessed:N0} boxes · qty {result.TotalQty:N0} · " +
+                $"P1 normal {result.P1NormalQty:N0} / RR {result.P1RrQty:N0} · P2 normal {result.P2NormalQty:N0} / RR {result.P2RrQty:N0} · " +
+                $"⏱ readBoxes {result.MsReadBoxes:N0}ms / itemDiv {result.MsReadItemDiv:N0}ms / SOH {result.MsReadSoh:N0}ms / EOM {result.MsReadEom:N0}ms / " +
+                $"alloc {result.MsAllocate:N0}ms / output {result.MsPersistOutput:N0}ms / trace {result.MsPersistTrace:N0}ms ({result.TraceRowsWritten:N0} rows) / balances {result.MsPersistBalances:N0}ms";
+
+            Snackbar.Add(
+                $"Batch #{result.LPMBatchNo} ready in {FormatDuration(sw.Elapsed)} — {result.LinesGenerated:N0} lines, {result.BoxesProcessed:N0} boxes, qty {result.TotalQty:N0}.",
+                Severity.Success,
+                cfg => cfg.VisibleStateDuration = 12000);
+            if (result.ItemsWithoutDivision > 0 || result.BoxesSkipped > 0)
+                Snackbar.Add(
+                    $"Skipped {result.ItemsWithoutDivision:N0} items without division mapping; {result.BoxesSkipped:N0} item lines had no EOM rows for their division.",
+                    Severity.Warning,
+                    cfg => cfg.VisibleStateDuration = 15000);
+            await CheckAsync();
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            // Walk the InnerException chain — DbUpdateException's Message is
+            // generic ("An error occurred while saving..."); the real SQL error
+            // (constraint name, column, etc.) lives a couple of levels deep.
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"Generate failed after {FormatDuration(sw.Elapsed)}.").AppendLine();
+            var cur = ex; var depth = 0;
+            while (cur is not null && depth < 5)
+            {
+                sb.AppendLine($"[{depth}] {cur.GetType().Name}: {cur.Message}");
+                cur = cur.InnerException; depth++;
+            }
+            sb.AppendLine().AppendLine(ex.StackTrace);
+            _lastError = sb.ToString();
+            Snackbar.Add(
+                $"Generate failed: {(ex.InnerException?.Message ?? ex.Message)}",
+                Severity.Error,
+                cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private static string FormatDuration(TimeSpan t)
+    {
+        if (t.TotalMinutes >= 1) return $"{(int)t.TotalMinutes}m {t.Seconds}s";
+        if (t.TotalSeconds >= 1) return $"{t.TotalSeconds:0.0}s";
+        return $"{t.TotalMilliseconds:0}ms";
+    }
+
+    /// <summary>
+    /// Format any exception with up to 5 levels of InnerException so the real
+    /// SQL constraint / column name (which is hidden behind generic EF wrapper
+    /// messages like "An error occurred while saving the entity changes") shows
+    /// up in the error banner. Without this we'd be debugging blind.
+    /// </summary>
+    private static string FormatError(string title, Exception ex)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"{title}.").AppendLine();
+        var cur = ex; var depth = 0;
+        while (cur is not null && depth < 5)
+        {
+            sb.AppendLine($"[{depth}] {cur.GetType().Name}: {cur.Message}");
+            cur = cur.InnerException; depth++;
+        }
+        sb.AppendLine().AppendLine(ex.StackTrace);
+        return sb.ToString();
+    }
+
+    /// <summary>True when the current checkbox state matches the snapshot stored on the existing batch.</summary>
+    private bool FilterMatchesCurrent()
+    {
+        var batchSrc  = _readiness?.CurrentBatchSources;
+        var batchSeas = _readiness?.CurrentBatchSeasons;
+        if (string.IsNullOrEmpty(batchSrc) || string.IsNullOrEmpty(batchSeas))
+            return true;   // snapshot missing — don't nag the user
+        var curSrc = SourceLabelStatic(CurrentSources);
+        var curSea = SeasonLabelStatic(CurrentSeasons);
+        if (!string.Equals(batchSrc, curSrc, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!string.Equals(batchSeas, curSea, StringComparison.OrdinalIgnoreCase)) return false;
+        // Warehouses: empty current = "all" matches empty/null snapshot. Otherwise compare canonical.
+        var curWh   = WarehousesLabelStatic(_selectedWarehouses);
+        var batchWh = string.IsNullOrEmpty(_readiness?.CurrentBatchWarehouses) ? "" : _readiness!.CurrentBatchWarehouses;
+        return string.Equals(curWh, batchWh, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string WarehousesLabelStatic(IReadOnlyCollection<string>? selected)
+    {
+        if (selected is null || selected.Count == 0) return "";
+        return string.Join(",", selected
+            .Where(w => !string.IsNullOrWhiteSpace(w))
+            .Select(w => w.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(w => w, StringComparer.OrdinalIgnoreCase));
+    }
+
+    private static string SourceLabelStatic(LpmSimSourceFlags f)
+    {
+        if (f == LpmSimSourceFlags.None) return "no sources";
+        var parts = new List<string>(2);
+        if (f.HasFlag(LpmSimSourceFlags.LpmBoxes))    parts.Add("LPM");
+        if (f.HasFlag(LpmSimSourceFlags.NonLpmBoxes)) parts.Add("Non-LPM");
+        return string.Join(" + ", parts);
+    }
+    private static string SeasonLabelStatic(LpmSimSeasonFlags f)
+    {
+        if (f == LpmSimSeasonFlags.None || f == LpmSimSeasonFlags.Both) return "All seasons";
+        var parts = new List<string>(2);
+        if (f.HasFlag(LpmSimSeasonFlags.Summer)) parts.Add("Summer");
+        if (f.HasFlag(LpmSimSeasonFlags.Winter)) parts.Add("Winter");
+        return string.Join(" + ", parts);
+    }
+
+    private async Task ApproveAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn) return;
+        var ok = await DialogService.ShowMessageBox("Approve batch",
+            $"Approve batch #{bn}? Once approved, it cannot be re-generated until you Delete it.",
+            yesText: "Approve", cancelText: "Cancel");
+        if (ok != true) return;
+
+        _busy = true; StateHasChanged();
+        try
+        {
+            await Sim.ApproveAsync(bn, CurrentUser.Name);
+            Snackbar.Add($"Batch #{bn} approved.", Severity.Success);
+            await CheckAsync();
+        }
+        catch (Exception ex)
+        {
+            _lastError = FormatError("Approve failed", ex);
+            Snackbar.Add($"Approve failed: {(ex.InnerException?.Message ?? ex.Message)}", Severity.Error,
+                cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn) return;
+        var ok = await DialogService.ShowMessageBox("Delete batch",
+            $"Move batch #{bn} (and all its lines) to backup tables and remove from active? You'll be able to Generate again.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+
+        _busy = true; StateHasChanged();
+        try
+        {
+            await Sim.DeleteAsync(bn, CurrentUser.Name);
+            Snackbar.Add($"Batch #{bn} archived.", Severity.Success);
+            await CheckAsync();
+        }
+        catch (Exception ex)
+        {
+            _lastError = FormatError("Delete failed", ex);
+            Snackbar.Add($"Delete failed: {(ex.InnerException?.Message ?? ex.Message)}", Severity.Error,
+                cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    // ==================== Excel exports ====================
+
+    private async Task ExportSummaryAsync()
+    {
+        var rows = FilteredSummary.ToList();
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        var bn = _readiness?.CurrentBatchNo ?? 0;
+        await SaveExcelAsync($"LPMSIM_Summary_{bn}.xlsx", "Summary", sheet =>
+        {
+            string[] headers = { "Store", "Division", "EOM", "SOH", "Balance", "LPM SIM Qty", "RR Qty", "Use %" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value = r.StoreName;
+                sheet.Cell(row, 2).Value = r.DivisionName;
+                sheet.Cell(row, 3).Value = (double?)r.EOM;
+                sheet.Cell(row, 4).Value = r.SOH;
+                sheet.Cell(row, 5).Value = (double?)r.Balance;
+                sheet.Cell(row, 6).Value = r.LpmSimQty;
+                sheet.Cell(row, 7).Value = r.RoundRobinQty;
+                sheet.Cell(row, 8).Value = (double?)SummaryUsability(r);
+            }
+            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7 });
+            sheet.Range(2, 8, rows.Count + 1, 8).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task ExportStoreSummaryAsync()
+    {
+        var rows = FilteredStoreSummary.ToList();
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        var bn = _readiness?.CurrentBatchNo ?? 0;
+        await SaveExcelAsync($"LPMSIM_StoreSummary_{bn}.xlsx", "StoreSummary", sheet =>
+        {
+            string[] headers = { "Store ID", "Store Name", "EOM", "SOH", "EOM Diff", "SIM Qty", "RR Qty" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value = r.StoreID;
+                sheet.Cell(row, 2).Value = r.StoreName;
+                sheet.Cell(row, 3).Value = (double)r.EOM;
+                sheet.Cell(row, 4).Value = r.SOH;
+                sheet.Cell(row, 5).Value = (double)r.EomDiff;
+                sheet.Cell(row, 6).Value = r.SimQty;
+                sheet.Cell(row, 7).Value = r.RrQty;
+            }
+            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7 });
+        });
+    }
+
+    private async Task ExportBoxesAsync()
+    {
+        var rows = FilteredBoxes.ToList();
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        var bn = _readiness?.CurrentBatchNo ?? 0;
+        await SaveExcelAsync($"LPMSIM_Boxes_{bn}.xlsx", "Boxes", sheet =>
+        {
+            string[] headers = { "Box No", "Kind", "Pallet Type", "Type Name", "Trn Date", "Warehouse", "Rack", "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value  = r.BoxNo;
+                sheet.Cell(row, 2).Value  = r.BoxKind ?? "";
+                sheet.Cell(row, 3).Value  = r.PalletType ?? "";
+                sheet.Cell(row, 4).Value  = r.TypeName ?? "";
+                if (r.TrnDate.HasValue) sheet.Cell(row, 5).Value = r.TrnDate.Value;
+                sheet.Cell(row, 6).Value  = r.Warehouse ?? "";
+                sheet.Cell(row, 7).Value  = r.Rack ?? "";
+                sheet.Cell(row, 8).Value  = r.BoxQty ?? 0;
+                sheet.Cell(row, 9).Value  = r.LpmSimQty;
+                sheet.Cell(row, 10).Value = r.RoundRobinQty;
+                sheet.Cell(row, 11).Value = (double?)r.SkuUsabilityPct;
+            }
+            sheet.Range(2, 5, rows.Count + 1, 5).Style.NumberFormat.Format = "yyyy-mm-dd";
+            FormatNumeric(sheet, rows.Count, new[] { 8, 9, 10 });
+            sheet.Range(2, 11, rows.Count + 1, 11).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task ExportItemsAsync()
+    {
+        var rows = FilteredItems.ToList();
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        var bn = _readiness?.CurrentBatchNo ?? 0;
+        await SaveExcelAsync($"LPMSIM_Items_{bn}.xlsx", "Items", sheet =>
+        {
+            string[] headers = { "Store ID", "Store", "Division", "Box", "Item", "Qty", "SKU Max", "SOH", "LPM Qty", "RR Qty", "Phase", "Use %" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value  = r.StoreID;
+                sheet.Cell(row, 2).Value  = r.StoreName;
+                sheet.Cell(row, 3).Value  = r.DivisionName;
+                sheet.Cell(row, 4).Value  = r.BoxNo;
+                sheet.Cell(row, 5).Value  = r.Itemcode;
+                sheet.Cell(row, 6).Value  = r.BoxItemQty ?? 0;
+                sheet.Cell(row, 7).Value  = r.SKUMax ?? 0;
+                sheet.Cell(row, 8).Value  = r.SOH;
+                sheet.Cell(row, 9).Value  = r.LpmQty;
+                sheet.Cell(row, 10).Value = r.RoundRobinQty;
+                sheet.Cell(row, 11).Value = r.Phase ?? "";
+                sheet.Cell(row, 12).Value = (double?)ItemUsability(r);
+            }
+            FormatNumeric(sheet, rows.Count, new[] { 6, 7, 8, 9, 10 });
+            sheet.Range(2, 12, rows.Count + 1, 12).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task ExportTraceAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn) return;
+        // Pull a larger slice for export (50k cap is plenty for diagnostic Excel).
+        List<AllocTraceRow> rows;
+        try
+        {
+            rows = await Reports.GetAllocTraceAsync(bn,
+                _traceBoxFilter, _traceItemFilter, _traceStoreFilter, _traceDecisionFilter,
+                _minUsability, _maxUsability,
+                top: 50000);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Trace fetch failed: {ex.Message}", Severity.Error);
+            return;
+        }
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+
+        await SaveExcelAsync($"LPMSIM_Trace_{bn}.xlsx", "Trace", sheet =>
+        {
+            string[] headers = { "Phase", "Decision", "Box", "Item", "Div Code", "Division", "Store ID", "Store",
+                                 "SKU Max", "SOH (Item)", "SKU Bal", "Target EOM",
+                                 "Div SOH", "Already Allocated", "Target Remain",
+                                 "Line Qty", "Take" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i]; int row = i + 2;
+                sheet.Cell(row,  1).Value = r.Phase;
+                sheet.Cell(row,  2).Value = r.Decision;
+                sheet.Cell(row,  3).Value = r.BoxNo;
+                sheet.Cell(row,  4).Value = r.ItemCode;
+                if (r.DivCode.HasValue) sheet.Cell(row, 5).Value = r.DivCode.Value;
+                sheet.Cell(row,  6).Value = r.DivisionName ?? "";
+                sheet.Cell(row,  7).Value = r.StoreID ?? "";
+                sheet.Cell(row,  8).Value = r.StoreName ?? "";
+                if (r.SKUMax.HasValue)            sheet.Cell(row,  9).Value = r.SKUMax.Value;
+                if (r.SOH_Item.HasValue)          sheet.Cell(row, 10).Value = r.SOH_Item.Value;
+                if (r.SkuBalance.HasValue)        sheet.Cell(row, 11).Value = r.SkuBalance.Value;
+                if (r.TargetEOM.HasValue)         sheet.Cell(row, 12).Value = (double)r.TargetEOM.Value;
+                if (r.DivSOH.HasValue)            sheet.Cell(row, 13).Value = r.DivSOH.Value;
+                if (r.AlreadyAllocated.HasValue)  sheet.Cell(row, 14).Value = (double)r.AlreadyAllocated.Value;
+                if (r.TargetRemain.HasValue)      sheet.Cell(row, 15).Value = (double)r.TargetRemain.Value;
+                sheet.Cell(row, 16).Value = r.LineQty;
+                sheet.Cell(row, 17).Value = r.Take;
+            }
+            FormatNumeric(sheet, rows.Count, new[] { 9, 10, 11, 12, 13, 14, 15, 16, 17 });
+        });
+        Snackbar.Add($"Exported {rows.Count:N0} trace rows.", Severity.Success);
+    }
+
+    private static void ApplyHeaders(IXLWorksheet sheet, string[] headers)
+    {
+        for (int i = 0; i < headers.Length; i++)
+        {
+            var cell = sheet.Cell(1, i + 1);
+            cell.Value = headers[i];
+            cell.Style.Font.Bold = true;
+            cell.Style.Font.FontColor = XLColor.White;
+            cell.Style.Fill.BackgroundColor = XLColor.FromHtml("#0f172a");
+            cell.Style.Alignment.Horizontal = XLAlignmentHorizontalValues.Center;
+        }
+        sheet.SheetView.FreezeRows(1);
+    }
+
+    private static void FormatNumeric(IXLWorksheet sheet, int dataRowCount, int[] cols)
+    {
+        if (dataRowCount <= 0) return;
+        foreach (var c in cols)
+            sheet.Range(2, c, dataRowCount + 1, c).Style.NumberFormat.Format = "#,##0";
+    }
+
+    private async Task SaveExcelAsync(string fileName, string sheetName, Action<IXLWorksheet> populate)
+    {
+        try
+        {
+            using var wb = new XLWorkbook();
+            var sheet = wb.Worksheets.Add(sheetName);
+            populate(sheet);
+            sheet.Columns().AdjustToContents();
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            var b64 = Convert.ToBase64String(ms.ToArray());
+            var url = $"data:application/octet-stream;base64,{b64}";
+            await JS.InvokeVoidAsync("lpmDownload", url, fileName);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Excel export failed: {ex.Message}", Severity.Error);
+        }
+    }
+}

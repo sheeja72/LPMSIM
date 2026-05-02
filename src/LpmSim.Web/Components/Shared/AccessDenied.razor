@@ -1,0 +1,23 @@
+@inject AuthenticationStateProvider AuthProvider
+
+<MudPaper Class="pa-8 ma-8" MaxWidth="600px" Elevation="2">
+    <MudIcon Icon="@Icons.Material.Filled.Block" Color="Color.Error" Size="Size.Large" />
+    <MudText Typo="Typo.h4" Class="mt-2 mb-4">Access denied</MudText>
+    <MudText Typo="Typo.body1" Class="mb-2">
+        You are signed in as <strong>@_username</strong> but are not authorized to use LPM SIM.
+    </MudText>
+    <MudText Typo="Typo.body2" Class="mb-4">
+        Ask an administrator to grant you access. They will need your exact Windows username above.
+    </MudText>
+    <MudButton Href="/" Variant="Variant.Outlined">Return home</MudButton>
+</MudPaper>
+
+@code {
+    private string _username = "(unknown)";
+
+    protected override async Task OnInitializedAsync()
+    {
+        var auth = await AuthProvider.GetAuthenticationStateAsync();
+        _username = auth.User.Identity?.Name ?? "(anonymous)";
+    }
+}

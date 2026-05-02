@@ -1,0 +1,166 @@
+@page "/admin/users"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.Admin)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>User Access</PageTitle>
+
+<MudText Typo="Typo.h4" Class="mb-1">User Access</MudText>
+<MudText Typo="Typo.body2" Color="Color.Secondary" Class="mb-4">
+    Provision Windows users, assign roles, and control who can sign in to LPM SIM.
+</MudText>
+
+<MudStack Row="true" Spacing="2" AlignItems="AlignItems.End" Class="mb-4">
+    <MudTextField T="string" Value="_search" ValueChanged="v => _search = v ?? string.Empty"
+                  Label="Search" Immediate="true" Variant="Variant.Outlined"
+                  Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" Clearable="true" />
+    <MudSpacer />
+    <MudButton Color="Color.Primary" Variant="Variant.Filled"
+               StartIcon="@Icons.Material.Filled.PersonAdd" OnClick="OpenAddAsync">
+        Add User
+    </MudButton>
+</MudStack>
+
+<MudTable T="LpmUser" Items="Filtered" Hover="true" Striped="true" Dense="true"
+          Loading="_loading" Breakpoint="Breakpoint.Sm" AllowUnsorted="false">
+    <HeaderContent>
+        <MudTh><MudTableSortLabel T="LpmUser" SortBy="u => u.Username" InitialDirection="SortDirection.Ascending">Username</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmUser" SortBy="u => u.DisplayName ?? string.Empty">Display Name</MudTableSortLabel></MudTh>
+        <MudTh>Email</MudTh>
+        <MudTh><MudTableSortLabel T="LpmUser" SortBy="u => u.IsActive">Active</MudTableSortLabel></MudTh>
+        <MudTh>Roles</MudTh>
+        <MudTh Style="width:140px;">Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd DataLabel="Username"><code>@context.Username</code></MudTd>
+        <MudTd DataLabel="Display Name">@context.DisplayName</MudTd>
+        <MudTd DataLabel="Email">@context.Email</MudTd>
+        <MudTd DataLabel="Active">
+            <MudSwitch T="bool" Value="context.IsActive" Color="Color.Success"
+                       ValueChanged="(bool v) => ToggleActiveAsync(context, v)" />
+        </MudTd>
+        <MudTd DataLabel="Roles">
+            @foreach (var r in context.UserRoles.OrderBy(r => r.RoleCode))
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Primary" Class="mr-1">@r.RoleCode</MudChip>
+            }
+        </MudTd>
+        <MudTd>
+            <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small"
+                           OnClick="() => OpenEditAsync(context)" />
+            <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
+                           OnClick="() => DeleteAsync(context)" />
+        </MudTd>
+    </RowTemplate>
+    <PagerContent>
+        <MudTablePager PageSizeOptions="new[] { 25, 50, 100 }" />
+    </PagerContent>
+</MudTable>
+
+@code {
+    private List<LpmUser> _users = new();
+    private List<LpmRole> _roles = new();
+    private string _search = "";
+    private bool _loading;
+
+    private IEnumerable<LpmUser> Filtered =>
+        string.IsNullOrWhiteSpace(_search) ? _users :
+        _users.Where(u =>
+            u.Username.Contains(_search, StringComparison.OrdinalIgnoreCase) ||
+            (u.DisplayName?.Contains(_search, StringComparison.OrdinalIgnoreCase) ?? false) ||
+            (u.Email?.Contains(_search, StringComparison.OrdinalIgnoreCase) ?? false));
+
+    protected override async Task OnInitializedAsync() => await ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            _users = await db.LpmUsers.AsNoTracking()
+                .Include(u => u.UserRoles)
+                .OrderBy(u => u.Username)
+                .ToListAsync();
+            _roles = await db.LpmRoles.AsNoTracking().OrderBy(r => r.RoleCode).ToListAsync();
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    private async Task OpenAddAsync()
+    {
+        var parameters = new DialogParameters<UserEditDialog>
+        {
+            { x => x.Model, new UserEditModel() },
+            { x => x.Roles, _roles },
+            { x => x.IsNew, true }
+        };
+        var dlg = await DialogService.ShowAsync<UserEditDialog>("Add user", parameters);
+        var result = await dlg.Result;
+        if (result is not null && !result.Canceled) await ReloadAsync();
+    }
+
+    private async Task OpenEditAsync(LpmUser user)
+    {
+        var parameters = new DialogParameters<UserEditDialog>
+        {
+            { x => x.Model, new UserEditModel {
+                Username = user.Username,
+                DisplayName = user.DisplayName,
+                Email = user.Email,
+                IsActive = user.IsActive,
+                SelectedRoles = user.UserRoles.Select(r => r.RoleCode).ToHashSet()
+            } },
+            { x => x.Roles, _roles },
+            { x => x.IsNew, false }
+        };
+        var dlg = await DialogService.ShowAsync<UserEditDialog>($"Edit {user.Username}", parameters);
+        var result = await dlg.Result;
+        if (result is not null && !result.Canceled) await ReloadAsync();
+    }
+
+    private async Task ToggleActiveAsync(LpmUser user, bool active)
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var row = await db.LpmUsers.FirstAsync(u => u.Username == user.Username);
+            row.IsActive = active;
+            await db.SaveChangesAsync();
+            user.IsActive = active;
+            Snackbar.Add($"{user.Username} → {(active ? "active" : "inactive")}.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task DeleteAsync(LpmUser user)
+    {
+        var ok = await DialogService.ShowMessageBox("Delete user",
+            $"Delete {user.Username}? This removes their access and role assignments.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var row = await db.LpmUsers.FirstAsync(u => u.Username == user.Username);
+            db.LpmUsers.Remove(row);
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Deleted {user.Username}.", Severity.Success);
+            await ReloadAsync();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Delete failed: {ex.Message}", Severity.Error);
+        }
+    }
+}

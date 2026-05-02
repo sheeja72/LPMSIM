@@ -1,0 +1,355 @@
+@page "/lpm/monthly-weights"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ISnackbar Snackbar
+
+<PageTitle>Monthly Weights</PageTitle>
+
+<div class="lpm-page-title">Monthly Weights</div>
+<div class="lpm-page-subtitle">
+    Enter the 13-period weights (12 prior months + current partial) for each country's EOM run.
+    Each row accepts <strong>0% – 100%</strong> with one decimal place. Save is enabled only when the
+    13 weights sum to exactly <strong>100%</strong>.
+</div>
+
+<div class="lpm-section lpm-filter-bar" style="max-width:1100px;">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="4" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="OnContextChangedAsync" Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="3" md="1">
+            <MudNumericField T="int" Label="Year" Value="_runYear"
+                             ValueChanged="async (int v) => { _runYear = v; await LoadAsync(); }"
+                             Min="2020" Max="2100" Variant="Variant.Outlined" Margin="Margin.Dense" HideSpinButtons="true" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudSelect T="int" Label="Month" Value="_runMonth"
+                       ValueChanged="async (int v) => { _runMonth = v; await LoadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @for (int m = 1; m <= 12; m++)
+                {
+                    var mv = m;
+                    <MudSelectItem Value="mv">@(new DateTime(2000, mv, 1).ToString("MMM"))</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="12" md="7" Class="d-flex align-center gap-2 justify-end flex-wrap">
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(string.IsNullOrEmpty(_country))"
+                       StartIcon="@Icons.Material.Filled.AutoAwesome" OnClick="AutoFill">
+                Auto-fill rows
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(string.IsNullOrEmpty(_country))"
+                       StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopyFromPrevAsync">
+                Copy prev month
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(_rows.Count == 0)"
+                       StartIcon="@Icons.Material.Filled.Equalizer" OnClick="DistributeEvenly">
+                Distribute evenly
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(_rows.Count == 0 || SumPct <= 0)"
+                       StartIcon="@Icons.Material.Filled.Calculate" OnClick="NormaliseTo100">
+                Normalise to 100%
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false" Color="Color.Default"
+                       Disabled="@(_rows.Count == 0)"
+                       StartIcon="@Icons.Material.Filled.Clear" OnClick="ResetAllToZero">
+                Set all 0%
+            </MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Save"
+                       Disabled="!CanSave" OnClick="SaveAsync">
+                Save
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_rows.Count > 0)
+{
+    <div style="max-width:1100px;">
+        <MudGrid Spacing="2" Class="mb-2">
+            <MudItem xs="4">
+                <div class="lpm-metric-card-sm lpm-accent-blue">
+                    <div class="lpm-metric-label">Run</div>
+                    <div class="lpm-metric-value-sm">@_country · @_runYear/@_runMonth.ToString("D2")</div>
+                </div>
+            </MudItem>
+            <MudItem xs="4">
+                <div class="lpm-metric-card-sm @(IsSumValid ? "lpm-accent-green" : "lpm-accent-rose")">
+                    <div class="lpm-metric-label">Total (must equal 100%)</div>
+                    <div class="lpm-metric-value-sm">
+                        @((SumPct * 100m).ToString("0.##"))%
+                        @if (IsSumValid)
+                        {
+                            <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Size="Size.Small" Color="Color.Success" />
+                        }
+                        else
+                        {
+                            <span style="font-size:0.75rem; color:#92400e; margin-left:0.4rem;">
+                                (@(((SumPct - 1m) * 100m).ToString("+0.##;-0.##"))% off)
+                            </span>
+                        }
+                    </div>
+                </div>
+            </MudItem>
+            <MudItem xs="4">
+                <div class="lpm-metric-card-sm lpm-accent-purple">
+                    <div class="lpm-metric-label">Saved</div>
+                    <div class="lpm-metric-value-sm">@(_lastSaved?.ToString("MM-dd HH:mm") ?? "—")</div>
+                </div>
+            </MudItem>
+        </MudGrid>
+
+        <MudTable Items="_rows" Hover="true" Dense="true" Striped="true"
+                  Class="lpm-weights-table-xs" Style="max-width:680px;">
+            <HeaderContent>
+                <MudTh Style="width:40px;">#</MudTh>
+                <MudTh Style="width:110px;">Period</MudTh>
+                <MudTh Style="width:120px;">Weight %</MudTh>
+                <MudTh></MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>@context.PeriodSeq</MudTd>
+                <MudTd>
+                    <span style="font-weight:500; font-size:0.85rem;">
+                        @(new DateTime(context.PeriodYear, context.PeriodMonth, 1).ToString("MMM yyyy"))
+                    </span>
+                </MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="decimal" @ref="_weightRefs[context.PeriodSeq - 1]"
+                                     Value="WeightDisplayDec(context)"
+                                     ValueChanged="(decimal v) => context.WeightPct = v / 100m"
+                                     OnKeyDown="@((KeyboardEventArgs e) => OnKey(e, context.PeriodSeq - 1))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     Min="0m" Max="100m" Step="0.5m" HideSpinButtons="true"
+                                     Format="0.##" Culture="@System.Globalization.CultureInfo.InvariantCulture"
+                                     Adornment="Adornment.End" AdornmentText="%"
+                                     Immediate="true" />
+                </MudTd>
+                <MudTd>
+                    @if (context.PeriodSeq == _rows.Count)
+                    {
+                        <span class="lpm-status lpm-status-warn">partial</span>
+                    }
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    </div>
+}
+else if (!string.IsNullOrEmpty(_country))
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:680px;">
+        No weights yet for @_country @_runYear/@_runMonth.ToString("D2").
+        Click <strong>Auto-fill</strong> or <strong>Copy prev month</strong> to get started.
+    </MudAlert>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private int _runYear = DateTime.Today.Year;
+    private int _runMonth = DateTime.Today.Month;
+    private List<LpmMonthlyWeight> _rows = new();
+    private DateTime? _lastSaved;
+
+    private MudNumericField<decimal>?[] _weightRefs = new MudNumericField<decimal>?[13];
+
+    private decimal SumPct => _rows.Sum(r => r.WeightPct);
+    // Tolerance widened to 0.5pp because we now allow 1-decimal-place inputs;
+    // floating accumulation may leave the sum at e.g. 99.999% which is fine.
+    private bool IsSumValid => Math.Abs(SumPct - 1m) < 0.005m;
+    private bool CanSave => _rows.Count > 0 && IsSumValid;
+
+    private static decimal WeightDisplayDec(LpmMonthlyWeight r) =>
+        Math.Round(r.WeightPct * 100m, 2);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+
+        // Default to the latest saved (RunYear, RunMonth) for this country.
+        var latest = await db.LpmMonthlyWeights.AsNoTracking()
+            .Where(w => w.Country == _country)
+            .OrderByDescending(w => w.RunYear).ThenByDescending(w => w.RunMonth)
+            .Select(w => new { w.RunYear, w.RunMonth })
+            .FirstOrDefaultAsync();
+        if (latest is not null)
+        {
+            _runYear = latest.RunYear;
+            _runMonth = latest.RunMonth;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task OnContextChangedAsync(string? value)
+    {
+        _country = value ?? "";
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _rows.Clear(); _lastSaved = null;
+        if (string.IsNullOrEmpty(_country)) { StateHasChanged(); return; }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var existing = await db.LpmMonthlyWeights.AsNoTracking()
+            .Where(w => w.Country == _country && w.RunYear == _runYear && w.RunMonth == _runMonth)
+            .OrderBy(w => w.PeriodSeq).ToListAsync();
+
+        if (existing.Count > 0)
+        {
+            _rows = existing;
+            _lastSaved = existing.Max(r => r.CreateTS);
+        }
+        _weightRefs = new MudNumericField<decimal>?[Math.Max(_rows.Count, 13)];
+        StateHasChanged();
+    }
+
+    private void AutoFill()
+    {
+        _rows.Clear();
+        var start = new DateTime(_runYear, _runMonth, 1).AddMonths(-12);
+        for (int i = 0; i < 13; i++)
+        {
+            var dt = start.AddMonths(i);
+            _rows.Add(new LpmMonthlyWeight
+            {
+                Country = _country, RunYear = _runYear, RunMonth = _runMonth,
+                PeriodSeq = i + 1, PeriodYear = dt.Year, PeriodMonth = dt.Month,
+                WeightPct = 0m,
+            });
+        }
+        _weightRefs = new MudNumericField<decimal>?[13];
+        StateHasChanged();
+    }
+
+    /// <summary>Set all rows to an equal share that sums to exactly 100%.</summary>
+    private void DistributeEvenly()
+    {
+        if (_rows.Count == 0) return;
+        // Divide 100% across all rows. Last row gets the rounding remainder so the
+        // sum is exact (e.g. 13 rows → 12 rows of 7.69% + last row of 7.72%).
+        var per     = Math.Round(1m / _rows.Count, 4);
+        var spread  = per * (_rows.Count - 1);
+        var lastRow = 1m - spread;
+        for (int i = 0; i < _rows.Count - 1; i++) _rows[i].WeightPct = per;
+        _rows[^1].WeightPct = lastRow;
+        Snackbar.Add("Distributed evenly to 100%.", Severity.Info);
+        StateHasChanged();
+    }
+
+    /// <summary>Proportionally rescale current values so they sum to exactly 100%.</summary>
+    private void NormaliseTo100()
+    {
+        var sum = SumPct;
+        if (_rows.Count == 0 || sum <= 0) return;
+        var factor = 1m / sum;
+        for (int i = 0; i < _rows.Count - 1; i++)
+            _rows[i].WeightPct = Math.Round(_rows[i].WeightPct * factor, 4);
+        // Last row absorbs the rounding remainder so the sum is exact.
+        var soFar = _rows.Take(_rows.Count - 1).Sum(r => r.WeightPct);
+        _rows[^1].WeightPct = 1m - soFar;
+        Snackbar.Add($"Scaled by ×{factor:0.####} to total 100%.", Severity.Info);
+        StateHasChanged();
+    }
+
+    /// <summary>Reset every row to 0% (handy when starting from scratch).</summary>
+    private void ResetAllToZero()
+    {
+        if (_rows.Count == 0) return;
+        foreach (var r in _rows) r.WeightPct = 0m;
+        StateHasChanged();
+    }
+
+    private async Task CopyFromPrevAsync()
+    {
+        var prevMonth = _runMonth == 1 ? 12 : _runMonth - 1;
+        var prevYear = _runMonth == 1 ? _runYear - 1 : _runYear;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var prev = await db.LpmMonthlyWeights.AsNoTracking()
+            .Where(w => w.Country == _country && w.RunYear == prevYear && w.RunMonth == prevMonth)
+            .OrderBy(w => w.PeriodSeq).ToListAsync();
+
+        if (prev.Count == 0)
+        {
+            Snackbar.Add($"No weights found for {_country} {prevYear}/{prevMonth:D2}.", Severity.Warning);
+            return;
+        }
+
+        if (_rows.Count == 0) AutoFill();
+
+        var prevBySeq = prev.ToDictionary(w => w.PeriodSeq, w => w.WeightPct);
+        foreach (var r in _rows)
+            if (prevBySeq.TryGetValue(r.PeriodSeq, out var pct)) r.WeightPct = pct;
+
+        Snackbar.Add($"Copied from {prevYear}/{prevMonth:D2}.", Severity.Success);
+        StateHasChanged();
+    }
+
+    private async Task OnKey(KeyboardEventArgs e, int idx)
+    {
+        if (e.Key != "Enter" && e.Key != "Tab") return;
+        var next = idx + 1;
+        if (next < _weightRefs.Length && _weightRefs[next] is not null)
+            await _weightRefs[next]!.FocusAsync();
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var keys = _rows.Select(r => r.PeriodSeq).ToList();
+            var existing = await db.LpmMonthlyWeights
+                .Where(w => w.Country == _country && w.RunYear == _runYear && w.RunMonth == _runMonth
+                         && keys.Contains(w.PeriodSeq))
+                .ToDictionaryAsync(w => w.PeriodSeq);
+
+            foreach (var r in _rows)
+            {
+                if (existing.TryGetValue(r.PeriodSeq, out var row))
+                {
+                    row.PeriodYear = r.PeriodYear;
+                    row.PeriodMonth = r.PeriodMonth;
+                    row.WeightPct = r.WeightPct;
+                }
+                else
+                {
+                    db.LpmMonthlyWeights.Add(new LpmMonthlyWeight
+                    {
+                        Country = _country, RunYear = _runYear, RunMonth = _runMonth,
+                        PeriodSeq = r.PeriodSeq, PeriodYear = r.PeriodYear, PeriodMonth = r.PeriodMonth,
+                        WeightPct = r.WeightPct, CreateTS = DateTime.Now,
+                    });
+                }
+            }
+            await db.SaveChangesAsync();
+            _lastSaved = DateTime.Now;
+            Snackbar.Add($"Saved {_rows.Count} weights.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+    }
+}

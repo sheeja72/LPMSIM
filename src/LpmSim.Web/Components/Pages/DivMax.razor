@@ -1,0 +1,302 @@
+@page "/lpm/div-max"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+
+<PageTitle>Division Max Entry</PageTitle>
+
+<div class="lpm-page-title">Division Max Entry</div>
+<div class="lpm-page-subtitle">
+    Pick a country to see every store × division. Optionally narrow by store or division, then edit Max Qty and Save.
+</div>
+
+<MudPaper Class="pa-4 mb-4" Elevation="0" Outlined="true">
+    <MudGrid Spacing="3">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="OnCountryChangedAsync"
+                       Variant="Variant.Outlined" Clearable="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="4">
+            <MudAutocomplete T="StoreInfo" Label="Filter by Store (optional)"
+                             Value="_filterStore"
+                             ValueChanged="v => { _filterStore = v; StateHasChanged(); }"
+                             SearchFunc="SearchStores"
+                             ToStringFunc="StoreDisplay"
+                             Variant="Variant.Outlined" CoerceText="true"
+                             ResetValueOnEmptyText="true" Clearable="true"
+                             Disabled="@(string.IsNullOrEmpty(_country))" />
+        </MudItem>
+        <MudItem xs="12" md="3">
+            <MudAutocomplete T="Division" Label="Filter by Division (optional)"
+                             Value="_filterDivision"
+                             ValueChanged="v => { _filterDivision = v; StateHasChanged(); }"
+                             SearchFunc="SearchDivisions"
+                             ToStringFunc="d => d is null ? string.Empty : d.Name ?? string.Empty"
+                             Variant="Variant.Outlined" CoerceText="true"
+                             ResetValueOnEmptyText="true" Clearable="true"
+                             Disabled="@(string.IsNullOrEmpty(_country))" />
+        </MudItem>
+        <MudItem xs="12" md="2" Class="d-flex align-end justify-end">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled"
+                       StartIcon="@Icons.Material.Filled.Save" DropShadow="false"
+                       Disabled="!CanSave" OnClick="SaveAsync">
+                Save (@DirtyCount)
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</MudPaper>
+
+@if (_loading)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (string.IsNullOrEmpty(_country) && !_loading)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+        Select a country above to load stores and divisions.
+    </MudAlert>
+}
+else if (_rows.Count == 0 && !_loading)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+        No active stores found for <strong>@_country</strong>.
+    </MudAlert>
+}
+else if (_rows.Count > 0)
+{
+    <div class="d-flex align-items-center mb-2">
+        <MudText Typo="Typo.caption" Color="Color.Secondary">
+            Showing @FilteredRows.Count of @_rows.Count rows
+        </MudText>
+    </div>
+    <MudTable T="DivMaxRow" Items="FilteredRows" Hover="true" Striped="false" Dense="true"
+              Breakpoint="Breakpoint.Sm" FixedHeader="true" Height="65vh" AllowUnsorted="false">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel T="DivMaxRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="DivMaxRow" SortBy="r => r.StoreName">Store Name</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="DivMaxRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="DivMaxRow" SortBy="r => r.MaxQty ?? int.MinValue">Max Qty</MudTableSortLabel></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd DataLabel="Store ID"><code>@context.StoreID</code></MudTd>
+            <MudTd DataLabel="Store Name">@context.StoreName</MudTd>
+            <MudTd DataLabel="Division">@context.DivisionName</MudTd>
+            <MudTd DataLabel="Max Qty" Style="@(context.IsDirty ? "background-color:#fff8d6;" : "")">
+                <MudNumericField T="int?" Value="context.MaxQty" Min="0" Step="1"
+                                 ValueChanged="(int? v) => OnQtyChanged(context, v)"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense"
+                                 HideSpinButtons="true" />
+            </MudTd>
+        </RowTemplate>
+        <PagerContent>
+            <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+        </PagerContent>
+    </MudTable>
+}
+
+@code {
+    private List<string> _countries = new();
+    private List<Division> _divisions = new();
+    private List<StoreInfo> _stores = new();
+    private List<DivMaxRow> _rows = new();
+
+    private string _country = "";
+    private StoreInfo? _filterStore;
+    private Division? _filterDivision;
+    private bool _loading;
+
+    private int DirtyCount => _rows.Count(r => r.IsDirty);
+    private bool CanSave => DirtyCount > 0 && !_loading;
+
+    private List<DivMaxRow> FilteredRows
+    {
+        get
+        {
+            IEnumerable<DivMaxRow> q = _rows;
+            if (_filterStore is not null)
+                q = q.Where(r => r.StoreID == _filterStore.StoreID);
+            if (_filterDivision is not null)
+                q = q.Where(r => r.DivCode == _filterDivision.DivCode);
+            return q.ToList();
+        }
+    }
+
+    private string StoreDisplay(StoreInfo? s) => s is null ? string.Empty : $"{s.StoreID} — {s.Name}";
+
+    private Task<IEnumerable<StoreInfo>> SearchStores(string? value, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<StoreInfo>>(_stores.Take(30));
+        return Task.FromResult<IEnumerable<StoreInfo>>(_stores
+            .Where(s => s.StoreID.Contains(value, StringComparison.OrdinalIgnoreCase)
+                     || s.Name.Contains(value, StringComparison.OrdinalIgnoreCase))
+            .Take(30));
+    }
+
+    private Task<IEnumerable<Division>> SearchDivisions(string? value, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<Division>>(_divisions);
+        return Task.FromResult<IEnumerable<Division>>(_divisions
+            .Where(d => (d.Name ?? string.Empty).Contains(value, StringComparison.OrdinalIgnoreCase)));
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country)
+            .Distinct()
+            .OrderBy(c => c)
+            .ToListAsync();
+
+        _divisions = await db.Divisions.OrderBy(d => d.Name).ToListAsync();
+    }
+
+    private async Task OnCountryChangedAsync(string? value)
+    {
+        _country = value ?? "";
+        _filterStore = null;
+        _filterDivision = null;
+        _rows.Clear();
+        _stores.Clear();
+        if (string.IsNullOrEmpty(_country)) return;
+        await LoadRowsAsync();
+    }
+
+    private async Task LoadRowsAsync()
+    {
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var stores = await db.DataSettings
+                .Where(s => s.ActiveStore == "Y" && s.Country == _country)
+                .Select(s => new { s.StoreID, s.PBFullname })
+                .Distinct()
+                .OrderBy(s => s.StoreID)
+                .ToListAsync();
+
+            var storeIds = stores.Select(s => s.StoreID).ToList();
+            var existing = await db.LpmDivMaxes
+                .Where(x => storeIds.Contains(x.StoreID))
+                .ToDictionaryAsync(x => (x.StoreID, x.DivCode), x => x.MaxQty);
+
+            var list = new List<DivMaxRow>(stores.Count * _divisions.Count);
+            foreach (var s in stores)
+            foreach (var d in _divisions)
+            {
+                var has = existing.TryGetValue((s.StoreID, d.DivCode), out var qty);
+                list.Add(new DivMaxRow
+                {
+                    StoreID = s.StoreID,
+                    StoreName = s.PBFullname ?? "",
+                    DivCode = d.DivCode,
+                    DivisionName = d.Name ?? "",
+                    MaxQty = has ? qty : null,
+                    OriginalMaxQty = has ? qty : null,
+                });
+            }
+            _rows = list;
+
+            _stores = stores
+                .Select(s => new StoreInfo { StoreID = s.StoreID, Name = s.PBFullname ?? "" })
+                .ToList();
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    private void OnQtyChanged(DivMaxRow row, int? value)
+    {
+        row.MaxQty = value is null || value < 0 ? null : value;
+    }
+
+    private async Task SaveAsync()
+    {
+        var dirty = _rows.Where(r => r.IsDirty && r.MaxQty.HasValue).ToList();
+        if (dirty.Count == 0) return;
+
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now = DateTime.Now;
+            var user = CurrentUser.Name;
+
+            var storeIds = dirty.Select(r => r.StoreID).Distinct().ToList();
+            var codes    = dirty.Select(r => r.DivCode).Distinct().ToList();
+            var existing = await db.LpmDivMaxes
+                .Where(x => storeIds.Contains(x.StoreID) && codes.Contains(x.DivCode))
+                .ToDictionaryAsync(x => (x.StoreID, x.DivCode));
+
+            foreach (var r in dirty)
+            {
+                if (existing.TryGetValue((r.StoreID, r.DivCode), out var e))
+                {
+                    e.MaxQty    = r.MaxQty!.Value;
+                    e.UpdatedTS = now;
+                    e.UserID    = user;
+                }
+                else
+                {
+                    db.LpmDivMaxes.Add(new LpmDivMax
+                    {
+                        StoreID   = r.StoreID,
+                        DivCode   = r.DivCode,
+                        MaxQty    = r.MaxQty!.Value,
+                        CreateTS  = now,
+                        UpdatedTS = now,
+                        UserID    = user,
+                    });
+                }
+            }
+
+            await db.SaveChangesAsync();
+            foreach (var r in dirty) r.OriginalMaxQty = r.MaxQty;
+
+            Snackbar.Add($"Saved {dirty.Count} row(s).", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    public sealed class StoreInfo
+    {
+        public string StoreID { get; init; } = "";
+        public string Name { get; init; } = "";
+
+        public override bool Equals(object? obj) =>
+            obj is StoreInfo other && StoreID == other.StoreID;
+        public override int GetHashCode() => StoreID.GetHashCode();
+    }
+
+    private sealed class DivMaxRow
+    {
+        public string StoreID { get; init; } = "";
+        public string StoreName { get; init; } = "";
+        public int DivCode { get; init; }
+        public string DivisionName { get; init; } = "";
+        public int? MaxQty { get; set; }
+        public int? OriginalMaxQty { get; set; }
+        public bool IsDirty => MaxQty != OriginalMaxQty;
+    }
+}

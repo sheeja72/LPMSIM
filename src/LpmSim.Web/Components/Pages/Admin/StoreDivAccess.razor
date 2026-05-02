@@ -1,0 +1,250 @@
+@page "/admin/store-div-access"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>Store / Division Access</PageTitle>
+
+<div class="lpm-page-title">Store / Division Access</div>
+<div class="lpm-page-subtitle">
+    Per-Country, per-Store, per-Division activation. Deactivating a division for a store
+    forces SKU Max = 0 in the next EOM Generate, which means SIM Generate cannot allocate
+    that division's items to that store. Default (no row) = ACTIVE for every (Store, Division).
+    <br/>
+    <strong>After changes here, re-run EOM Generate</strong> for the country to apply them — SIM
+    consumes <code>LPM_EOM_Output.SKUMax</code>, which is recomputed only at EOM-Generate time.
+</div>
+
+<div class="lpm-section lpm-filter-bar mb-3">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Show"
+                       Value="_filterMode"
+                       ValueChanged="(string v) => { _filterMode = string.IsNullOrEmpty(v) ? InactiveMode : v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                <MudSelectItem T="string" Value="@InactiveMode">Deactivated only</MudSelectItem>
+                <MudSelectItem T="string" Value="@AllMode">All entries</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="6" Class="d-flex justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddAsync"
+                       Disabled="@string.IsNullOrEmpty(_country)">
+                Deactivate Store × Division
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+<MudTable T="LpmStoreDivAccess" Items="_visible" Hover="true" Dense="true" Striped="true"
+          Loading="_loading" AllowUnsorted="false" Class="lpm-narrow-table" Style="max-width:1100px;">
+    <HeaderContent>
+        <MudTh><MudTableSortLabel T="LpmStoreDivAccess" SortBy="x => x.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel></MudTh>
+        <MudTh>Store Name</MudTh>
+        <MudTh><MudTableSortLabel T="LpmStoreDivAccess" SortBy="x => x.DivCode">Division</MudTableSortLabel></MudTh>
+        <MudTh>Active</MudTh>
+        <MudTh>Updated</MudTh>
+        <MudTh Style="width:160px;">Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd><code>@context.StoreID</code></MudTd>
+        <MudTd>@(_storeNames.GetValueOrDefault(context.StoreID, ""))</MudTd>
+        <MudTd>
+            @{
+                var divName = _divisionNames.GetValueOrDefault(context.DivCode, context.DivCode.ToString());
+            }
+            @divName <span style="color:#94a3b8;">(@context.DivCode)</span>
+        </MudTd>
+        <MudTd>
+            @if (context.IsActive)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Filled">Active</MudChip>
+            }
+            else
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Error" Variant="Variant.Filled">Deactivated</MudChip>
+            }
+        </MudTd>
+        <MudTd>
+            <span style="font-size:.78rem;color:#64748b;">
+                @((context.UpdatedTS ?? context.CreateTS).ToString("yyyy-MM-dd HH:mm"))
+                @if (!string.IsNullOrEmpty(context.UpdatedBy ?? context.CreatedBy))
+                {
+                    <span> · @(context.UpdatedBy ?? context.CreatedBy)</span>
+                }
+            </span>
+        </MudTd>
+        <MudTd>
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" DropShadow="false"
+                       StartIcon="@(context.IsActive ? Icons.Material.Filled.Block : Icons.Material.Filled.CheckCircle)"
+                       Color="@(context.IsActive ? Color.Error : Color.Success)"
+                       OnClick="@(() => ToggleAsync(context))">
+                @(context.IsActive ? "Deactivate" : "Re-activate")
+            </MudButton>
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete"
+                           Color="Color.Default"
+                           OnClick="@(() => DeleteAsync(context))" />
+        </MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        @if (string.IsNullOrEmpty(_country))
+        {
+            <span>Select a country to start.</span>
+        }
+        else
+        {
+            <span>No deactivated (Store, Division) combinations for @_country. Every store has access to every division.</span>
+        }
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    private const string InactiveMode = "Inactive";
+    private const string AllMode      = "All";
+
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private string _filterMode = InactiveMode;
+
+    private List<LpmStoreDivAccess> _all = new();
+    private IEnumerable<LpmStoreDivAccess> _visible
+        => _filterMode == AllMode ? _all : _all.Where(x => !x.IsActive);
+
+    private Dictionary<string, string> _storeNames = new();
+    private Dictionary<int, string>    _divisionNames = new();
+    private bool _loading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        // Stores in this page are filtered by SIMCountry (the SIM-side
+        // country tag), so the country dropdown is also driven by SIMCountry —
+        // a country with no stores tagged to it would have nothing to manage.
+        _countries = await db.DataSettings
+            .Where(s => !string.IsNullOrEmpty(s.SIMCountry))
+            .Select(s => s.SIMCountry!)
+            .Distinct()
+            .OrderBy(c => c)
+            .ToListAsync();
+        if (_countries.Count > 0 && !_countries.Contains(_country))
+            _country = _countries[0];
+        _divisionNames = await db.Divisions.AsNoTracking()
+            .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? d.DivCode.ToString());
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _all = new(); return; }
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            _all = await db.LpmStoreDivAccesses.AsNoTracking()
+                .Where(a => a.Country == _country)
+                .OrderBy(a => a.StoreID).ThenBy(a => a.DivCode)
+                .ToListAsync();
+            // Preload store names for the rows + the country's full roster (for the
+            // Add dialog). Filter by SIMCountry — only stores that participate in
+            // this country's SIM allocation are eligible for access overrides.
+            _storeNames = await db.DataSettings
+                .Where(s => s.SIMCountry == _country && s.StoreID != null && s.PBFullname != null)
+                .Select(s => new { s.StoreID, s.PBFullname })
+                .Distinct()
+                .ToDictionaryAsync(x => x.StoreID!, x => x.PBFullname!);
+        }
+        finally { _loading = false; StateHasChanged(); }
+    }
+
+    private async Task ToggleAsync(LpmStoreDivAccess row)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmStoreDivAccesses.FirstOrDefaultAsync(a =>
+            a.Country == row.Country && a.StoreID == row.StoreID && a.DivCode == row.DivCode);
+        if (entity is null) return;
+        entity.IsActive  = !entity.IsActive;
+        entity.UpdatedTS = DateTime.Now;
+        entity.UpdatedBy = CurrentUser.Name;
+        await db.SaveChangesAsync();
+        Snackbar.Add($"{(entity.IsActive ? "Re-activated" : "Deactivated")} {entity.StoreID} · Div {entity.DivCode}",
+            entity.IsActive ? Severity.Success : Severity.Warning);
+        await ReloadAsync();
+    }
+
+    private async Task DeleteAsync(LpmStoreDivAccess row)
+    {
+        var ok = await DialogService.ShowMessageBox("Remove access override?",
+            $"Delete the access row for {row.StoreID} × Div {row.DivCode}? The (Store, Division) reverts to ACTIVE.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmStoreDivAccesses.FirstOrDefaultAsync(a =>
+            a.Country == row.Country && a.StoreID == row.StoreID && a.DivCode == row.DivCode);
+        if (entity is null) return;
+        db.LpmStoreDivAccesses.Remove(entity);
+        await db.SaveChangesAsync();
+        Snackbar.Add($"Removed override for {row.StoreID} · Div {row.DivCode}", Severity.Success);
+        await ReloadAsync();
+    }
+
+    private async Task OpenAddAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) return;
+        var parameters = new DialogParameters
+        {
+            ["Country"]      = _country,
+            ["Stores"]       = _storeNames.Select(kv => (kv.Key, kv.Value)).ToList(),
+            ["Divisions"]    = _divisionNames.Select(kv => (kv.Key, kv.Value)).ToList(),
+            ["Existing"]     = _all.Select(a => (a.StoreID, a.DivCode)).ToHashSet(),
+        };
+        var dlg = await DialogService.ShowAsync<StoreDivAccessAddDialog>("Deactivate (Store × Division)", parameters,
+            new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Medium, FullWidth = true });
+        var result = await dlg.Result;
+        if (result is null || result.Canceled) return;
+        if (result.Data is List<(string StoreID, int DivCode)> picks && picks.Count > 0)
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now = DateTime.Now;
+            foreach (var (sid, dc) in picks)
+            {
+                var existing = await db.LpmStoreDivAccesses.FirstOrDefaultAsync(a =>
+                    a.Country == _country && a.StoreID == sid && a.DivCode == dc);
+                if (existing is null)
+                {
+                    db.LpmStoreDivAccesses.Add(new LpmStoreDivAccess
+                    {
+                        Country   = _country,
+                        StoreID   = sid,
+                        DivCode   = dc,
+                        IsActive  = false,
+                        CreateTS  = now,
+                        CreatedBy = CurrentUser.Name,
+                    });
+                }
+                else if (existing.IsActive)
+                {
+                    existing.IsActive  = false;
+                    existing.UpdatedTS = now;
+                    existing.UpdatedBy = CurrentUser.Name;
+                }
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Deactivated {picks.Count} (Store × Division) combination(s) for {_country}.",
+                Severity.Warning);
+            await ReloadAsync();
+        }
+    }
+}

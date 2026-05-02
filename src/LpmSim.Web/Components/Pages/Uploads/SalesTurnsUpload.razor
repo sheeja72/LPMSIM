@@ -1,0 +1,471 @@
+@using ClosedXML.Excel
+@using System.IO
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<MudGrid Spacing="3">
+    <MudItem xs="12" md="4">
+        <div class="lpm-section">
+            <div class="lpm-section-title">Template</div>
+            <div class="lpm-section-sub">
+                Use the template so the header row matches exactly.
+            </div>
+            <MudText Typo="Typo.caption" Class="d-block mb-2">Header row:</MudText>
+            <MudChipSet T="string" ReadOnly="true" Class="mb-3">
+                @foreach (var h in Header)
+                {
+                    <MudChip T="string" Size="Size.Small" Color="Color.Default">@h</MudChip>
+                }
+            </MudChipSet>
+            <MudButton OnClick="DownloadTemplate" StartIcon="@Icons.Material.Filled.Download"
+                       Variant="Variant.Outlined" Color="Color.Primary" DropShadow="false">
+                Download template
+            </MudButton>
+        </div>
+
+        <div class="lpm-section">
+            <div class="lpm-section-title">Rules</div>
+            <ul class="pl-4 mb-0" style="font-size:0.82rem; color:#64748b;">
+                <li><strong>StoreID</strong> must exist in DataSettings.</li>
+                <li><strong>Division</strong> can be the code (int) or name.</li>
+                <li><strong>Month</strong> must be 1&ndash;12.</li>
+                <li>Existing rows on the same <em>StoreID &times; Division &times; Year &times; Month</em> are replaced.</li>
+            </ul>
+        </div>
+    </MudItem>
+
+    <MudItem xs="12" md="8">
+        <div class="lpm-section">
+            <div class="lpm-section-title">Upload file</div>
+            <MudFileUpload T="IBrowserFile" FilesChanged="OnFileSelected" Accept=".xlsx">
+                <ActivatorContent>
+                    <div class="lpm-dropzone">
+                        <MudIcon Icon="@Icons.Material.Filled.CloudUpload" Size="Size.Large" Color="Color.Primary" />
+                        <MudText Typo="Typo.body1" Class="mt-2">
+                            Drop an <strong>.xlsx</strong> file here, or click to browse.
+                        </MudText>
+                        <MudText Typo="Typo.caption" Color="Color.Secondary">
+                            Max 20 MB. First sheet, row 1 = header.
+                        </MudText>
+                        @if (_fileName is not null)
+                        {
+                            <MudText Typo="Typo.body2" Class="mt-2" Style="font-weight:600;">
+                                <MudIcon Icon="@Icons.Material.Filled.Description" Size="Size.Small" /> @_fileName
+                            </MudText>
+                        }
+                    </div>
+                </ActivatorContent>
+            </MudFileUpload>
+        </div>
+
+        @if (_parsing)
+        {
+            <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="my-2" />
+        }
+
+        @if (_fatalError is not null)
+        {
+            <MudAlert Severity="Severity.Error" Class="mb-3">@_fatalError</MudAlert>
+        }
+
+        @if (_rows.Count > 0)
+        {
+            <MudGrid Spacing="2" Class="mb-3">
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
+                    <div class="lpm-metric-label">Total Rows</div>
+                    <div class="lpm-metric-value">@_rows.Count</div>
+                </div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-green">
+                    <div class="lpm-metric-label">Valid</div>
+                    <div class="lpm-metric-value">@_validCount</div>
+                </div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-rose">
+                    <div class="lpm-metric-label">Errors</div>
+                    <div class="lpm-metric-value">@_errorCount</div>
+                </div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber">
+                    <div class="lpm-metric-label">Will Upsert</div>
+                    <div class="lpm-metric-value">@_validCount</div>
+                </div></MudItem>
+            </MudGrid>
+
+            @if (_errorCount == 0)
+            {
+                <MudAlert Severity="Severity.Success" Variant="Variant.Outlined">
+                    All @_rows.Count row(s) are valid. Click <strong>Commit</strong> to upsert.
+                </MudAlert>
+            }
+            else
+            {
+                <MudText Typo="Typo.subtitle2" Class="mb-2">
+                    Rows with errors (@_errorCount of @_rows.Count)
+                </MudText>
+                <MudTable Items="@_rows.Where(r => r.Error != null).Take(500)"
+                          Hover="true" Dense="true" Striped="true" FixedHeader="true" Height="50vh">
+                    <HeaderContent>
+                        <MudTh Style="width:70px;">Row</MudTh>
+                        <MudTh>StoreID</MudTh>
+                        <MudTh>Division</MudTh>
+                        <MudTh>Year</MudTh>
+                        <MudTh>Month</MudTh>
+                        <MudTh>SoldQty</MudTh>
+                        <MudTh>Turns</MudTh>
+                        <MudTh>Problem</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><strong>@context.RowNum</strong></MudTd>
+                        <MudTd><code>@context.StoreID</code></MudTd>
+                        <MudTd>@(context.DivCode?.ToString() ?? context.DivisionRaw)</MudTd>
+                        <MudTd>@context.Year1</MudTd>
+                        <MudTd>@context.Month1</MudTd>
+                        <MudTd>@context.SoldQty?.ToString("N1")</MudTd>
+                        <MudTd>@context.TurnsQty?.ToString("N1")</MudTd>
+                        <MudTd>
+                            <span class="lpm-status lpm-status-err" title="@context.Error">
+                                <MudIcon Icon="@Icons.Material.Filled.ErrorOutline" Size="Size.Small" /> @context.Error
+                            </span>
+                        </MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+
+            <div class="d-flex justify-end mt-3">
+                <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                           StartIcon="@Icons.Material.Filled.Save"
+                           Disabled="_committing || _validCount == 0"
+                           OnClick="CommitAsync">
+                    Commit @_validCount row(s)
+                </MudButton>
+            </div>
+        }
+    </MudItem>
+</MudGrid>
+
+@code {
+    private static readonly string[] Header =
+        { "StoreID", "Division", "Year", "Month", "SoldQty", "Turns" };
+
+    private string? _fileName;
+    private bool _parsing;
+    private bool _committing;
+    private string? _fatalError;
+    private List<Row> _rows = new();
+    private int _validCount;
+    private int _errorCount;
+
+    private async Task OnFileSelected(IBrowserFile file)
+    {
+        _fileName = file.Name;
+        _rows.Clear();
+        _fatalError = null;
+        _validCount = 0;
+        _errorCount = 0;
+        _parsing = true;
+        StateHasChanged();
+
+        try
+        {
+            using var ms = new MemoryStream();
+            await using (var src = file.OpenReadStream(20 * 1024 * 1024))
+                await src.CopyToAsync(ms);
+            ms.Position = 0;
+
+            await ParseAsync(ms);
+        }
+        catch (Exception ex)
+        {
+            _fatalError = $"Failed to read file: {ex.Message}";
+        }
+        finally
+        {
+            _parsing = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task ParseAsync(Stream xlsx)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var divByCode = await db.Divisions.AsNoTracking()
+            .ToDictionaryAsync(d => d.DivCode, d => d);
+        var divByName = divByCode.Values
+            .Where(d => !string.IsNullOrEmpty(d.Name))
+            .GroupBy(d => d.Name!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+        var storeIds = await db.DataSettings.AsNoTracking()
+            .Where(s => s.StoreID != null && s.StoreID != "")
+            .Select(s => s.StoreID!).Distinct().ToListAsync();
+        var storeSet = new HashSet<string>(storeIds, StringComparer.OrdinalIgnoreCase);
+
+        IXLWorksheet sheet;
+        try
+        {
+            using var wb = new XLWorkbook(xlsx);
+            sheet = wb.Worksheets.First();
+
+            for (int i = 0; i < Header.Length; i++)
+            {
+                var got = TryString(sheet.Row(1).Cell(i + 1));
+                if (!string.Equals(got, Header[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    _fatalError = $"Header mismatch at column {i + 1}: expected '{Header[i]}', got '{got}'.";
+                    return;
+                }
+            }
+
+            int lastRow;
+            try { lastRow = sheet.LastRowUsed()?.RowNumber() ?? 1; }
+            catch { lastRow = 10000; /* best effort */ }
+
+            for (int r = 2; r <= lastRow; r++)
+            {
+                Row row;
+                try
+                {
+                    var xlRow = sheet.Row(r);
+                    bool anyUsed;
+                    try { anyUsed = xlRow.CellsUsed().Any(); }
+                    catch { anyUsed = true; }
+                    if (!anyUsed) continue;
+
+                    var (storeId, storeErr)     = CellText(xlRow, 1, "StoreID");
+                    var (divRaw,  divErr)       = CellText(xlRow, 2, "Division");
+                    var (year,    yearErr)      = CellInt(xlRow, 3, "Year");
+                    var (month,   monthErr)     = CellInt(xlRow, 4, "Month");
+                    var (sold,    soldErr)      = CellDecimal(xlRow, 5, "SoldQty");
+                    var (turns,   turnsErr)     = CellDecimal(xlRow, 6, "Turns");
+
+                    row = new Row
+                    {
+                        RowNum = r,
+                        StoreID = storeId,
+                        DivisionRaw = divRaw,
+                        Year1 = year,
+                        Month1 = month,
+                        SoldQty = sold,
+                        TurnsQty = turns,
+                    };
+
+                    var cellErrors = new[] { storeErr, divErr, yearErr, monthErr, soldErr, turnsErr }
+                        .Where(e => !string.IsNullOrEmpty(e)).ToList();
+                    if (cellErrors.Count > 0)
+                    {
+                        row.Error = string.Join("; ", cellErrors);
+                        _rows.Add(row);
+                        continue;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _rows.Add(new Row { RowNum = r, Error = $"Row read failed: {ex.Message}" });
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(row.DivisionRaw))
+                {
+                    if (int.TryParse(row.DivisionRaw, out var code) && divByCode.ContainsKey(code))
+                        row.DivCode = code;
+                    else if (divByName.TryGetValue(row.DivisionRaw, out var d))
+                        row.DivCode = d.DivCode;
+                }
+
+                var problems = new List<string>();
+                if (string.IsNullOrWhiteSpace(row.StoreID))            problems.Add("StoreID (col A) is blank");
+                else if (!storeSet.Contains(row.StoreID))              problems.Add($"StoreID '{row.StoreID}' not found in DataSettings");
+                if (string.IsNullOrWhiteSpace(row.DivisionRaw))        problems.Add("Division (col B) is blank");
+                else if (row.DivCode is null)                          problems.Add($"Division '{row.DivisionRaw}' not found");
+                if (row.Year1 is null)                                 problems.Add("Year (col C) is blank or not a number");
+                else if (row.Year1 < 2000 || row.Year1 > 2100)         problems.Add($"Year {row.Year1} out of range");
+                if (row.Month1 is null)                                problems.Add("Month (col D) is blank or not a number");
+                else if (row.Month1 < 1 || row.Month1 > 12)            problems.Add($"Month {row.Month1} not 1..12");
+
+                if (problems.Count > 0) row.Error = string.Join("; ", problems);
+
+                _rows.Add(row);
+            }
+        }
+        catch (Exception ex)
+        {
+            _fatalError = $"Failed to open workbook: {ex.Message}";
+            return;
+        }
+
+        _validCount = _rows.Count(r => r.Error is null);
+        _errorCount = _rows.Count - _validCount;
+    }
+
+    private async Task CommitAsync()
+    {
+        _committing = true;
+        StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var valid = _rows.Where(r => r.Error is null).ToList();
+            var keys = valid.Select(r => new { r.StoreID, DivCode = r.DivCode!.Value, Year1 = r.Year1!.Value, Month1 = r.Month1!.Value }).ToList();
+            var existing = await db.LpmSalesTurns
+                .Where(x => keys.Select(k => k.StoreID).Contains(x.StoreID))
+                .ToDictionaryAsync(x => (x.StoreID, x.DivCode, x.Year1, x.Month1));
+
+            foreach (var r in valid)
+            {
+                var k = (r.StoreID, r.DivCode!.Value, r.Year1!.Value, r.Month1!.Value);
+                if (existing.TryGetValue(k, out var row))
+                {
+                    row.SoldQty = r.SoldQty;
+                    row.TurnsQty = r.TurnsQty;
+                }
+                else
+                {
+                    db.LpmSalesTurns.Add(new LpmSalesTurns
+                    {
+                        StoreID = r.StoreID,
+                        DivCode = r.DivCode.Value,
+                        Year1 = r.Year1.Value,
+                        Month1 = r.Month1.Value,
+                        SoldQty = r.SoldQty,
+                        TurnsQty = r.TurnsQty,
+                        CreateTS = DateTime.Now,
+                    });
+                }
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Committed {valid.Count} Sales/Turns rows.", Severity.Success);
+            _rows.Clear();
+            _fileName = null;
+            _validCount = _errorCount = 0;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Commit failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _committing = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task DownloadTemplate()
+    {
+        using var wb = new XLWorkbook();
+        var sheet = wb.Worksheets.Add("Sales_Turns");
+        for (int i = 0; i < Header.Length; i++)
+        {
+            sheet.Cell(1, i + 1).Value = Header[i];
+            sheet.Cell(1, i + 1).Style.Font.Bold = true;
+            sheet.Cell(1, i + 1).Style.Fill.BackgroundColor = XLColor.FromHtml("#0f172a");
+            sheet.Cell(1, i + 1).Style.Font.FontColor = XLColor.White;
+        }
+        sheet.Columns().AdjustToContents();
+        using var ms = new MemoryStream();
+        wb.SaveAs(ms);
+        var bytes = ms.ToArray();
+        var b64 = Convert.ToBase64String(bytes);
+        var url = $"data:application/octet-stream;base64,{b64}";
+        await JS.InvokeVoidAsync("lpmDownload", url, "SalesTurns_Template.xlsx");
+    }
+
+    private static string TryString(IXLCell cell)
+    {
+        try
+        {
+            if (cell is null) return "";
+            var v = cell.Value;
+            if (v.IsBlank || v.IsError) return "";
+            if (v.IsText)     return v.GetText()?.Trim() ?? "";
+            if (v.IsNumber)   return v.GetNumber().ToString(System.Globalization.CultureInfo.InvariantCulture);
+            if (v.IsDateTime) return v.GetDateTime().ToString("yyyy-MM-dd");
+            if (v.IsBoolean)  return v.GetBoolean().ToString();
+            return v.ToString()?.Trim() ?? "";
+        }
+        catch { return ""; }
+    }
+
+    /// <summary>Safe text read; returns (value, error). Error is "" if OK.</summary>
+    private static (string value, string error) CellText(IXLRow row, int col, string name)
+    {
+        try
+        {
+            var cell = row.Cell(col);
+            var v = cell.Value;
+            if (v.IsError) return ("", $"{name} (col {ColLetter(col)}) has formula error");
+            return (TryString(cell), "");
+        }
+        catch (Exception ex)
+        {
+            return ("", $"{name} (col {ColLetter(col)}) unreadable: {ex.Message}");
+        }
+    }
+
+    private static (int? value, string error) CellInt(IXLRow row, int col, string name)
+    {
+        try
+        {
+            var cell = row.Cell(col);
+            var v = cell.Value;
+            if (v.IsBlank)  return (null, "");
+            if (v.IsError)  return (null, $"{name} (col {ColLetter(col)}) has formula error");
+            if (v.IsNumber) return ((int)v.GetNumber(), "");
+            if (v.IsText)
+            {
+                var s = v.GetText()?.Trim() ?? "";
+                if (string.IsNullOrEmpty(s)) return (null, "");
+                if (int.TryParse(s, out var parsed)) return (parsed, "");
+                return (null, $"{name} (col {ColLetter(col)}) = '{s}' not a number");
+            }
+            return (null, $"{name} (col {ColLetter(col)}) has unsupported type");
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{name} (col {ColLetter(col)}) unreadable: {ex.Message}");
+        }
+    }
+
+    private static (decimal? value, string error) CellDecimal(IXLRow row, int col, string name)
+    {
+        try
+        {
+            var cell = row.Cell(col);
+            var v = cell.Value;
+            if (v.IsBlank)  return (null, "");
+            if (v.IsError)  return (null, $"{name} (col {ColLetter(col)}) has formula error");
+            if (v.IsNumber) return ((decimal)v.GetNumber(), "");
+            if (v.IsText)
+            {
+                var s = v.GetText()?.Trim() ?? "";
+                if (string.IsNullOrEmpty(s)) return (null, "");
+                if (decimal.TryParse(s, out var parsed)) return (parsed, "");
+                return (null, $"{name} (col {ColLetter(col)}) = '{s}' not a number");
+            }
+            return (null, $"{name} (col {ColLetter(col)}) has unsupported type");
+        }
+        catch (Exception ex)
+        {
+            return (null, $"{name} (col {ColLetter(col)}) unreadable: {ex.Message}");
+        }
+    }
+
+    private static string ColLetter(int col)
+    {
+        // 1→A, 2→B, ... 27→AA (enough for small sheets)
+        if (col <= 26) return ((char)('A' + col - 1)).ToString();
+        int a = (col - 1) / 26, b = (col - 1) % 26;
+        return $"{(char)('A' + a - 1)}{(char)('A' + b)}";
+    }
+
+    private sealed class Row
+    {
+        public int RowNum { get; set; }
+        public string StoreID { get; set; } = "";
+        public string DivisionRaw { get; set; } = "";
+        public int? DivCode { get; set; }
+        public int? Year1 { get; set; }
+        public int? Month1 { get; set; }
+        public decimal? SoldQty { get; set; }
+        public decimal? TurnsQty { get; set; }
+        public string? Error { get; set; }
+    }
+}

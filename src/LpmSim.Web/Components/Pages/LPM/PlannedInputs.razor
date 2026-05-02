@@ -1,0 +1,337 @@
+@page "/lpm/planned"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+
+<PageTitle>Planned Inputs</PageTitle>
+
+<div class="lpm-page-title">Planned Inputs</div>
+<div class="lpm-page-subtitle">
+    Planning-team inputs per country × division × month: Planned Turn, Planned Sales Qty, Planned EOM.
+</div>
+
+<div class="lpm-section lpm-filter-bar" style="max-width:1100px;">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="4" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="OnContextChangedAsync" Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="3" md="1">
+            <MudNumericField T="int" Label="Year" Value="_year"
+                             ValueChanged="async (int v) => { _year = v; await LoadAsync(); }"
+                             Min="2020" Max="2100" Variant="Variant.Outlined" Margin="Margin.Dense" HideSpinButtons="true" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudSelect T="int" Label="Month" Value="_month"
+                       ValueChanged="async (int v) => { _month = v; await LoadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @for (int m = 1; m <= 12; m++)
+                {
+                    var mv = m;
+                    <MudSelectItem Value="mv">@(new DateTime(2000, mv, 1).ToString("MMM"))</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="12" md="7" Class="d-flex align-center gap-2 justify-end">
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(string.IsNullOrEmpty(_country))"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="AddAllDivisions">
+                Add all divisions
+            </MudButton>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(string.IsNullOrEmpty(_country))"
+                       StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopyFromPrevAsync">
+                Copy prev month
+            </MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Save"
+                       Disabled="!CanSave" OnClick="SaveAsync">
+                Save (@DirtyCount)
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_rows.Count > 0)
+{
+    <div style="max-width:1100px;">
+        <MudGrid Spacing="2" Class="mb-2">
+            <MudItem xs="3"><div class="lpm-metric-card-sm lpm-accent-blue">
+                <div class="lpm-metric-label">Divisions</div><div class="lpm-metric-value-sm">@_rows.Count</div></div></MudItem>
+            <MudItem xs="3"><div class="lpm-metric-card-sm lpm-accent-green">
+                <div class="lpm-metric-label">Total Turn</div>
+                <div class="lpm-metric-value-sm">@_rows.Sum(r => r.PlannedTurn).ToString("N1")</div></div></MudItem>
+            <MudItem xs="3"><div class="lpm-metric-card-sm lpm-accent-purple">
+                <div class="lpm-metric-label">Total Sales Qty</div>
+                <div class="lpm-metric-value-sm">@_rows.Sum(r => r.PlannedSalesQty).ToString("N0")</div></div></MudItem>
+            <MudItem xs="3"><div class="lpm-metric-card-sm lpm-accent-cyan">
+                <div class="lpm-metric-label">Total EOM</div>
+                <div class="lpm-metric-value-sm">@_rows.Sum(r => r.PlannedEOM).ToString("N0")</div></div></MudItem>
+        </MudGrid>
+
+        <MudTable T="PlannedRow" Items="_rows" Hover="true" Dense="true" Striped="true"
+                  Class="lpm-weights-table-xs" Style="max-width:1100px;" AllowUnsorted="false">
+            <HeaderContent>
+                <MudTh Style="width:70px;">Code</MudTh>
+                <MudTh>Division</MudTh>
+                <MudTh Style="width:180px;">Planned Turn</MudTh>
+                <MudTh Style="width:200px;">Planned Sales Qty</MudTh>
+                <MudTh Style="width:180px;">Planned EOM</MudTh>
+                <MudTh Style="width:90px;">Status</MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>@context.DivCode</MudTd>
+                <MudTd>@context.DivisionName</MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="decimal" @ref="_cellRefs[context.RowIdx, 0]"
+                                     Value="context.PlannedTurn"
+                                     ValueChanged="(decimal v) => { context.PlannedTurn = v; context.IsDirty = true; }"
+                                     OnKeyDown="@((KeyboardEventArgs e) => OnKey(e, context.RowIdx, 0))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Step="0.1m" Format="F1" Culture="System.Globalization.CultureInfo.InvariantCulture" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="int" @ref="_salesRefs[context.RowIdx]"
+                                     Value="(int)Math.Round(context.PlannedSalesQty)"
+                                     ValueChanged="(int v) => { context.PlannedSalesQty = v; context.IsDirty = true; }"
+                                     OnKeyDown="@((KeyboardEventArgs e) => OnKey(e, context.RowIdx, 1))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" Step="1" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="int" @ref="_eomRefs[context.RowIdx]"
+                                     Value="(int)Math.Round(context.PlannedEOM)"
+                                     ValueChanged="(int v) => { context.PlannedEOM = v; context.IsDirty = true; }"
+                                     OnKeyDown="@((KeyboardEventArgs e) => OnKey(e, context.RowIdx, 2))"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" Step="1" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd>
+                    @if (context.IsDirty) { <span class="lpm-status lpm-status-warn">Unsaved</span> }
+                    else if (context.ExistsInDb) { <span class="lpm-status lpm-status-ok">Saved</span> }
+                    else { <span class="lpm-status lpm-status-err">New</span> }
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    </div>
+}
+else if (!string.IsNullOrEmpty(_country))
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:900px;">
+        No planned rows yet for @_country @_year/@_month.ToString("D2").
+        Click <strong>Add all divisions</strong> or <strong>Copy prev month</strong>.
+    </MudAlert>
+}
+
+@code {
+    private List<string> _countries = new();
+    private List<Division> _divisions = new();
+    private string _country = "UAE";
+    private int _year = DateTime.Today.Year;
+    private int _month = DateTime.Today.Month;
+    private List<PlannedRow> _rows = new();
+
+    // Per-column refs for Enter navigation — column types differ (decimal/int/int).
+    private MudNumericField<decimal>?[,] _cellRefs = new MudNumericField<decimal>?[0, 1];
+    private MudNumericField<int>?[] _salesRefs = Array.Empty<MudNumericField<int>?>();
+    private MudNumericField<int>?[] _eomRefs = Array.Empty<MudNumericField<int>?>();
+
+    private int DirtyCount => _rows.Count(r => r.IsDirty);
+    private bool CanSave => DirtyCount > 0;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        _divisions = await db.Divisions.OrderBy(d => d.DivCode).ToListAsync();
+
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+
+        // Default to the latest saved (Year, Month) for this country.
+        var latest = await db.LpmPlanneds.AsNoTracking()
+            .Where(p => p.Country == _country)
+            .OrderByDescending(p => p.Year1).ThenByDescending(p => p.Month1)
+            .Select(p => new { p.Year1, p.Month1 })
+            .FirstOrDefaultAsync();
+        if (latest is not null)
+        {
+            _year = latest.Year1;
+            _month = latest.Month1;
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task OnContextChangedAsync(string? value)
+    {
+        _country = value ?? "";
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _rows.Clear();
+        if (string.IsNullOrEmpty(_country)) { ResizeRefs(); StateHasChanged(); return; }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var existing = await db.LpmPlanneds.AsNoTracking()
+            .Where(p => p.Country == _country && p.Year1 == _year && p.Month1 == _month)
+            .ToListAsync();
+
+        var byDiv = existing.ToDictionary(p => p.DivCode);
+        int idx = 0;
+        foreach (var d in _divisions)
+        {
+            if (byDiv.TryGetValue(d.DivCode, out var p))
+            {
+                _rows.Add(new PlannedRow
+                {
+                    RowIdx = idx++,
+                    DivCode = d.DivCode, DivisionName = d.Name ?? "",
+                    PlannedTurn = p.PlannedTurn, PlannedSalesQty = p.PlannedSalesQty, PlannedEOM = p.PlannedEOM,
+                    ExistsInDb = true
+                });
+            }
+        }
+        ResizeRefs();
+        StateHasChanged();
+    }
+
+    private void AddAllDivisions()
+    {
+        var existingCodes = _rows.Select(r => r.DivCode).ToHashSet();
+        foreach (var d in _divisions)
+        {
+            if (existingCodes.Contains(d.DivCode)) continue;
+            _rows.Add(new PlannedRow
+            {
+                DivCode = d.DivCode, DivisionName = d.Name ?? "",
+                ExistsInDb = false, IsDirty = true
+            });
+        }
+        _rows = _rows.OrderBy(r => r.DivCode).ToList();
+        for (int i = 0; i < _rows.Count; i++) _rows[i].RowIdx = i;
+        ResizeRefs();
+    }
+
+    private async Task CopyFromPrevAsync()
+    {
+        var prevMonth = _month == 1 ? 12 : _month - 1;
+        var prevYear = _month == 1 ? _year - 1 : _year;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var prev = await db.LpmPlanneds.AsNoTracking()
+            .Where(p => p.Country == _country && p.Year1 == prevYear && p.Month1 == prevMonth)
+            .ToListAsync();
+
+        if (prev.Count == 0)
+        {
+            Snackbar.Add($"No planned rows in {_country} {prevYear}/{prevMonth:D2}.", Severity.Warning);
+            return;
+        }
+
+        if (_rows.Count == 0) AddAllDivisions();
+
+        var prevByDiv = prev.ToDictionary(p => p.DivCode);
+        foreach (var r in _rows)
+        {
+            if (prevByDiv.TryGetValue(r.DivCode, out var p))
+            {
+                r.PlannedTurn = p.PlannedTurn;
+                r.PlannedSalesQty = p.PlannedSalesQty;
+                r.PlannedEOM = p.PlannedEOM;
+                r.IsDirty = true;
+            }
+        }
+        Snackbar.Add($"Copied {prev.Count} division(s) from {prevYear}/{prevMonth:D2}.", Severity.Success);
+        StateHasChanged();
+    }
+
+    private void ResizeRefs()
+    {
+        var n = Math.Max(_rows.Count, 1);
+        _cellRefs  = new MudNumericField<decimal>?[n, 1];
+        _salesRefs = new MudNumericField<int>?[n];
+        _eomRefs   = new MudNumericField<int>?[n];
+    }
+
+    private async Task OnKey(KeyboardEventArgs e, int row, int col)
+    {
+        if (e.Key != "Enter" && e.Key != "Tab") return;
+        int nextRow = row + 1;
+        int nextCol = col;
+        if (nextRow >= _rows.Count) { nextRow = 0; nextCol = col + 1; }
+        if (nextCol >= 3) return;
+
+        switch (nextCol)
+        {
+            case 0: if (_cellRefs[nextRow, 0]  is { } r0) await r0.FocusAsync(); break;
+            case 1: if (_salesRefs[nextRow]    is { } r1) await r1.FocusAsync(); break;
+            case 2: if (_eomRefs[nextRow]      is { } r2) await r2.FocusAsync(); break;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now = DateTime.Now;
+            var user = CurrentUser.Name;
+            var dirty = _rows.Where(r => r.IsDirty).ToList();
+            var codes = dirty.Select(r => r.DivCode).ToList();
+            var existing = await db.LpmPlanneds
+                .Where(p => p.Country == _country && p.Year1 == _year && p.Month1 == _month
+                         && codes.Contains(p.DivCode))
+                .ToDictionaryAsync(p => p.DivCode);
+
+            foreach (var r in dirty)
+            {
+                if (existing.TryGetValue(r.DivCode, out var row))
+                {
+                    row.PlannedTurn = r.PlannedTurn;
+                    row.PlannedSalesQty = r.PlannedSalesQty;
+                    row.PlannedEOM = r.PlannedEOM;
+                    row.UpdatedTS = now;
+                    row.UserID = user;
+                }
+                else
+                {
+                    db.LpmPlanneds.Add(new LpmPlanned
+                    {
+                        Country = _country, DivCode = r.DivCode,
+                        Year1 = _year, Month1 = _month,
+                        PlannedTurn = r.PlannedTurn, PlannedSalesQty = r.PlannedSalesQty, PlannedEOM = r.PlannedEOM,
+                        UserID = user, CreateTS = now,
+                    });
+                }
+            }
+            await db.SaveChangesAsync();
+            foreach (var r in dirty) { r.IsDirty = false; r.ExistsInDb = true; }
+            Snackbar.Add($"Saved {dirty.Count} division(s).", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private sealed class PlannedRow
+    {
+        public int RowIdx { get; set; }
+        public int DivCode { get; set; }
+        public string DivisionName { get; set; } = "";
+        public decimal PlannedTurn { get; set; }
+        public decimal PlannedSalesQty { get; set; }
+        public decimal PlannedEOM { get; set; }
+        public bool IsDirty { get; set; }
+        public bool ExistsInDb { get; set; }
+    }
+}

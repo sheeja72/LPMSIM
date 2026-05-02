@@ -1,0 +1,238 @@
+@using ClosedXML.Excel
+@using System.IO
+@using LpmSim.Web.Components.Pages.Uploads
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<MudGrid Spacing="3">
+    <MudItem xs="12" md="4">
+        <div class="lpm-section">
+            <div class="lpm-section-title">Template</div>
+            <div class="lpm-section-sub">
+                Volume group share % per country (A, B, C, D, E). Active rows for a country
+                should sum to 100%.
+            </div>
+            <MudChipSet T="string" ReadOnly="true" Class="mb-3">
+                @foreach (var h in Header) { <MudChip T="string" Size="Size.Small">@h</MudChip> }
+            </MudChipSet>
+            <MudButton OnClick="DownloadTemplate" StartIcon="@Icons.Material.Filled.Download"
+                       Variant="Variant.Outlined" Color="Color.Primary" DropShadow="false">Download template</MudButton>
+        </div>
+        <div class="lpm-section">
+            <div class="lpm-section-title">Rules</div>
+            <ul class="pl-4 mb-0" style="font-size:0.82rem; color:#64748b;">
+                <li><strong>SharePct</strong> accepts "25" or "25%" or "0.25".</li>
+                <li><strong>IsActive</strong>: yes/no/true/false/1/0 (default yes).</li>
+                <li>Existing rows on (Country, GroupCode) are replaced.</li>
+            </ul>
+        </div>
+    </MudItem>
+    <MudItem xs="12" md="8">
+        <div class="lpm-section">
+            <div class="lpm-section-title">Upload file</div>
+            <MudFileUpload T="IBrowserFile" FilesChanged="OnFileSelected" Accept=".xlsx">
+                <ActivatorContent>
+                    <div class="lpm-dropzone">
+                        <MudIcon Icon="@Icons.Material.Filled.CloudUpload" Size="Size.Large" Color="Color.Primary" />
+                        <MudText Typo="Typo.body1" Class="mt-2">Drop an <strong>.xlsx</strong> file here, or click.</MudText>
+                        @if (_fileName is not null) { <MudText Typo="Typo.body2" Class="mt-2" Style="font-weight:600;">@_fileName</MudText> }
+                    </div>
+                </ActivatorContent>
+            </MudFileUpload>
+        </div>
+
+        @if (_parsing) { <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="my-2" /> }
+        @if (_fatalError is not null) { <MudAlert Severity="Severity.Error" Class="mb-3">@_fatalError</MudAlert> }
+
+        @if (_rows.Count > 0)
+        {
+            <MudGrid Spacing="2" Class="mb-3">
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue"><div class="lpm-metric-label">Total Rows</div><div class="lpm-metric-value">@_rows.Count</div></div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-green"><div class="lpm-metric-label">Valid</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-rose"><div class="lpm-metric-label">Errors</div><div class="lpm-metric-value">@_errorCount</div></div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber"><div class="lpm-metric-label">Will Upsert</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
+            </MudGrid>
+
+            <MudTable Items="_rows.Take(200)" Hover Dense Striped FixedHeader Height="50vh">
+                <HeaderContent>
+                    <MudTh>Row</MudTh><MudTh>Country</MudTh><MudTh>Code</MudTh><MudTh>Name</MudTh>
+                    <MudTh>Sort</MudTh><MudTh>Share%</MudTh><MudTh>Active</MudTh><MudTh>Status</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd>@context.RowNum</MudTd>
+                    <MudTd>@context.Country</MudTd>
+                    <MudTd>@context.GroupCode</MudTd>
+                    <MudTd>@context.GroupName</MudTd>
+                    <MudTd>@context.SortOrder</MudTd>
+                    <MudTd>@(context.SharePct.HasValue ? (context.SharePct.Value * 100m).ToString("0.##") + "%" : "")</MudTd>
+                    <MudTd>@(context.IsActive ? "Y" : "N")</MudTd>
+                    <MudTd>
+                        @if (context.Error is null) { <span class="lpm-status lpm-status-ok">OK</span> }
+                        else                         { <span class="lpm-status lpm-status-err">@context.Error</span> }
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+
+            <div class="d-flex justify-end mt-3">
+                <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                           StartIcon="@Icons.Material.Filled.Save"
+                           Disabled="_committing || _validCount == 0" OnClick="CommitAsync">
+                    Commit @_validCount row(s)
+                </MudButton>
+            </div>
+        }
+    </MudItem>
+</MudGrid>
+
+@code {
+    private static readonly string[] Header =
+        { "Country", "GroupCode", "GroupName", "SortOrder", "SharePct", "IsActive" };
+
+    private string? _fileName;
+    private bool _parsing, _committing;
+    private string? _fatalError;
+    private List<Row> _rows = new();
+    private int _validCount, _errorCount;
+
+    private async Task OnFileSelected(IBrowserFile file)
+    {
+        _fileName = file.Name; _rows.Clear(); _fatalError = null;
+        _validCount = _errorCount = 0;
+        _parsing = true; StateHasChanged();
+        try
+        {
+            using var ms = await UploadHelpers.ReadUploadAsync(file);
+            await ParseAsync(ms);
+        }
+        catch (Exception ex) { _fatalError = $"Failed to read file: {ex.Message}"; }
+        finally { _parsing = false; StateHasChanged(); }
+    }
+
+    private async Task ParseAsync(Stream xlsx)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var countrySet = new HashSet<string>(
+            await db.DataSettings.AsNoTracking().Where(s => s.Country != null && s.Country != "")
+                .Select(s => s.Country!).Distinct().ToListAsync(),
+            StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            using var wb = new XLWorkbook(xlsx);
+            var sheet = wb.Worksheets.First();
+            for (int i = 0; i < Header.Length; i++)
+            {
+                var got = UploadHelpers.TryString(sheet.Row(1).Cell(i + 1));
+                if (!string.Equals(got, Header[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    _fatalError = $"Header mismatch col {i + 1}: expected '{Header[i]}', got '{got}'.";
+                    return;
+                }
+            }
+
+            int lastRow;
+            try { lastRow = sheet.LastRowUsed()?.RowNumber() ?? 1; } catch { lastRow = 10000; }
+
+            for (int r = 2; r <= lastRow; r++)
+            {
+                var xlRow = sheet.Row(r);
+                if (!UploadHelpers.RowIsUsed(xlRow)) continue;
+                var (ctry, e1) = UploadHelpers.CellText(xlRow, 1, "Country");
+                var (code, e2) = UploadHelpers.CellText(xlRow, 2, "GroupCode");
+                var (name, e3) = UploadHelpers.CellText(xlRow, 3, "GroupName");
+                var (sort, e4) = UploadHelpers.CellInt(xlRow, 4, "SortOrder");
+                var (sp,   e5) = UploadHelpers.CellPct(xlRow, 5, "SharePct");
+                var (act,  e6) = UploadHelpers.CellBool(xlRow, 6, "IsActive");
+
+                var row = new Row
+                {
+                    RowNum = r, Country = ctry, GroupCode = code, GroupName = name,
+                    SortOrder = sort ?? 0, SharePct = sp, IsActive = act,
+                };
+                var problems = new List<string>(new[] { e1, e2, e3, e4, e5, e6 }.Where(e => !string.IsNullOrEmpty(e)));
+                if (string.IsNullOrWhiteSpace(ctry))                problems.Add("Country blank");
+                else if (!countrySet.Contains(ctry))                problems.Add($"Country '{ctry}' not in DataSettings");
+                if (string.IsNullOrWhiteSpace(code))                problems.Add("GroupCode blank");
+                if (sp is null)                                     problems.Add("SharePct blank");
+                if (problems.Count > 0) row.Error = string.Join("; ", problems);
+                _rows.Add(row);
+            }
+        }
+        catch (Exception ex) { _fatalError = $"Failed to open workbook: {ex.Message}"; return; }
+        _validCount = _rows.Count(r => r.Error is null);
+        _errorCount = _rows.Count - _validCount;
+    }
+
+    private async Task CommitAsync()
+    {
+        _committing = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now = DateTime.Now;
+            var valid = _rows.Where(r => r.Error is null).ToList();
+            var countries = valid.Select(r => r.Country!).Distinct().ToList();
+            var existing = await db.LpmVolumeGroups
+                .Where(g => countries.Contains(g.Country))
+                .ToListAsync();
+            var idx = existing.ToDictionary(g => (g.Country, g.GroupCode));
+            foreach (var r in valid)
+            {
+                var k = (r.Country!, r.GroupCode!);
+                if (idx.TryGetValue(k, out var row))
+                {
+                    row.GroupName = r.GroupName ?? "";
+                    row.SortOrder = r.SortOrder;
+                    row.SharePct  = r.SharePct!.Value;
+                    row.IsActive  = r.IsActive;
+                }
+                else
+                {
+                    db.LpmVolumeGroups.Add(new LpmVolumeGroup
+                    {
+                        Country   = r.Country!,
+                        GroupCode = r.GroupCode!,
+                        GroupName = r.GroupName ?? "",
+                        SortOrder = r.SortOrder,
+                        SharePct  = r.SharePct!.Value,
+                        IsActive  = r.IsActive,
+                        CreateTS  = now,
+                    });
+                }
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Committed {valid.Count} Volume Group rows.", Severity.Success);
+            _rows.Clear(); _fileName = null; _validCount = _errorCount = 0;
+        }
+        catch (Exception ex) { Snackbar.Add($"Commit failed: {ex.Message}", Severity.Error); }
+        finally { _committing = false; StateHasChanged(); }
+    }
+
+    private async Task DownloadTemplate()
+    {
+        using var wb = new XLWorkbook();
+        var sheet = wb.Worksheets.Add("Volume_Groups");
+        UploadHelpers.WriteHeader(sheet, Header);
+        sheet.Cell(2, 1).Value = "UAE";
+        sheet.Cell(2, 2).Value = "A";
+        sheet.Cell(2, 3).Value = "Group A";
+        sheet.Cell(2, 4).Value = 1;
+        sheet.Cell(2, 5).Value = "25%";
+        sheet.Cell(2, 6).Value = "Y";
+        await UploadHelpers.DownloadAsync(JS, wb, "VolumeGroups_Template.xlsx");
+    }
+
+    private sealed class Row
+    {
+        public int RowNum { get; init; }
+        public string? Country { get; init; }
+        public string? GroupCode { get; init; }
+        public string? GroupName { get; init; }
+        public int SortOrder { get; init; }
+        public decimal? SharePct { get; init; }
+        public bool IsActive { get; init; }
+        public string? Error { get; set; }
+    }
+}

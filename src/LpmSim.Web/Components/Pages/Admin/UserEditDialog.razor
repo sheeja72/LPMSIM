@@ -1,0 +1,126 @@
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+
+<MudDialog>
+    <DialogContent>
+        <MudStack Spacing="3">
+            <MudTextField T="string" Value="Model.Username"
+                          ValueChanged="v => Model.Username = v ?? string.Empty"
+                          Label="Windows Username" Placeholder="DOMAIN\\username"
+                          HelperText="Required for Auth:Mode = Negotiate."
+                          Disabled="@(!IsNew)" Required="true" Variant="Variant.Outlined" />
+            <MudTextField T="string" Value="Model.DisplayName"
+                          ValueChanged="v => Model.DisplayName = v" Label="Display Name"
+                          Variant="Variant.Outlined" />
+            <MudTextField T="string" Value="Model.Email"
+                          ValueChanged="v => Model.Email = v"
+                          Label="Email (SSO sign-in key)"
+                          Placeholder="user@bflgroup.ae"
+                          HelperText="Required for Auth:Mode = OIDC. Must match the user's Entra UPN."
+                          Variant="Variant.Outlined" />
+            <MudSwitch T="bool" Value="Model.IsActive"
+                       ValueChanged="(bool v) => Model.IsActive = v"
+                       Label="Active" Color="Color.Success" />
+            <MudText Typo="Typo.subtitle2">Roles</MudText>
+            <MudStack Row="true" Spacing="4">
+                @foreach (var role in Roles)
+                {
+                    <MudCheckBox T="bool"
+                                 Value="@Model.SelectedRoles.Contains(role.RoleCode)"
+                                 ValueChanged="(bool v) => ToggleRole(role.RoleCode, v)"
+                                 Label="@role.RoleCode"
+                                 Color="Color.Primary" />
+                }
+            </MudStack>
+        </MudStack>
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled"
+                   OnClick="SaveAsync" Disabled="_saving">
+            @(IsNew ? "Add" : "Save")
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private MudDialogInstance MudDialog { get; set; } = null!;
+
+    [Parameter] public UserEditModel Model { get; set; } = new();
+    [Parameter] public List<LpmRole> Roles { get; set; } = new();
+    [Parameter] public bool IsNew { get; set; }
+
+    private bool _saving;
+
+    private void ToggleRole(string code, bool on)
+    {
+        if (on) Model.SelectedRoles.Add(code);
+        else Model.SelectedRoles.Remove(code);
+    }
+
+    private async Task SaveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(Model.Username))
+        {
+            Snackbar.Add("Windows username is required.", Severity.Error);
+            return;
+        }
+        _saving = true;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var username = Model.Username.Trim();
+
+            if (IsNew)
+            {
+                if (await db.LpmUsers.AnyAsync(u => u.Username == username))
+                {
+                    Snackbar.Add("A user with that username already exists.", Severity.Warning);
+                    return;
+                }
+                var now = DateTime.Now;
+                db.LpmUsers.Add(new LpmUser
+                {
+                    Username    = username,
+                    DisplayName = Model.DisplayName,
+                    Email       = Model.Email,
+                    IsActive    = Model.IsActive,
+                    CreateTS    = now,
+                    CreatedBy   = CurrentUser.Name,
+                });
+                foreach (var code in Model.SelectedRoles)
+                    db.LpmUserRoles.Add(new LpmUserRole { Username = username, RoleCode = code });
+            }
+            else
+            {
+                var user = await db.LpmUsers.Include(u => u.UserRoles)
+                    .FirstAsync(u => u.Username == username);
+
+                user.DisplayName = Model.DisplayName;
+                user.Email       = Model.Email;
+                user.IsActive    = Model.IsActive;
+
+                var have = user.UserRoles.Select(r => r.RoleCode).ToHashSet();
+                foreach (var code in Model.SelectedRoles.Except(have))
+                    db.LpmUserRoles.Add(new LpmUserRole { Username = username, RoleCode = code });
+                foreach (var code in have.Except(Model.SelectedRoles))
+                    db.LpmUserRoles.Remove(user.UserRoles.First(r => r.RoleCode == code));
+            }
+
+            await db.SaveChangesAsync();
+            Snackbar.Add("Saved.", Severity.Success);
+            MudDialog.Close(DialogResult.Ok(true));
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+
+    private void Cancel() => MudDialog.Cancel();
+}

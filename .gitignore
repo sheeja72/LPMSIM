@@ -1,0 +1,59 @@
+# ─── .NET build outputs ────────────────────────────────────────────────
+bin/
+obj/
+out/
+publish/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+.vscode/
+.idea/
+
+# ─── Logs / coverage / temp ────────────────────────────────────────────
+*.log
+*.tmp
+*.cache
+TestResults/
+coverage*/
+
+# ─── OS junk ───────────────────────────────────────────────────────────
+Thumbs.db
+.DS_Store
+
+# ─── Office lock files (when a user has the doc open) ──────────────────
+~$*
+
+# ─── Secrets — NEVER commit ────────────────────────────────────────────
+# User Secrets live in %APPDATA%\Microsoft\UserSecrets, but block any
+# stray local files just in case.
+secrets.json
+appsettings.*.Local.json
+appsettings.Production.json
+appsettings.Development.local.json
+.env
+.env.*
+
+# ─── Publish artefacts ─────────────────────────────────────────────────
+*.pubxml
+*.pubxml.user
+PublishProfiles/
+
+# ─── EF Core ───────────────────────────────────────────────────────────
+*.mdf
+*.ldf
+
+# ─── NuGet ─────────────────────────────────────────────────────────────
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+
+# ─── Rider / Resharper ─────────────────────────────────────────────────
+_ReSharper.*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# ─── Entrypoints / dev artefacts ───────────────────────────────────────
+launchSettings.local.json

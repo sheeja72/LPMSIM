@@ -1,0 +1,288 @@
+@page "/admin/skumax-rules"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ISnackbar Snackbar
+
+<PageTitle>SKU Max Rules</PageTitle>
+
+<div class="lpm-page-title">SKU Max Rules</div>
+<div class="lpm-page-subtitle">
+    Per-country, per-division lookup: (Division, Volume Group, WH Stock range) → SKU Max. Division shows as the first column; pick a specific division to filter, or leave as <em>All divisions</em> to see everything for the country.
+</div>
+
+<div class="lpm-section lpm-filter-bar" style="max-width:1100px;">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="4" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await LoadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="5" md="4">
+            <MudSelect T="int" Label="Division" Value="_divCode"
+                       ValueChanged="async (int v) => { _divCode = v; await LoadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                <MudSelectItem T="int" Value="0">All divisions</MudSelectItem>
+                @foreach (var d in _divisions)
+                {
+                    <MudSelectItem T="int" Value="d.DivCode">@d.Name</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="3" md="5" Class="d-flex align-center gap-2 justify-end">
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="AddRow"
+                       Disabled="@(string.IsNullOrEmpty(_country) || _divisions.Count == 0 || _groups.Count == 0)">
+                Add row
+            </MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Save"
+                       Disabled="!CanSave" OnClick="SaveAsync">
+                Save (@DirtyCount)
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (string.IsNullOrEmpty(_country))
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:900px;">
+        Pick a country above to view or edit SKU Max rules.
+    </MudAlert>
+}
+else if (!_rows.Any(r => !r.IsDeleted))
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:900px;">
+        No rules yet for @_country@(_divCode > 0 ? " · " + DivisionName(_divCode) : "").
+        Click <strong>Add row</strong> to start.
+    </MudAlert>
+}
+else
+{
+    <MudTable T="RuleRow" Items="@_rows.Where(r => !r.IsDeleted)" Hover="true" Dense="true"
+              Class="lpm-weights-table-xs" Style="max-width:1100px;">
+        <HeaderContent>
+            <MudTh Style="width:200px;">Division</MudTh>
+            <MudTh Style="width:160px;">Volume Group</MudTh>
+            <MudTh Style="width:140px;">WH From</MudTh>
+            <MudTh Style="width:140px;">WH To</MudTh>
+            <MudTh Style="width:130px;">SKU Max</MudTh>
+            <MudTh Style="width:80px;">Active</MudTh>
+            <MudTh Style="width:90px;">Status</MudTh>
+            <MudTh Style="width:60px;"></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd Class="py-0">
+                <MudSelect T="int" Value="context.DivCode"
+                           ValueChanged="(int v) => { context.DivCode = v; context.IsDirty = true; }"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                    @foreach (var d in _divisions)
+                    {
+                        <MudSelectItem T="int" Value="d.DivCode">@d.Name</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudTd>
+            <MudTd Class="py-0">
+                <MudSelect T="string" Value="context.GroupCode"
+                           ValueChanged="v => { context.GroupCode = v ?? string.Empty; context.IsDirty = true; }"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                    @foreach (var g in _groups)
+                    {
+                        <MudSelectItem Value="@g.GroupCode">@g.GroupCode</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudTd>
+            <MudTd Class="py-0">
+                <MudNumericField T="int" Value="context.WHStockFrom"
+                                 ValueChanged="(int v) => { context.WHStockFrom = v; context.IsDirty = true; }"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" HideSpinButtons="true" />
+            </MudTd>
+            <MudTd Class="py-0">
+                <MudNumericField T="int" Value="context.WHStockTo"
+                                 ValueChanged="(int v) => { context.WHStockTo = v; context.IsDirty = true; }"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" HideSpinButtons="true" />
+            </MudTd>
+            <MudTd Class="py-0">
+                <MudNumericField T="int" Value="context.SKUMax"
+                                 ValueChanged="(int v) => { context.SKUMax = v; context.IsDirty = true; }"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" HideSpinButtons="true" />
+            </MudTd>
+            <MudTd>
+                <MudSwitch T="bool" Value="context.IsActive" Color="Color.Success"
+                           ValueChanged="(bool v) => { context.IsActive = v; context.IsDirty = true; }" />
+            </MudTd>
+            <MudTd>
+                @if (context.RuleId == 0) { <span class="lpm-status lpm-status-err">New</span> }
+                else if (context.IsDirty) { <span class="lpm-status lpm-status-warn">Edited</span> }
+                else { <span class="lpm-status lpm-status-ok">Saved</span> }
+            </MudTd>
+            <MudTd>
+                <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
+                               OnClick="() => context.IsDeleted = true" />
+            </MudTd>
+        </RowTemplate>
+    </MudTable>
+}
+
+@code {
+    private List<string> _countries = new();
+    private List<Division> _divisions = new();
+    private List<LpmVolumeGroup> _groups = new();
+    private List<RuleRow> _rows = new();
+
+    private string _country = "UAE";
+    private int _divCode;
+
+    private int DirtyCount => _rows.Count(r => r.IsDirty || r.IsDeleted);
+    private bool CanSave => DirtyCount > 0;
+
+    private string DivisionName(int code) =>
+        _divisions.FirstOrDefault(d => d.DivCode == code)?.Name ?? code.ToString();
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        _divisions = await db.Divisions.OrderBy(d => d.DivCode).ToListAsync();
+        _groups = await db.LpmVolumeGroups.AsNoTracking()
+            .Where(g => g.IsActive).OrderBy(g => g.SortOrder).ToListAsync();
+
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        _rows.Clear();
+        if (string.IsNullOrEmpty(_country)) { StateHasChanged(); return; }
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var q = db.LpmSKUMaxRules.AsNoTracking().Where(r => r.Country == _country);
+        if (_divCode > 0) q = q.Where(r => r.DivCode == _divCode);
+
+        var existing = await q
+            .OrderBy(r => r.DivCode).ThenBy(r => r.GroupCode).ThenBy(r => r.WHStockFrom)
+            .ToListAsync();
+
+        foreach (var e in existing)
+        {
+            _rows.Add(new RuleRow
+            {
+                RuleId = e.RuleId, DivCode = e.DivCode, GroupCode = e.GroupCode,
+                WHStockFrom = e.WHStockFrom, WHStockTo = e.WHStockTo,
+                SKUMax = e.SKUMax, IsActive = e.IsActive
+            });
+        }
+        StateHasChanged();
+    }
+
+    private void AddRow()
+    {
+        // Inherit the previous row's values when available so Planning can bulk-enter a range
+        // (same division + group, different WH stock ranges) by just tweaking the numbers.
+        var last = _rows.LastOrDefault(r => !r.IsDeleted);
+        var defaultDiv = last?.DivCode ?? (_divCode > 0 ? _divCode : (_divisions.FirstOrDefault()?.DivCode ?? 0));
+        var defaultGroup = last?.GroupCode ?? (_groups.FirstOrDefault()?.GroupCode ?? "");
+        _rows.Add(new RuleRow
+        {
+            RuleId = 0,
+            DivCode = defaultDiv,
+            GroupCode = defaultGroup,
+            WHStockFrom = last?.WHStockTo is int to and > 0 ? to + 1 : 0,
+            WHStockTo = 0, SKUMax = 0,
+            IsActive = true, IsDirty = true
+        });
+        StateHasChanged();
+    }
+
+    private async Task SaveAsync()
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now = DateTime.Now;
+
+            // Deletes
+            foreach (var r in _rows.Where(x => x.IsDeleted && x.RuleId > 0).ToList())
+            {
+                var dbRow = await db.LpmSKUMaxRules.FirstOrDefaultAsync(x => x.RuleId == r.RuleId);
+                if (dbRow is not null) db.LpmSKUMaxRules.Remove(dbRow);
+            }
+
+            var toUpsert = _rows.Where(r => !r.IsDeleted && r.IsDirty).ToList();
+            foreach (var r in toUpsert)
+            {
+                if (r.DivCode <= 0)
+                { Snackbar.Add("A row has no Division — fix before saving.", Severity.Error); return; }
+                if (string.IsNullOrWhiteSpace(r.GroupCode))
+                { Snackbar.Add("A row has no Volume Group — fix before saving.", Severity.Error); return; }
+                if (r.WHStockTo < r.WHStockFrom)
+                { Snackbar.Add($"{DivisionName(r.DivCode)} · {r.GroupCode}: WH Stock To must be ≥ From.", Severity.Error); return; }
+            }
+
+            // Track new rows so we can pick up their generated RuleId after SaveChanges.
+            var newMap = new Dictionary<RuleRow, LpmSKUMaxRule>();
+            foreach (var r in toUpsert)
+            {
+                if (r.RuleId == 0)
+                {
+                    var entity = new LpmSKUMaxRule
+                    {
+                        Country = _country, DivCode = r.DivCode,
+                        GroupCode = r.GroupCode,
+                        WHStockFrom = r.WHStockFrom, WHStockTo = r.WHStockTo,
+                        SKUMax = r.SKUMax, IsActive = r.IsActive,
+                        CreateTS = now,
+                    };
+                    db.LpmSKUMaxRules.Add(entity);
+                    newMap[r] = entity;
+                }
+                else
+                {
+                    var dbRow = await db.LpmSKUMaxRules.FirstAsync(x => x.RuleId == r.RuleId);
+                    dbRow.DivCode = r.DivCode;
+                    dbRow.GroupCode = r.GroupCode;
+                    dbRow.WHStockFrom = r.WHStockFrom;
+                    dbRow.WHStockTo = r.WHStockTo;
+                    dbRow.SKUMax = r.SKUMax;
+                    dbRow.IsActive = r.IsActive;
+                }
+            }
+
+            await db.SaveChangesAsync();
+
+            // Keep the saved rows on screen: just pick up new IDs, clear dirty flags, and drop deleted.
+            foreach (var (row, entity) in newMap) row.RuleId = entity.RuleId;
+            foreach (var r in _rows) r.IsDirty = false;
+            _rows.RemoveAll(r => r.IsDeleted);
+
+            Snackbar.Add("Saved.", Severity.Success);
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private sealed class RuleRow
+    {
+        public int RuleId { get; set; }
+        public int DivCode { get; set; }
+        public string GroupCode { get; set; } = "";
+        public int WHStockFrom { get; set; }
+        public int WHStockTo { get; set; }
+        public int SKUMax { get; set; }
+        public bool IsActive { get; set; } = true;
+        public bool IsDirty { get; set; }
+        public bool IsDeleted { get; set; }
+    }
+}

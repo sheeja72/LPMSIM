@@ -1,0 +1,164 @@
+@page "/admin/grades"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>Store Grades</PageTitle>
+
+<div class="lpm-page-title">Store Grades</div>
+<div class="lpm-page-subtitle">
+    Configure grade share % (how many stores get each grade) and markup % (applied to Planned Turn).
+    Share % should sum to 100% per country. Each country has its own set of grades.
+</div>
+
+<div class="lpm-section lpm-filter-bar mb-3">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="9" Class="d-flex justify-end">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddAsync"
+                       Disabled="@string.IsNullOrEmpty(_country)">
+                Add Grade
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+<MudTable T="LpmStoreGrade" Items="_grades" Hover="true" Dense="true"
+          Loading="_loading" AllowUnsorted="false" Class="lpm-narrow-table" Style="max-width:1000px;">
+    <HeaderContent>
+        <MudTh><MudTableSortLabel T="LpmStoreGrade" SortBy="g => g.SortOrder" InitialDirection="SortDirection.Ascending">Order</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmStoreGrade" SortBy="g => g.GradeCode">Code</MudTableSortLabel></MudTh>
+        <MudTh>Name</MudTh>
+        <MudTh>Share %</MudTh>
+        <MudTh>Markup %</MudTh>
+        <MudTh>Active</MudTh>
+        <MudTh Style="width:140px;">Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd>@context.SortOrder</MudTd>
+        <MudTd><code>@context.GradeCode</code></MudTd>
+        <MudTd>@context.GradeName</MudTd>
+        <MudTd>@((context.SharePct * 100m).ToString("0.##"))%</MudTd>
+        <MudTd>@((context.MarkupPct * 100m).ToString("0.##"))%</MudTd>
+        <MudTd>
+            <MudSwitch T="bool" Value="context.IsActive" Color="Color.Success"
+                       ValueChanged="(bool v) => ToggleActiveAsync(context, v)" />
+        </MudTd>
+        <MudTd>
+            <MudIconButton Icon="@Icons.Material.Filled.Edit" Size="Size.Small"
+                           OnClick="() => OpenEditAsync(context)" />
+            <MudIconButton Icon="@Icons.Material.Filled.Delete" Size="Size.Small" Color="Color.Error"
+                           OnClick="() => DeleteAsync(context)" />
+        </MudTd>
+    </RowTemplate>
+</MudTable>
+
+<MudText Typo="Typo.caption" Class="mt-2" Color="@(Math.Abs(ShareSum - 1m) < 0.0001m ? Color.Success : Color.Warning)">
+    Active share total for @_country: @((ShareSum * 100m).ToString("0.##"))%
+</MudText>
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private List<LpmStoreGrade> _grades = new();
+    private bool _loading;
+
+    private decimal ShareSum => _grades.Where(g => g.IsActive).Sum(g => g.SharePct);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _grades = new(); return; }
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            _grades = await db.LpmStoreGrades.AsNoTracking()
+                .Where(g => g.Country == _country)
+                .OrderBy(g => g.SortOrder)
+                .ToListAsync();
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    private async Task OpenAddAsync()
+    {
+        var parameters = new DialogParameters<GradeEditDialog>
+        {
+            { x => x.Model, new LpmStoreGrade { Country = _country, SortOrder = (_grades.Count + 1) } },
+            { x => x.IsNew, true }
+        };
+        var dlg = await DialogService.ShowAsync<GradeEditDialog>($"Add grade ({_country})", parameters);
+        var result = await dlg.Result;
+        if (result is not null && !result.Canceled) await ReloadAsync();
+    }
+
+    private async Task OpenEditAsync(LpmStoreGrade g)
+    {
+        var copy = new LpmStoreGrade
+        {
+            Country = g.Country, GradeCode = g.GradeCode, GradeName = g.GradeName, SortOrder = g.SortOrder,
+            SharePct = g.SharePct, MarkupPct = g.MarkupPct, IsActive = g.IsActive
+        };
+        var parameters = new DialogParameters<GradeEditDialog> { { x => x.Model, copy }, { x => x.IsNew, false } };
+        var dlg = await DialogService.ShowAsync<GradeEditDialog>($"Edit {g.Country}/{g.GradeCode}", parameters);
+        var result = await dlg.Result;
+        if (result is not null && !result.Canceled) await ReloadAsync();
+    }
+
+    private async Task ToggleActiveAsync(LpmStoreGrade g, bool active)
+    {
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var row = await db.LpmStoreGrades.FirstAsync(x => x.Country == g.Country && x.GradeCode == g.GradeCode);
+            row.IsActive = active;
+            await db.SaveChangesAsync();
+            g.IsActive = active;
+            Snackbar.Add($"{g.Country}/{g.GradeCode} → {(active ? "active" : "inactive")}.", Severity.Success);
+        }
+        catch (Exception ex) { Snackbar.Add($"Failed: {ex.Message}", Severity.Error); }
+    }
+
+    private async Task DeleteAsync(LpmStoreGrade g)
+    {
+        var ok = await DialogService.ShowMessageBox("Delete grade",
+            $"Delete {g.Country}/{g.GradeCode}?", yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var row = await db.LpmStoreGrades.FirstAsync(x => x.Country == g.Country && x.GradeCode == g.GradeCode);
+            db.LpmStoreGrades.Remove(row);
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Deleted {g.Country}/{g.GradeCode}.", Severity.Success);
+            await ReloadAsync();
+        }
+        catch (Exception ex) { Snackbar.Add($"Delete failed: {ex.Message}", Severity.Error); }
+    }
+}
