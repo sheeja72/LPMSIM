@@ -26,7 +26,34 @@
 
 <body>
     <Routes @rendermode="InteractiveServer" />
-    <script src="_framework/blazor.web.js"></script>
+    @* Bootstrap Blazor with 24h-tolerant timeouts so a single login survives
+       overnight laptop sleeps, long meetings and idle stretches without
+       forcing a refresh / re-auth.
+
+       JS-side timers must agree with server-side ones in Program.cs:
+         KeepAliveInterval     (server pings client) = 15s
+         ClientTimeoutInterval (server waits for client) = 24h
+         DisconnectedCircuitRetentionPeriod = 24h
+
+       JS reconnect window: very wide — every 5 sec for ~24 hours
+       (17,280 attempts). When laptop wakes after a long sleep the JS is
+       still trying; the server still has the circuit retained; reconnect
+       picks up where it left off, no re-login. *@
+    <script src="_framework/blazor.web.js" autostart="false"></script>
+    <script>
+        Blazor.start({
+            circuit: {
+                configureSignalR: function (builder) {
+                    builder.withServerTimeout(60 * 60 * 1000);    // 60 min — JS waits this long for any server msg
+                    builder.withKeepAliveInterval(15 * 1000);     // 15s — client pings server
+                }
+            },
+            reconnectionOptions: {
+                maxRetries: 17280,                                // ~24h coverage (17280 × 5s = 86,400s)
+                retryIntervalMilliseconds: 5000,                  // try every 5s
+            }
+        });
+    </script>
     <script src="_content/MudBlazor/MudBlazor.min.js"></script>
     <script src="@Assets["lpm-download.js"]"></script>
     <script src="@Assets["lpm-idle.js"]"></script>

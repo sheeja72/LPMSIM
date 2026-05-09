@@ -1,0 +1,268 @@
+@page "/admin/warehouse-priorities"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@using LpmSim.Data.LpmSim
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject LpmSimReportService Reports
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>Warehouse Priorities</PageTitle>
+
+<div class="lpm-page-title">Warehouse Priorities</div>
+<div class="lpm-page-subtitle">
+    Per-(Country, Warehouse) priority used by the SIM allocator's box read-order.
+    <strong>Lower number = higher priority</strong> (1 = first). Warehouses NOT listed here fall back
+    to priority 9999 (after every prioritised one), so the table only needs rows for the warehouses
+    you actually want to rank — the rest stay in the default <em>"BoxQty DESC, BoxNo"</em> order.
+    <br/>
+    Changes take effect on the next <strong>SIM Generate</strong> — no SKU Max rebuild needed.
+</div>
+
+<div class="lpm-section lpm-filter-bar mb-3">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="9" Class="d-flex justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddAsync"
+                       Disabled="@string.IsNullOrEmpty(_country)">
+                Add Warehouse
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+<MudTable T="LpmWarehousePriority" Items="_rows" Hover="true" Dense="true" Striped="true"
+          Loading="_loading" AllowUnsorted="false" Class="lpm-narrow-table" Style="max-width:1100px;">
+    <HeaderContent>
+        <MudTh Style="width:90px;"><MudTableSortLabel T="LpmWarehousePriority" SortBy="x => x.Priority" InitialDirection="SortDirection.Ascending">Priority</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmWarehousePriority" SortBy="x => x.Warehouse">Warehouse</MudTableSortLabel></MudTh>
+        <MudTh Style="width:120px;">Active</MudTh>
+        <MudTh>Updated</MudTh>
+        <MudTh Style="width:240px;">Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd>
+            @* Inline numeric edit — direct typing changes Priority and saves on blur. *@
+            <MudNumericField T="int" Value="@context.Priority" ValueChanged="@(async (int v) => await UpdatePriorityAsync(context, v))"
+                             Min="1" Max="9999" Step="1" Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Style="max-width:80px;" />
+        </MudTd>
+        <MudTd><code>@context.Warehouse</code></MudTd>
+        <MudTd>
+            @if (context.IsActive)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Filled">Active</MudChip>
+            }
+            else
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Default" Variant="Variant.Filled">Disabled</MudChip>
+            }
+        </MudTd>
+        <MudTd>
+            <span style="font-size:.78rem;color:#64748b;">
+                @((context.UpdatedTS ?? context.CreateTS).ToString("yyyy-MM-dd HH:mm"))
+                @if (!string.IsNullOrEmpty(context.UpdatedBy ?? context.CreatedBy))
+                {
+                    <span> · @(context.UpdatedBy ?? context.CreatedBy)</span>
+                }
+            </span>
+        </MudTd>
+        <MudTd>
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" DropShadow="false"
+                       StartIcon="@(context.IsActive ? Icons.Material.Filled.Block : Icons.Material.Filled.CheckCircle)"
+                       Color="@(context.IsActive ? Color.Default : Color.Success)"
+                       OnClick="@(() => ToggleAsync(context))">
+                @(context.IsActive ? "Disable" : "Enable")
+            </MudButton>
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete"
+                           Color="Color.Default" Title="Remove this warehouse from the priority list"
+                           OnClick="@(() => DeleteAsync(context))" />
+        </MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        @if (string.IsNullOrEmpty(_country))
+        {
+            <span>Select a country to start.</span>
+        }
+        else
+        {
+            <span>
+                No priority rows for @_country yet — every warehouse currently sorts last (priority 9999),
+                with ordering falling back to <em>BoxQty DESC, BoxNo</em>. Click <strong>Add Warehouse</strong>
+                to start ranking warehouses.
+            </span>
+        }
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+
+    private List<LpmWarehousePriority> _rows = new();
+    private bool _loading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => !string.IsNullOrEmpty(s.SIMCountry))
+            .Select(s => s.SIMCountry!)
+            .Distinct()
+            .OrderBy(c => c)
+            .ToListAsync();
+        if (_countries.Count > 0 && !_countries.Contains(_country))
+            _country = _countries[0];
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _rows = new(); return; }
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            _rows = await db.LpmWarehousePriorities.AsNoTracking()
+                .Where(x => x.Country == _country)
+                .OrderBy(x => x.Priority).ThenBy(x => x.Warehouse)
+                .ToListAsync();
+        }
+        finally { _loading = false; StateHasChanged(); }
+    }
+
+    /// <summary>
+    /// Inline-edit handler for the Priority column. Saves on blur.
+    /// Other rows are NOT auto-reshuffled — duplicate priorities are
+    /// allowed and resolved by Warehouse name as a tiebreak in the engine's
+    /// ORDER BY (deterministic via the trailing <c>BoxNo, ItemCode</c>).
+    /// </summary>
+    private async Task UpdatePriorityAsync(LpmWarehousePriority row, int newPriority)
+    {
+        if (newPriority < 1) newPriority = 1;
+        if (newPriority > 9999) newPriority = 9999;
+        if (row.Priority == newPriority) return;
+
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmWarehousePriorities.FirstOrDefaultAsync(x =>
+            x.Country == row.Country && x.Warehouse == row.Warehouse);
+        if (entity is null) return;
+        entity.Priority   = newPriority;
+        entity.UpdatedTS  = DateTime.Now;
+        entity.UpdatedBy  = CurrentUser.Name;
+        await db.SaveChangesAsync();
+        Snackbar.Add($"{entity.Warehouse} → priority {newPriority}", Severity.Success);
+        await ReloadAsync();
+    }
+
+    private async Task ToggleAsync(LpmWarehousePriority row)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmWarehousePriorities.FirstOrDefaultAsync(x =>
+            x.Country == row.Country && x.Warehouse == row.Warehouse);
+        if (entity is null) return;
+        entity.IsActive  = !entity.IsActive;
+        entity.UpdatedTS = DateTime.Now;
+        entity.UpdatedBy = CurrentUser.Name;
+        await db.SaveChangesAsync();
+        Snackbar.Add($"{(entity.IsActive ? "Enabled" : "Disabled")} {entity.Warehouse}",
+            entity.IsActive ? Severity.Success : Severity.Warning);
+        await ReloadAsync();
+    }
+
+    private async Task DeleteAsync(LpmWarehousePriority row)
+    {
+        var ok = await DialogService.ShowMessageBox("Remove warehouse priority?",
+            $"Remove {row.Warehouse} from the priority list? It reverts to the default priority 9999 (sorts last).",
+            yesText: "Remove", cancelText: "Cancel");
+        if (ok != true) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmWarehousePriorities.FirstOrDefaultAsync(x =>
+            x.Country == row.Country && x.Warehouse == row.Warehouse);
+        if (entity is null) return;
+        db.LpmWarehousePriorities.Remove(entity);
+        await db.SaveChangesAsync();
+        Snackbar.Add($"Removed {row.Warehouse} from priority list.", Severity.Info);
+        await ReloadAsync();
+    }
+
+    private async Task OpenAddAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) return;
+
+        // Distinct warehouses present in racks.dbo.whboxitems (the same source
+        // SIM Generate reads from). Exclude the ones already in the priority
+        // list so the planner can't accidentally double-add. Empty list = all
+        // warehouses are already listed; surface that as a snackbar instead.
+        List<string> available;
+        try
+        {
+            var all = await Reports.GetDistinctWarehousesAsync();
+            var existing = _rows.Select(r => r.Warehouse).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            available = all.Where(w => !existing.Contains(w))
+                           .OrderBy(w => w, StringComparer.OrdinalIgnoreCase)
+                           .ToList();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not read warehouses: {ex.Message}", Severity.Error);
+            return;
+        }
+        if (available.Count == 0)
+        {
+            Snackbar.Add("Every warehouse is already in the priority list. Edit existing rows instead.", Severity.Info);
+            return;
+        }
+
+        var nextPriority = (_rows.Count == 0 ? 0 : _rows.Max(r => r.Priority)) + 1;
+        var parameters = new DialogParameters
+        {
+            ["Country"]      = _country,
+            ["Available"]    = available,
+            ["DefaultPriority"] = nextPriority,
+        };
+        var dlg = await DialogService.ShowAsync<WarehousePriorityAddDialog>("Add Warehouse", parameters,
+            new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Small, FullWidth = true });
+        var result = await dlg.Result;
+        if (result is null || result.Canceled) return;
+        if (result.Data is (string warehouse, int priority))
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var existing = await db.LpmWarehousePriorities.FirstOrDefaultAsync(x =>
+                x.Country == _country && x.Warehouse == warehouse);
+            if (existing is null)
+            {
+                db.LpmWarehousePriorities.Add(new LpmWarehousePriority
+                {
+                    Country   = _country,
+                    Warehouse = warehouse,
+                    Priority  = priority,
+                    IsActive  = true,
+                    CreateTS  = DateTime.Now,
+                    CreatedBy = CurrentUser.Name,
+                });
+            }
+            else
+            {
+                existing.Priority  = priority;
+                existing.IsActive  = true;
+                existing.UpdatedTS = DateTime.Now;
+                existing.UpdatedBy = CurrentUser.Name;
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Added {warehouse} at priority {priority}.", Severity.Success);
+            await ReloadAsync();
+        }
+    }
+}

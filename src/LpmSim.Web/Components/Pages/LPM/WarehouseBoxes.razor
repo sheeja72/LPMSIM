@@ -3,26 +3,35 @@
 @attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
 @using LpmSim.Data.Warehouse
 @using LpmSim.Data.Auditing
+@using ClosedXML.Excel
+@using LpmSim.Web.Components.Pages.Uploads
 @inject WarehouseQueryService Warehouse
 @inject IActionLogger ActionLog
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
 <PageTitle>Warehouse Box Details</PageTitle>
 
 <div class="lpm-page-title">Warehouse Box Details</div>
 <div class="lpm-page-subtitle">
-    UAE warehouse stock aggregated per pallet &times; box. All filters are optional (blank = All) and searchable.
+    UAE warehouse stock — choose a Group By to switch between detailed box rows and category summaries.
+    All filters are optional (blank = All). LPM Current = LPMDt in past or current month; LPM Future = LPMDt
+    in next month or later; Non-LPM = LPMDt blank.
 </div>
 
 <div class="lpm-section lpm-filter-bar lpm-filter-bar-lg">
     <MudGrid Spacing="2">
+        @* Row 1 — primary filters. Each MudAutocomplete/MudSelect/MudTextField
+           gets the lpm-filter-active class when its bound value is non-default
+           so the planner instantly sees which filters are in effect. CSS in
+           app.css turns the active filter yellow with a bold label. *@
         <MudItem xs="12" sm="6" md="2">
             <MudAutocomplete T="string" Label="Warehouse" Value="_filter.Warehouse"
                              ValueChanged="v => { _filter = _filter with { Warehouse = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_warehouses, s))"
                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" />
+                             Placeholder="All" Class="@ActiveCls(_filter.Warehouse)" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
             <MudAutocomplete T="string" Label="Type Name" Value="_filter.TypeName"
@@ -30,7 +39,7 @@
                              SearchFunc="@((s, c) => Search(_typeNames, s))"
                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" />
+                             Placeholder="All" Class="@ActiveCls(_filter.TypeName)" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
             <MudAutocomplete T="string" Label="Pallet Category" Value="_filter.PalletCategory"
@@ -38,37 +47,83 @@
                              SearchFunc="@((s, c) => Search(_palletCategories, s))"
                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" />
+                             Placeholder="All" Class="@ActiveCls(_filter.PalletCategory)" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
             <MudSelect T="LpmPresence" Label="LPM Status" Value="_filter.LpmStatus"
                        ValueChanged="v => { _filter = _filter with { LpmStatus = v }; StateHasChanged(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Class="@(_filter.LpmStatus == LpmPresence.Any ? "" : "lpm-filter-active")">
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.Any">Any</MudSelectItem>
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.HasLpm">Has LPM</MudSelectItem>
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.NoLpm">No LPM (blank)</MudSelectItem>
             </MudSelect>
-        </MudItem>
-        <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="LPM Value" Value="_filter.Lpm"
-                             ValueChanged="v => { _filter = _filter with { Lpm = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_lpms, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="Any specific" />
         </MudItem>
         <MudItem xs="12" sm="8" md="2">
             <MudTextField T="string" Label="Pallet / Box contains"
                           Value="_filter.Search"
                           ValueChanged="v => { _filter = _filter with { Search = v }; StateHasChanged(); }"
                           Variant="Variant.Outlined" Margin="Margin.Dense" Clearable="true"
-                          Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                          Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
+                          Class="@ActiveCls(_filter.Search)" />
         </MudItem>
-        <MudItem xs="12" sm="4" md="2" Class="d-flex align-center justify-end">
-            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Medium"
+        <MudItem xs="12" sm="4" md="2">
+            <MudSelect T="WhGroupBy" Label="Group By" Value="_groupBy"
+                       ValueChanged="v => { _groupBy = v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Class="@(_groupBy == WhGroupBy.Box ? "" : "lpm-filter-active")">
+                <MudSelectItem T="WhGroupBy" Value="WhGroupBy.Box">Box (detail)</MudSelectItem>
+                <MudSelectItem T="WhGroupBy" Value="WhGroupBy.Division">Division</MudSelectItem>
+                <MudSelectItem T="WhGroupBy" Value="WhGroupBy.Department">Department</MudSelectItem>
+                <MudSelectItem T="WhGroupBy" Value="WhGroupBy.Brand">Brand</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+
+        @* Row 2 — Division / Department / Brand filters + Non-Purchased toggle + Load + Export *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="Division" Value="_filter.Division"
+                             ValueChanged="v => { _filter = _filter with { Division = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_divisions, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" Class="@ActiveCls(_filter.Division)" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="Department" Value="_filter.Department"
+                             ValueChanged="v => { _filter = _filter with { Department = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_departments, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" Class="@ActiveCls(_filter.Department)" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="Brand" Value="_filter.Brand"
+                             ValueChanged="v => { _filter = _filter with { Brand = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_brands, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" Class="@ActiveCls(_filter.Brand)" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
+            @* Default = ON. When checked, only "available" boxes (ShopEligible <> 'E')
+               are shown; when unchecked, all boxes (purchased + non-purchased) are
+               shown. Highlighted whenever it's NOT the default of true. *@
+            <MudCheckBox T="bool" Value="_filter.NonPurchasedOnly"
+                         ValueChanged="v => { _filter = _filter with { NonPurchasedOnly = v }; StateHasChanged(); }"
+                         Color="Color.Primary"
+                         Class="@(_filter.NonPurchasedOnly ? "" : "lpm-filter-active")"
+                         Label="Show Non-Purchased" />
+        </MudItem>
+        <MudItem xs="12" md="3" Class="d-flex align-center justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
                        StartIcon="@Icons.Material.Filled.PlayArrow"
-                       Disabled="_loading" OnClick="LoadAsync" FullWidth="true">
+                       Disabled="_loading" OnClick="LoadAsync">
                 Load
+            </MudButton>
+            <MudButton Color="Color.Success" Variant="Variant.Outlined" DropShadow="false" Size="Size.Small"
+                       StartIcon="@Icons.Material.Filled.Download"
+                       Disabled="@(_loading || !HasResults)" OnClick="ExportExcelAsync">
+                Excel
             </MudButton>
         </MudItem>
     </MudGrid>
@@ -79,7 +134,12 @@
     <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
 }
 
-@if (_rows.Count > 0)
+@* ─────────────────────────────────────────────────────────────────────────
+   Conditionally render different tables per Group By mode. Only one of
+   {_rows, _divRows, _deptRows, _brandRows} is populated by LoadAsync().
+   ───────────────────────────────────────────────────────────────────── *@
+
+@if (_groupBy == WhGroupBy.Box && _rows.Count > 0)
 {
     <MudGrid Spacing="2" Class="mb-3">
         <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
@@ -104,15 +164,48 @@
     <MudTable T="WhBoxRow" Items="_rows" Hover="true" Striped="true" Dense="true"
               FixedHeader="true" Height="62vh" AllowUnsorted="false">
         <HeaderContent>
-            <MudTh>Country</MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Warehouse" InitialDirection="SortDirection.Ascending">Warehouse</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletNo">Pallet No</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletType">Pallet Type</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.TypeName ?? string.Empty">Type Name</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletCategory ?? string.Empty">Pallet Category</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty">Qty</MudTableSortLabel></MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.LPM ?? string.Empty">LPM</MudTableSortLabel></MudTh>
+            <MudTh>Country
+                <span class="lpm-th-total is-count">@_rows.Count.ToString("N0") rows</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Warehouse" InitialDirection="SortDirection.Ascending">Warehouse</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.Warehouse).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletNo">Pallet No</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.PalletNo).Distinct().Count().ToString("N0") distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.BoxNo).Distinct().Count().ToString("N0") distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletType">Pallet Type</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.PalletType).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.TypeName ?? string.Empty">Type Name</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.TypeName).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletCategory ?? string.Empty">Pallet Category</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.PalletCategory).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Division ?? string.Empty">Division</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.Division).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Department ?? string.Empty">Department</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.Department).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Brand ?? string.Empty">Brand</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.Brand).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Rack ?? string.Empty">Rack</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.Rack).Distinct().Count() distinct</span>
+            </MudTh>
+            <MudTh>Purchased
+                <span class="lpm-th-total is-count">@_rows.Count(r => r.Purchased == "N").ToString("N0") = N</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty">Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_rows.Sum(r => r.Qty).ToString("N0")</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.LPM ?? string.Empty">LPM</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.LPM).Distinct().Count() distinct</span>
+            </MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>@context.Country</MudTd>
@@ -122,8 +215,175 @@
             <MudTd>@context.PalletType</MudTd>
             <MudTd>@context.TypeName</MudTd>
             <MudTd>@context.PalletCategory</MudTd>
+            <MudTd>@context.Division</MudTd>
+            <MudTd>@context.Department</MudTd>
+            <MudTd>@context.Brand</MudTd>
+            <MudTd>@context.Rack</MudTd>
+            <MudTd>@context.Purchased</MudTd>
             <MudTd Style="text-align:right;">@context.Qty.ToString("N0")</MudTd>
             <MudTd>@context.LPM</MudTd>
+        </RowTemplate>
+        <PagerContent>
+            <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+        </PagerContent>
+    </MudTable>
+}
+else if (_groupBy == WhGroupBy.Division && _divRows.Count > 0)
+{
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Divisions</div>
+            <div class="lpm-metric-value">@_divRows.Count.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">LPM Current Qty</div>
+            <div class="lpm-metric-value">@_divRows.Sum(r => r.LPMCurrentQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">LPM Future Qty</div>
+            <div class="lpm-metric-value">@_divRows.Sum(r => r.LPMFutureQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-green">
+            <div class="lpm-metric-label">Non-LPM Qty</div>
+            <div class="lpm-metric-value">@_divRows.Sum(r => r.NonLPMQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="12" sm="8" md="4"><div class="lpm-metric-card lpm-accent-rose">
+            <div class="lpm-metric-label">Total Qty</div>
+            <div class="lpm-metric-value">@_divRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <MudTable T="WhDivisionRow" Items="_divRows" Hover="true" Striped="true" Dense="true"
+              FixedHeader="true" Height="62vh">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel T="WhDivisionRow" SortBy="r => r.Division ?? string.Empty" InitialDirection="SortDirection.Ascending">Division</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_divRows.Count divisions</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDivisionRow" SortBy="r => r.LPMCurrentQty">LPM Qty Current</MudTableSortLabel>
+                <span class="lpm-th-total">@_divRows.Sum(r => r.LPMCurrentQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDivisionRow" SortBy="r => r.LPMFutureQty">LPM Future Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_divRows.Sum(r => r.LPMFutureQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDivisionRow" SortBy="r => r.NonLPMQty">Non-LPM Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_divRows.Sum(r => r.NonLPMQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDivisionRow" SortBy="r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty">Total Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_divRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</span></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@(context.Division ?? "(no division)")</MudTd>
+            <MudTd Style="text-align:right;">@context.LPMCurrentQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.LPMFutureQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.NonLPMQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:600;">@((context.LPMCurrentQty + context.LPMFutureQty + context.NonLPMQty).ToString("N0"))</MudTd>
+        </RowTemplate>
+        <PagerContent>
+            <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+        </PagerContent>
+    </MudTable>
+}
+else if (_groupBy == WhGroupBy.Department && _deptRows.Count > 0)
+{
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Department rows</div>
+            <div class="lpm-metric-value">@_deptRows.Count.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">LPM Current Qty</div>
+            <div class="lpm-metric-value">@_deptRows.Sum(r => r.LPMCurrentQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">LPM Future Qty</div>
+            <div class="lpm-metric-value">@_deptRows.Sum(r => r.LPMFutureQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-green">
+            <div class="lpm-metric-label">Non-LPM Qty</div>
+            <div class="lpm-metric-value">@_deptRows.Sum(r => r.NonLPMQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="12" sm="8" md="4"><div class="lpm-metric-card lpm-accent-rose">
+            <div class="lpm-metric-label">Total Qty</div>
+            <div class="lpm-metric-value">@_deptRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <MudTable T="WhDepartmentRow" Items="_deptRows" Hover="true" Striped="true" Dense="true"
+              FixedHeader="true" Height="62vh">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.Division ?? string.Empty" InitialDirection="SortDirection.Ascending">Division</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_deptRows.Select(r => r.Division).Distinct().Count() distinct</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.Department ?? string.Empty">Department</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_deptRows.Count rows</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.LPMCurrentQty">LPM Qty Current</MudTableSortLabel>
+                <span class="lpm-th-total">@_deptRows.Sum(r => r.LPMCurrentQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.LPMFutureQty">LPM Future Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_deptRows.Sum(r => r.LPMFutureQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.NonLPMQty">Non-LPM Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_deptRows.Sum(r => r.NonLPMQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty">Total Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_deptRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</span></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@(context.Division ?? "(no division)")</MudTd>
+            <MudTd>@(context.Department ?? "(no department)")</MudTd>
+            <MudTd Style="text-align:right;">@context.LPMCurrentQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.LPMFutureQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.NonLPMQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:600;">@((context.LPMCurrentQty + context.LPMFutureQty + context.NonLPMQty).ToString("N0"))</MudTd>
+        </RowTemplate>
+        <PagerContent>
+            <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+        </PagerContent>
+    </MudTable>
+}
+else if (_groupBy == WhGroupBy.Brand && _brandRows.Count > 0)
+{
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Brand rows</div>
+            <div class="lpm-metric-value">@_brandRows.Count.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">LPM Current Qty</div>
+            <div class="lpm-metric-value">@_brandRows.Sum(r => r.LPMCurrentQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">LPM Future Qty</div>
+            <div class="lpm-metric-value">@_brandRows.Sum(r => r.LPMFutureQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" sm="4" md="2"><div class="lpm-metric-card lpm-accent-green">
+            <div class="lpm-metric-label">Non-LPM Qty</div>
+            <div class="lpm-metric-value">@_brandRows.Sum(r => r.NonLPMQty).ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="12" sm="8" md="4"><div class="lpm-metric-card lpm-accent-rose">
+            <div class="lpm-metric-label">Total Qty</div>
+            <div class="lpm-metric-value">@_brandRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <MudTable T="WhBrandRow" Items="_brandRows" Hover="true" Striped="true" Dense="true"
+              FixedHeader="true" Height="62vh">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.Division ?? string.Empty" InitialDirection="SortDirection.Ascending">Division</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_brandRows.Select(r => r.Division).Distinct().Count() distinct</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.Department ?? string.Empty">Department</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_brandRows.Select(r => r.Department).Distinct().Count() distinct</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.Brand ?? string.Empty">Brand</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_brandRows.Count rows</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.LPMCurrentQty">LPM Qty Current</MudTableSortLabel>
+                <span class="lpm-th-total">@_brandRows.Sum(r => r.LPMCurrentQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.LPMFutureQty">LPM Future Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_brandRows.Sum(r => r.LPMFutureQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.NonLPMQty">Non-LPM Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_brandRows.Sum(r => r.NonLPMQty).ToString("N0")</span></MudTh>
+            <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty">Total Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_brandRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty).ToString("N0")</span></MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@(context.Division ?? "(no division)")</MudTd>
+            <MudTd>@(context.Department ?? "(no department)")</MudTd>
+            <MudTd>@(context.Brand ?? "(no brand)")</MudTd>
+            <MudTd Style="text-align:right;">@context.LPMCurrentQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.LPMFutureQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.NonLPMQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:600;">@((context.LPMCurrentQty + context.LPMFutureQty + context.NonLPMQty).ToString("N0"))</MudTd>
         </RowTemplate>
         <PagerContent>
             <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -143,15 +403,50 @@ else if (!_loadedOnce)
 }
 
 @code {
-    private List<string> _warehouses = new();
-    private List<string> _typeNames = new();
+    private List<string> _warehouses       = new();
+    private List<string> _typeNames        = new();
     private List<string> _palletCategories = new();
-    private List<string> _lpms = new();
-    private List<WhBoxRow> _rows = new();
-    private WhBoxFilter _filter = new(null, null, null, null, null, LpmPresence.Any);
+    private List<string> _lpms             = new();
+    private List<string> _divisions        = new();
+    private List<string> _departments      = new();
+    private List<string> _brands           = new();
+
+    // Result sets — only one is populated per Load depending on _groupBy.
+    private List<WhBoxRow>        _rows       = new();
+    private List<WhDivisionRow>   _divRows    = new();
+    private List<WhDepartmentRow> _deptRows   = new();
+    private List<WhBrandRow>      _brandRows  = new();
+
+    // NonPurchasedOnly defaults to TRUE per business request — most planners
+    // only care about available stock, not boxes already shopped/purchased.
+    // Toggle off to include ShopEligible='E' rows in the result.
+    private WhBoxFilter _filter = new(
+        Warehouse: null, TypeName: null, PalletCategory: null,
+        Lpm: null, Search: null,
+        LpmStatus: LpmPresence.Any,
+        Division: null, Department: null, Brand: null,
+        NonPurchasedOnly: true);
+    private WhGroupBy   _groupBy = WhGroupBy.Box;
     private bool _loading;
     private bool _loadedOnce;
     private readonly int _topLimit = 200000;
+
+    /// <summary>True when the current Group By has results worth exporting.</summary>
+    private bool HasResults => _groupBy switch
+    {
+        WhGroupBy.Box        => _rows.Count > 0,
+        WhGroupBy.Division   => _divRows.Count > 0,
+        WhGroupBy.Department => _deptRows.Count > 0,
+        WhGroupBy.Brand      => _brandRows.Count > 0,
+        _                    => false,
+    };
+
+    /// <summary>
+    /// Returns "lpm-filter-active" when the value is non-default, "" otherwise.
+    /// Drives the yellow filter-highlight CSS in app.css so the planner can
+    /// see at a glance which filters are in effect.
+    /// </summary>
+    private static string ActiveCls(string? v) => string.IsNullOrEmpty(v) ? "" : "lpm-filter-active";
 
     protected override async Task OnInitializedAsync()
     {
@@ -161,10 +456,153 @@ else if (!_loadedOnce)
             _typeNames        = await Warehouse.GetTypeNamesAsync();
             _palletCategories = await Warehouse.GetPalletCategoriesAsync();
             _lpms             = await Warehouse.GetLpmsAsync();
+            _divisions        = await Warehouse.GetDistinctDivisionsAsync();
+            _departments      = await Warehouse.GetDistinctDepartmentsAsync();
+            _brands           = await Warehouse.GetDistinctBrandsAsync();
         }
         catch (Exception ex)
         {
             Snackbar.Add($"Could not load filter lists: {ex.Message}", Severity.Error);
+        }
+    }
+
+    /// <summary>
+    /// Build an Excel workbook from the currently-loaded result set and trigger
+    /// a browser download via UploadHelpers.DownloadAsync. Sheet content depends
+    /// on the active Group By so the user gets the same shape they're seeing.
+    /// </summary>
+    private async Task ExportExcelAsync()
+    {
+        if (!HasResults)
+        {
+            Snackbar.Add("Nothing to export — Load a result first.", Severity.Info);
+            return;
+        }
+        try
+        {
+            using var wb = new XLWorkbook();
+            var fileName = $"WarehouseBoxes_{_groupBy}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+
+            switch (_groupBy)
+            {
+                case WhGroupBy.Box:
+                {
+                    var ws = wb.Worksheets.Add("Box Detail");
+                    string[] headers = { "Country", "Warehouse", "Pallet No", "Box No",
+                        "Pallet Type", "Type Name", "Pallet Category", "Division",
+                        "Department", "Brand", "Rack", "Purchased", "Qty", "LPM" };
+                    for (int i = 0; i < headers.Length; i++)
+                        ws.Cell(1, i + 1).Value = headers[i];
+                    ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+                    int row = 2;
+                    foreach (var r in _rows)
+                    {
+                        ws.Cell(row, 1).Value  = r.Country;
+                        ws.Cell(row, 2).Value  = r.Warehouse;
+                        ws.Cell(row, 3).Value  = r.PalletNo;
+                        ws.Cell(row, 4).Value  = r.BoxNo;
+                        ws.Cell(row, 5).Value  = r.PalletType;
+                        ws.Cell(row, 6).Value  = r.TypeName ?? "";
+                        ws.Cell(row, 7).Value  = r.PalletCategory ?? "";
+                        ws.Cell(row, 8).Value  = r.Division ?? "";
+                        ws.Cell(row, 9).Value  = r.Department ?? "";
+                        ws.Cell(row, 10).Value = r.Brand ?? "";
+                        ws.Cell(row, 11).Value = r.Rack ?? "";
+                        ws.Cell(row, 12).Value = r.Purchased ?? "";
+                        ws.Cell(row, 13).Value = r.Qty;
+                        ws.Cell(row, 14).Value = r.LPM ?? "";
+                        row++;
+                    }
+                    ws.Columns().AdjustToContents();
+                    break;
+                }
+                case WhGroupBy.Division:
+                {
+                    var ws = wb.Worksheets.Add("By Division");
+                    string[] headers = { "Division", "LPM Current Qty", "LPM Future Qty", "Non-LPM Qty", "Total Qty" };
+                    for (int i = 0; i < headers.Length; i++) ws.Cell(1, i + 1).Value = headers[i];
+                    ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+                    int row = 2;
+                    foreach (var r in _divRows)
+                    {
+                        ws.Cell(row, 1).Value = r.Division ?? "(no division)";
+                        ws.Cell(row, 2).Value = r.LPMCurrentQty;
+                        ws.Cell(row, 3).Value = r.LPMFutureQty;
+                        ws.Cell(row, 4).Value = r.NonLPMQty;
+                        ws.Cell(row, 5).Value = r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty;
+                        row++;
+                    }
+                    // Totals row at the bottom — bold.
+                    ws.Cell(row, 1).Value = "TOTAL";
+                    ws.Cell(row, 2).Value = _divRows.Sum(r => r.LPMCurrentQty);
+                    ws.Cell(row, 3).Value = _divRows.Sum(r => r.LPMFutureQty);
+                    ws.Cell(row, 4).Value = _divRows.Sum(r => r.NonLPMQty);
+                    ws.Cell(row, 5).Value = _divRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty);
+                    ws.Range(row, 1, row, 5).Style.Font.Bold = true;
+                    ws.Columns().AdjustToContents();
+                    break;
+                }
+                case WhGroupBy.Department:
+                {
+                    var ws = wb.Worksheets.Add("By Department");
+                    string[] headers = { "Division", "Department", "LPM Current Qty", "LPM Future Qty", "Non-LPM Qty", "Total Qty" };
+                    for (int i = 0; i < headers.Length; i++) ws.Cell(1, i + 1).Value = headers[i];
+                    ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+                    int row = 2;
+                    foreach (var r in _deptRows)
+                    {
+                        ws.Cell(row, 1).Value = r.Division ?? "(no division)";
+                        ws.Cell(row, 2).Value = r.Department ?? "(no department)";
+                        ws.Cell(row, 3).Value = r.LPMCurrentQty;
+                        ws.Cell(row, 4).Value = r.LPMFutureQty;
+                        ws.Cell(row, 5).Value = r.NonLPMQty;
+                        ws.Cell(row, 6).Value = r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty;
+                        row++;
+                    }
+                    ws.Cell(row, 1).Value = "TOTAL";
+                    ws.Cell(row, 3).Value = _deptRows.Sum(r => r.LPMCurrentQty);
+                    ws.Cell(row, 4).Value = _deptRows.Sum(r => r.LPMFutureQty);
+                    ws.Cell(row, 5).Value = _deptRows.Sum(r => r.NonLPMQty);
+                    ws.Cell(row, 6).Value = _deptRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty);
+                    ws.Range(row, 1, row, 6).Style.Font.Bold = true;
+                    ws.Columns().AdjustToContents();
+                    break;
+                }
+                case WhGroupBy.Brand:
+                {
+                    var ws = wb.Worksheets.Add("By Brand");
+                    string[] headers = { "Division", "Department", "Brand", "LPM Current Qty", "LPM Future Qty", "Non-LPM Qty", "Total Qty" };
+                    for (int i = 0; i < headers.Length; i++) ws.Cell(1, i + 1).Value = headers[i];
+                    ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+                    int row = 2;
+                    foreach (var r in _brandRows)
+                    {
+                        ws.Cell(row, 1).Value = r.Division ?? "(no division)";
+                        ws.Cell(row, 2).Value = r.Department ?? "(no department)";
+                        ws.Cell(row, 3).Value = r.Brand ?? "(no brand)";
+                        ws.Cell(row, 4).Value = r.LPMCurrentQty;
+                        ws.Cell(row, 5).Value = r.LPMFutureQty;
+                        ws.Cell(row, 6).Value = r.NonLPMQty;
+                        ws.Cell(row, 7).Value = r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty;
+                        row++;
+                    }
+                    ws.Cell(row, 1).Value = "TOTAL";
+                    ws.Cell(row, 4).Value = _brandRows.Sum(r => r.LPMCurrentQty);
+                    ws.Cell(row, 5).Value = _brandRows.Sum(r => r.LPMFutureQty);
+                    ws.Cell(row, 6).Value = _brandRows.Sum(r => r.NonLPMQty);
+                    ws.Cell(row, 7).Value = _brandRows.Sum(r => r.LPMCurrentQty + r.LPMFutureQty + r.NonLPMQty);
+                    ws.Range(row, 1, row, 7).Style.Font.Bold = true;
+                    ws.Columns().AdjustToContents();
+                    break;
+                }
+            }
+
+            await UploadHelpers.DownloadAsync(JS, wb, fileName);
+            Snackbar.Add($"Exported {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
         }
     }
 
@@ -181,17 +619,42 @@ else if (!_loadedOnce)
     {
         _loading = true; StateHasChanged();
         var started = DateTime.Now;
+        // Clear ALL result sets so a previous Group By's rows don't leak into
+        // the new view if the user switches mode without re-Loading.
+        _rows.Clear(); _divRows.Clear(); _deptRows.Clear(); _brandRows.Clear();
         try
         {
-            _rows = await Warehouse.GetBoxesAsync(_filter, _topLimit);
+            int rowCount;
+            switch (_groupBy)
+            {
+                case WhGroupBy.Box:
+                    _rows = await Warehouse.GetBoxesAsync(_filter, _topLimit);
+                    rowCount = _rows.Count;
+                    if (rowCount >= _topLimit)
+                        Snackbar.Add($"Result capped at {_topLimit:N0} rows. Narrow the filter to see more.", Severity.Warning);
+                    break;
+                case WhGroupBy.Division:
+                    _divRows = await Warehouse.GetDivisionSummaryAsync(_filter);
+                    rowCount = _divRows.Count;
+                    break;
+                case WhGroupBy.Department:
+                    _deptRows = await Warehouse.GetDepartmentSummaryAsync(_filter);
+                    rowCount = _deptRows.Count;
+                    break;
+                case WhGroupBy.Brand:
+                    _brandRows = await Warehouse.GetBrandSummaryAsync(_filter);
+                    rowCount = _brandRows.Count;
+                    break;
+                default:
+                    rowCount = 0;
+                    break;
+            }
             _loadedOnce = true;
-            if (_rows.Count >= _topLimit)
-                Snackbar.Add($"Result capped at {_topLimit:N0} rows. Narrow the filter to see more.", Severity.Warning);
 
             await ActionLog.LogAsync(
                 "WarehouseBoxes.Load",
                 $"{started:yyyyMMddHHmmss}",
-                new { filter = _filter, rows = _rows.Count, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
+                new { groupBy = _groupBy.ToString(), filter = _filter, rows = rowCount, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
         }
         catch (Exception ex)
         {
@@ -199,7 +662,7 @@ else if (!_loadedOnce)
             await ActionLog.LogAsync(
                 "WarehouseBoxes.Load",
                 $"{started:yyyyMMddHHmmss}-error",
-                new { filter = _filter, error = ex.Message });
+                new { groupBy = _groupBy.ToString(), filter = _filter, error = ex.Message });
         }
         finally
         {

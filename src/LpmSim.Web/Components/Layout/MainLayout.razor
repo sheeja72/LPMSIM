@@ -1,4 +1,5 @@
 @inherits LayoutComponentBase
+@using System.Reflection
 
 <MudThemeProvider Theme="_theme" />
 <MudPopoverProvider />
@@ -9,7 +10,7 @@
     <MudDrawer Open="true" Variant="DrawerVariant.Persistent" Elevation="0"
                Width="260px" Class="lpm-drawer">
         <div class="lpm-brand">
-            <div class="lpm-brand-title">LPM SIM</div>
+            <div class="lpm-brand-title">LPM SIM <span class="lpm-brand-version" title="@_versionInfo">v@_versionShort</span></div>
             <AuthorizeView>
                 <Authorized>
                     @{
@@ -34,6 +35,9 @@
             </AuthorizeView>
         </div>
         <NavMenu />
+        <div class="lpm-drawer-footer" title="@_versionInfo">
+            LPM SIM · v@_versionShort
+        </div>
     </MudDrawer>
 
     <MudMainContent Class="lpm-main">
@@ -66,4 +70,34 @@
             DrawerIcon        = "#cbd5e1",
         }
     };
+
+    // Version info pulled from the assembly attributes (set in
+    // LpmSim.Web.csproj <Version> + <InformationalVersion>). Compact form
+    // for the badge, full form for the tooltip.
+    private static readonly string _versionShort = ResolveShortVersion();
+    private static readonly string _versionInfo  = ResolveInformationalVersion();
+
+    private static string ResolveShortVersion()
+    {
+        var asm = typeof(MainLayout).Assembly;
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                ?? asm.GetName().Version?.ToString()
+                ?? "0.0.0";
+        // Strip any "+commitsha" suffix that .NET appends on builds with sourcelink.
+        var plus = info.IndexOf('+');
+        if (plus > 0) info = info[..plus];
+        // Strip the trailing description if any: "1.7.0 (Phase G — ...)" → "1.7.0"
+        var space = info.IndexOf(' ');
+        return space > 0 ? info[..space] : info;
+    }
+
+    private static string ResolveInformationalVersion()
+    {
+        var asm = typeof(MainLayout).Assembly;
+        var info = asm.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+                ?? asm.GetName().Version?.ToString()
+                ?? "0.0.0";
+        var plus = info.IndexOf('+');
+        return plus > 0 ? info[..plus] : info;
+    }
 }

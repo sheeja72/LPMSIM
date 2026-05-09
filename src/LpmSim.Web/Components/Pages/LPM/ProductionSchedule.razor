@@ -1,0 +1,834 @@
+@page "/lpm/lpm-sim/production-schedule"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.LpmSim
+@using LpmSim.Core.Entities
+@using ClosedXML.Excel
+@using System.IO
+@using System.Diagnostics
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ProductionScheduler Scheduler
+@inject LpmSimReportService Reports
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+@inject IJSRuntime JS
+
+<PageTitle>Production Schedule</PageTitle>
+
+<div class="lpm-page-title">Production Schedule</div>
+<div class="lpm-page-subtitle">
+    Assign each SIM-allocated box to a specific production day (1..N). Picks the highest-utilised
+    boxes first and spreads divisions proportionally across days. Boxes below the Min Usability %
+    are dropped from this schedule and stay available for the next SIM run.
+</div>
+
+@if (!string.IsNullOrEmpty(_lastError))
+{
+    <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-3"
+              ShowCloseIcon="true" CloseIconClicked="() => _lastError = string.Empty">
+        <pre style="white-space:pre-wrap; word-break:break-word; margin:0; font-family:inherit;">@_lastError</pre>
+    </MudAlert>
+}
+
+<div class="lpm-section lpm-filter-bar lpm-filter-compact">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="6" sm="4" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await LoadBatchesAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudSelect T="long?" Label="SIM Batch" Value="_selectedBatch"
+                       ValueChanged="async (long? v) => { _selectedBatch = v; await LoadScheduleAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var b in _batches)
+                {
+                    <MudSelectItem T="long?" Value="@((long?)b.LPMBatchNo)">
+                        #@b.LPMBatchNo · @b.RunDate.ToString("dd-MMM-yyyy") · @b.Status
+                    </MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="4" md="2">
+            <MudNumericField T="int" Label="Daily Production Target"
+                             Value="_dailyTarget"
+                             ValueChanged="(int v) => _dailyTarget = v"
+                             Min="1" Max="1000000" Step="1000"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="1">
+            <MudNumericField T="int" Label="Days/Week"
+                             Value="_daysInWeek"
+                             ValueChanged="(int v) => _daysInWeek = v"
+                             Min="1" Max="14" Step="1"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudNumericField T="decimal" Label="Min Usability %"
+                             Value="_minUsability"
+                             ValueChanged="(decimal v) => _minUsability = v"
+                             Min="0m" Max="100m" Step="5m"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="3">
+            <MudSelect T="string" Label="Priority Warehouses"
+                       SelectedValues="_priorityWarehouses"
+                       SelectedValuesChanged="(IEnumerable<string> vs) => { _priorityWarehouses = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); }"
+                       MultiSelection="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Clearable
+                       Placeholder="(None — equal priority)"
+                       SelectAll="true" SelectAllText="All warehouses"
+                       MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedPriorityText))"
+                       HelperText="Boxes from these dispatched first">
+                @foreach (var w in _allWarehouses)
+                {
+                    <MudSelectItem T="string" Value="@w">@w</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+
+        <MudItem xs="12" md="2" Class="d-flex align-center gap-2 justify-end flex-wrap">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.PlayArrow"
+                       Disabled="@(_selectedBatch is null || _busy || _isApproved)"
+                       OnClick="GenerateAsync">
+                Generate
+            </MudButton>
+            <MudButton Color="Color.Success" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.CheckCircle"
+                       Disabled="@(_schedule is null || _isApproved || _busy)"
+                       OnClick="ApproveAsync">
+                Approve
+            </MudButton>
+            <MudButton Color="Color.Error" Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.DeleteForever"
+                       Disabled="@(_schedule is null || _busy)"
+                       OnClick="DeleteAsync">
+                Delete
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_busy)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_schedule is LpmSimProductionSchedule s)
+{
+    var statusCol = _isApproved ? "#16a34a" : "#d97706";
+    <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-2"
+         style="padding:0.4rem 0.8rem;font-size:0.82rem;">
+        <span style="font-weight:700;color:#475569;letter-spacing:.04em;text-transform:uppercase;">
+            Schedule
+        </span>
+        <span style="font-size:1.1rem;font-weight:800;color:#2563eb;">#@s.LPMBatchNo</span>
+        <span style="color:@statusCol;font-weight:700;padding:.1rem .5rem;border:1px solid @statusCol;border-radius:999px;">
+            @s.Status
+        </span>
+        <span style="color:#cbd5e1;">|</span>
+        <span style="color:#64748b;">
+            Daily target <strong style="color:#334155;">@s.DailyTargetQty.ToString("N0")</strong>
+            &nbsp;·&nbsp; Days <strong style="color:#334155;">@s.DaysInWeek</strong>
+            &nbsp;·&nbsp; Min Usab <strong style="color:#334155;">@s.MinUsabilityPct.ToString("0.#")%</strong>
+            &nbsp;·&nbsp; Eligible <strong style="color:#334155;">@s.EligibleBoxes.ToString("N0")</strong> boxes /
+            <strong style="color:#334155;">@s.EligibleQty.ToString("N0")</strong> qty
+            &nbsp;·&nbsp; Scheduled <strong style="color:#16a34a;">@s.ScheduledBoxes.ToString("N0")</strong> boxes /
+            <strong style="color:#16a34a;">@s.ScheduledQty.ToString("N0")</strong> qty
+            @if (s.DeferredBoxes > 0)
+            {
+                <span>
+                    &nbsp;·&nbsp; Deferred <strong style="color:#dc2626;">@s.DeferredBoxes.ToString("N0")</strong> boxes /
+                    <strong style="color:#dc2626;">@s.DeferredQty.ToString("N0")</strong> qty
+                </span>
+            }
+            &nbsp;·&nbsp; Generated <strong>@s.CreateTS.ToString("dd-MMM HH:mm")</strong> by @s.CreatedBy
+            @if (_isApproved && s.ApprovedTS is DateTime aTs)
+            {
+                <span>&nbsp;·&nbsp; Approved <strong style="color:#16a34a;">@aTs.ToString("dd-MMM HH:mm")</strong> by @s.ApprovedBy</span>
+            }
+        </span>
+    </div>
+
+    @if (s.DeferredBoxes > 0)
+    {
+        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-2">
+            <strong>@s.DeferredQty.ToString("N0")</strong> qty (@s.DeferredBoxes deferred boxes) couldn't fit into
+            <strong>@s.DaysInWeek</strong> days × <strong>@s.DailyTargetQty.ToString("N0")</strong> qty/day.
+            Either extend the planning window (more days) or raise the daily target, then click <strong>Generate</strong> again.
+        </MudAlert>
+    }
+
+    <MudTabs Elevation="0" Rounded="true" KeepPanelsAlive="true" Class="mb-3">
+        <MudTabPanel Text="Day Summary" Icon="@Icons.Material.Filled.CalendarMonth">
+            @if (_loadingDays)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+            else if (_days.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No day rollup yet.</MudAlert>
+            }
+            else
+            {
+                var totBoxes = _days.Where(d => d.Day > 0).Sum(d => d.BoxCount);
+                var totQty   = _days.Where(d => d.Day > 0).Sum(d => d.Qty);
+
+                <div class="d-flex justify-end mb-1">
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               OnClick="ExportDaysAsync">
+                        Excel
+                    </MudButton>
+                </div>
+                <MudTable T="ProductionDayRow" Items="_days" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><MudTableSortLabel T="ProductionDayRow" SortBy="r => r.Day" InitialDirection="SortDirection.Ascending">Day</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totBoxes.ToString("N0")</div><MudTableSortLabel T="ProductionDayRow" SortBy="r => r.BoxCount">Boxes</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totQty.ToString("N0")</div><MudTableSortLabel T="ProductionDayRow" SortBy="r => r.Qty">Qty</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionDayRow" SortBy="r => r.StoreCount">Stores Touched</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionDayRow" SortBy="r => r.AvgUsability ?? 0m">Avg Usability %</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>
+                            @if (context.Day == 0) { <span style="color:#dc2626;font-weight:600;">Unscheduled</span> }
+                            else { <strong>Day @context.Day</strong> }
+                        </MudTd>
+                        <MudTd>@context.BoxCount.ToString("N0")</MudTd>
+                        <MudTd>@context.Qty.ToString("N0")</MudTd>
+                        <MudTd>@context.StoreCount.ToString("N0")</MudTd>
+                        <MudTd>@(context.AvgUsability?.ToString("0.0") ?? "—")%</MudTd>
+                    </RowTemplate>
+                </MudTable>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Division Summary" Icon="@Icons.Material.Filled.Category">
+            @if (_loadingDivs)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+            else if (_divs.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No division rollup yet.</MudAlert>
+            }
+            else
+            {
+                var totDivBoxes  = _divs.Sum(d => d.BoxCount);
+                var totDivQty    = _divs.Sum(d => d.TotalQty);
+                var totDivSched  = _divs.Sum(d => d.ScheduledQty);
+                var totDivDef    = _divs.Sum(d => d.DeferredQty);
+                var totSchedBox  = _divs.Sum(d => d.ScheduledBoxes);
+                var totDefBox    = _divs.Sum(d => d.DeferredBoxes);
+                var totDivStore  = _divs.Sum(d => d.StoreCount);
+                var totMerchWk   = _divs.Sum(d => d.MerchNeedWeek);
+                var totMerchDay  = _divs.Sum(d => d.MerchNeedDay);
+
+                <MudGrid Spacing="2" Class="mb-2 align-center">
+                    <MudItem xs="6" md="2">
+                        <MudSelect T="int?" Label="Filter Day" Value="_divDayFilter"
+                                   ValueChanged="async (int? v) => { _divDayFilter = v; await ReloadDivisionsAsync(); }"
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                            <MudSelectItem T="int?" Value="@((int?)null)">All days</MudSelectItem>
+                            <MudSelectItem T="int?" Value="@((int?)0)">Unscheduled (Day = NULL)</MudSelectItem>
+                            @for (int d = 1; d <= s.DaysInWeek; d++)
+                            {
+                                var dv = d;
+                                <MudSelectItem T="int?" Value="@((int?)dv)">Day @dv</MudSelectItem>
+                            }
+                        </MudSelect>
+                    </MudItem>
+                    <MudItem xs="6" md="3">
+                        <MudSelect T="string" Label="Filter Status" Value="_divStatusFilter"
+                                   ValueChanged="async (string v) => { _divStatusFilter = v ?? string.Empty; await ReloadDivisionsAsync(); }"
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                            <MudSelectItem T="string" Value="@(string.Empty)">All</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("Scheduled")">Scheduled</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("Deferred")">Deferred</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("Dropbox")">Dropbox (low usability)</MudSelectItem>
+                        </MudSelect>
+                    </MudItem>
+                    <MudItem xs="12" md="7" Class="d-flex justify-end align-center gap-2">
+                        <MudButton Variant="Variant.Text" Size="Size.Small" DropShadow="false"
+                                   StartIcon="@Icons.Material.Filled.FilterAltOff"
+                                   Disabled="@(_divDayFilter is null && string.IsNullOrEmpty(_divStatusFilter))"
+                                   OnClick="ClearDivFiltersAsync">
+                            Clear filters
+                        </MudButton>
+                        <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                                   StartIcon="@Icons.Material.Filled.Download"
+                                   OnClick="ExportDivisionsAsync">
+                            Excel
+                        </MudButton>
+                    </MudItem>
+                </MudGrid>
+
+                <MudTable T="ProductionDivisionRow" Items="_divs" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false"
+                          Class="lpm-eom-preview">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@_divs.Count.ToString("N0") rows</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.DivCode" InitialDirection="SortDirection.Ascending">Div Code</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Week) from EOM Output for this division.">@totMerchWk.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Day) from EOM Output for this division.">@totMerchDay.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totDivQty.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.TotalQty">Total Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totDivSched.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.ScheduledQty">Scheduled<br />Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totDivDef.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.DeferredQty">Deferred<br />Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totDivBoxes.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.BoxCount">Boxes</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totSchedBox.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.ScheduledBoxes">Scheduled<br />Boxes</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totDefBox.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.DeferredBoxes">Deferred<br />Boxes</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ distinct stores across all divisions (a store can appear in multiple divisions).">@totDivStore.ToString("N0")</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.StoreCount">Stores</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Each row's Scheduled Qty as a % of total scheduled across all divisions.">&nbsp;</div><MudTableSortLabel T="ProductionDivisionRow" SortBy="r => r.PctOfTotal ?? 0m">% of<br />Sched.</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.DivCode</code></MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
+                        <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
+                        <MudTd>@context.TotalQty.ToString("N0")</MudTd>
+                        <MudTd style="color:#16a34a;">@context.ScheduledQty.ToString("N0")</MudTd>
+                        <MudTd style="@(context.DeferredQty > 0 ? "color:#dc2626;" : "")">@(context.DeferredQty > 0 ? context.DeferredQty.ToString("N0") : "—")</MudTd>
+                        <MudTd>@context.BoxCount.ToString("N0")</MudTd>
+                        <MudTd>@context.ScheduledBoxes.ToString("N0")</MudTd>
+                        <MudTd style="@(context.DeferredBoxes > 0 ? "color:#dc2626;" : "")">@(context.DeferredBoxes > 0 ? context.DeferredBoxes.ToString("N0") : "—")</MudTd>
+                        <MudTd>@context.StoreCount.ToString("N0")</MudTd>
+                        <MudTd>@(context.PctOfTotal?.ToString("0.0") ?? "—")%</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 25, 50, 100 }" />
+                    </PagerContent>
+                </MudTable>
+                <MudText Typo="Typo.caption" Class="mt-2" Style="color:#64748b;">
+                    Qty is attributed to each item's Division — a box with items from multiple divisions
+                    contributes proportionally to each. <strong>Scheduled Boxes</strong> = boxes with at
+                    least one Day-tagged line. <strong>Deferred Boxes</strong> = boxes whose lines for
+                    this division are all unscheduled (Day = NULL).
+                </MudText>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Box Detail" Icon="@Icons.Material.Filled.ListAlt">
+            @if (_loadingBoxes)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+            else if (_boxes.Count == 0)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No boxes yet.</MudAlert>
+            }
+            else
+            {
+                var filteredBoxes = _boxes.Where(b =>
+                        (_dayFilter is null || b.Day == _dayFilter)
+                     && (_statusFilter == "" || b.Status == _statusFilter))
+                    .ToList();
+                var fbCount = filteredBoxes.Count;
+                var fbQty   = filteredBoxes.Sum(b => b.BoxQty);
+
+                <MudGrid Spacing="2" Class="mb-2 align-center">
+                    <MudItem xs="6" md="2">
+                        <MudSelect T="int?" Label="Filter Day" Value="_dayFilter"
+                                   ValueChanged="(int? v) => { _dayFilter = v; StateHasChanged(); }"
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                            <MudSelectItem T="int?" Value="@((int?)null)">All days</MudSelectItem>
+                            @for (int d = 1; d <= s.DaysInWeek; d++)
+                            {
+                                var dv = d;
+                                <MudSelectItem T="int?" Value="@((int?)dv)">Day @dv</MudSelectItem>
+                            }
+                        </MudSelect>
+                    </MudItem>
+                    <MudItem xs="6" md="3">
+                        <MudSelect T="string" Label="Filter Status" Value="_statusFilter"
+                                   ValueChanged="(string v) => { _statusFilter = v ?? string.Empty; StateHasChanged(); }"
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                            <MudSelectItem T="string" Value="@(string.Empty)">All</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("Scheduled")">Scheduled</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("Deferred")">Deferred</MudSelectItem>
+                            <MudSelectItem T="string" Value="@("Dropbox (low usability)")">Dropbox (low usability)</MudSelectItem>
+                        </MudSelect>
+                    </MudItem>
+                    <MudItem xs="12" md="7" Class="d-flex justify-end align-center gap-2">
+                        <MudText Typo="Typo.caption" Style="color:#64748b;">
+                            @fbCount.ToString("N0") boxes · @fbQty.ToString("N0") qty
+                        </MudText>
+                        <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                                   StartIcon="@Icons.Material.Filled.Download"
+                                   OnClick="ExportBoxesAsync">
+                            Excel
+                        </MudButton>
+                    </MudItem>
+                </MudGrid>
+
+                <MudTable T="ProductionBoxRow" Items="filteredBoxes" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.Day ?? 999">Day</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.BoxNo" InitialDirection="SortDirection.Ascending">Box No</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.LPMDt ?? DateTime.MinValue">LPMDt</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.BoxQty">SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.Capacity">Box Capacity</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.UsabilityPct ?? 0m">Usability %</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.StoreCount">Stores</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.DivisionCount">Divs</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ProductionBoxRow" SortBy="r => r.Status ?? string.Empty">Status</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd>
+                            @if (context.Day is int dv) { <strong>Day @dv</strong> }
+                            else { <span style="color:#94a3b8;">—</span> }
+                        </MudTd>
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd>@(context.LPMDt?.ToString("dd-MMM-yyyy") ?? "—")</MudTd>
+                        <MudTd>@context.BoxQty.ToString("N0")</MudTd>
+                        <MudTd>@context.Capacity.ToString("N0")</MudTd>
+                        <MudTd>@(context.UsabilityPct?.ToString("0.0") ?? "—")%</MudTd>
+                        <MudTd>@context.StoreCount.ToString("N0")</MudTd>
+                        <MudTd>@context.DivisionCount.ToString("N0")</MudTd>
+                        <MudTd>
+                            @{
+                                var col = context.Status switch
+                                {
+                                    "Scheduled" => "#16a34a",
+                                    "Deferred"  => "#dc2626",
+                                    _           => "#94a3b8",
+                                };
+                            }
+                            <span style="color:@col;font-weight:600;">@context.Status</span>
+                        </MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+        </MudTabPanel>
+    </MudTabs>
+}
+else if (_selectedBatch is long bn && !_busy)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-3">
+        No production schedule yet for batch <strong>#@bn</strong>. Set the inputs above and click <strong>Generate</strong>.
+    </MudAlert>
+}
+else if (!_busy)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mb-3">
+        Pick a Country and a SIM batch to begin.
+    </MudAlert>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private List<LpmSimBatch> _batches = new();
+    private long? _selectedBatch;
+
+    private int     _dailyTarget   = 55_000;
+    private int     _daysInWeek    = 6;
+    private decimal _minUsability  = 60m;
+
+    private List<string>     _allWarehouses      = new();
+    private HashSet<string>  _priorityWarehouses = new(StringComparer.OrdinalIgnoreCase);
+
+    private LpmSimProductionSchedule? _schedule;
+    private bool _isApproved => _schedule?.Status == "Approved";
+
+    private List<ProductionDayRow>      _days  = new();
+    private List<ProductionBoxRow>      _boxes = new();
+    private List<ProductionDivisionRow> _divs  = new();
+    private bool _loadingDays;
+    private bool _loadingBoxes;
+    private bool _loadingDivs;
+
+    // Box Detail filters (existing)
+    private int?   _dayFilter;
+    private string _statusFilter = "";
+
+    // Division Summary filters (server-side reload)
+    private int?   _divDayFilter;     // null = All, 0 = Unscheduled, 1..N = specific day
+    private string _divStatusFilter = "";
+
+    private bool   _busy;
+    private string _lastError = "";
+
+    /// <summary>Compact label for the priority-warehouse multi-select.</summary>
+    private string SelectedPriorityText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0)        return "(None)";
+        if (selected.Count == _allWarehouses.Count)         return "All warehouses";
+        if (selected.Count <= 3)                            return string.Join(", ", selected);
+        return $"{selected.Count} of {_allWarehouses.Count} selected";
+    }
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings.AsNoTracking()
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        try { _allWarehouses = await Reports.GetDistinctWarehousesAsync(); }
+        catch { _allWarehouses = new(); }
+        await LoadBatchesAsync();
+    }
+
+    private async Task LoadBatchesAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _batches = new(); _selectedBatch = null; return; }
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _batches = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.Country == _country)
+            .OrderByDescending(b => b.RunDate)
+            .ThenByDescending(b => b.LPMBatchNo)
+            .Take(50)
+            .ToListAsync();
+        // Auto-select the most recent batch.
+        _selectedBatch = _batches.FirstOrDefault()?.LPMBatchNo;
+        await LoadScheduleAsync();
+    }
+
+    /// <summary>
+    /// Loads the schedule header + day/box detail for the currently-selected
+    /// batch. Called on page load, country change, batch change, and after
+    /// every Generate / Approve / Delete.
+    /// </summary>
+    private async Task LoadScheduleAsync()
+    {
+        _schedule = null;
+        _days.Clear();
+        _boxes.Clear();
+        _divs.Clear();
+        _dayFilter      = null;
+        _statusFilter   = "";
+        _divDayFilter   = null;
+        _divStatusFilter= "";
+        if (_selectedBatch is not long bn) { StateHasChanged(); return; }
+
+        try
+        {
+            _schedule = await Scheduler.GetAsync(bn);
+        }
+        catch { /* leave null */ }
+
+        if (_schedule is not null)
+        {
+            // Pre-populate inputs from the existing schedule so a user can
+            // tweak and re-Generate without re-typing.
+            _dailyTarget  = _schedule.DailyTargetQty;
+            _daysInWeek   = _schedule.DaysInWeek;
+            _minUsability = _schedule.MinUsabilityPct;
+            // Restore priority warehouses from the persisted CSV.
+            _priorityWarehouses = string.IsNullOrWhiteSpace(_schedule.PriorityWarehouses)
+                ? new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(
+                    _schedule.PriorityWarehouses.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries),
+                    StringComparer.OrdinalIgnoreCase);
+
+            _loadingDays = true; _loadingBoxes = true; _loadingDivs = true; StateHasChanged();
+            try
+            {
+                // Each Get* uses READ UNCOMMITTED isolation to avoid taking
+                // shared locks. The retry wrapper is belt-and-braces in case
+                // SQL Server still chooses us as a deadlock victim
+                // (e.g. on temp-table allocations during Build SKU Max).
+                _days  = await WithDeadlockRetry(() => Scheduler.GetDaySummaryAsync(bn));
+                _boxes = await WithDeadlockRetry(() => Scheduler.GetBoxDetailAsync(bn));
+                _divs  = await WithDeadlockRetry(() => Scheduler.GetDivisionSummaryAsync(bn, _divDayFilter, _divStatusFilter));
+            }
+            catch (Exception ex)
+            {
+                _lastError = $"Could not load schedule details: {ex.Message}";
+            }
+            finally { _loadingDays = false; _loadingBoxes = false; _loadingDivs = false; }
+        }
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Wraps a Task-returning DB call with up to 2 retries on SQL deadlock
+    /// (error 1205). Backs off 250ms between attempts. Other exceptions
+    /// pass through unchanged.
+    /// </summary>
+    private static async Task<T> WithDeadlockRetry<T>(Func<Task<T>> op)
+    {
+        const int maxAttempts = 3;
+        for (int attempt = 1; ; attempt++)
+        {
+            try
+            {
+                return await op();
+            }
+            catch (Microsoft.Data.SqlClient.SqlException sqlEx) when (sqlEx.Number == 1205 && attempt < maxAttempts)
+            {
+                await Task.Delay(250);
+            }
+        }
+    }
+
+    /// <summary>Re-fetch the Division Summary with the current Day / Status filters.</summary>
+    private async Task ReloadDivisionsAsync()
+    {
+        if (_selectedBatch is not long bn) return;
+        _loadingDivs = true; StateHasChanged();
+        try   { _divs = await WithDeadlockRetry(() => Scheduler.GetDivisionSummaryAsync(bn, _divDayFilter, _divStatusFilter)); }
+        catch (Exception ex) { Snackbar.Add($"Division Summary failed: {ex.Message}", Severity.Error); }
+        finally { _loadingDivs = false; StateHasChanged(); }
+    }
+
+    private async Task ClearDivFiltersAsync()
+    {
+        _divDayFilter    = null;
+        _divStatusFilter = "";
+        await ReloadDivisionsAsync();
+    }
+
+    private async Task GenerateAsync()
+    {
+        if (_selectedBatch is not long bn) return;
+        if (_isApproved)
+        {
+            Snackbar.Add("This schedule is Approved — Delete it first to re-generate.", Severity.Warning);
+            return;
+        }
+        if (_schedule is not null)
+        {
+            var ok = await DialogService.ShowMessageBox("Replace existing schedule",
+                $"A Draft production schedule already exists for batch #{bn}. Generate will replace it. Continue?",
+                yesText: "Generate", cancelText: "Cancel");
+            if (ok != true) return;
+        }
+
+        _lastError = "";
+        _busy = true; StateHasChanged();
+        var sw = Stopwatch.StartNew();
+        try
+        {
+            var result = await Scheduler.GenerateAsync(new ProductionScheduleRequest
+            {
+                LPMBatchNo         = bn,
+                DailyTargetQty     = _dailyTarget,
+                DaysInWeek         = _daysInWeek,
+                MinUsabilityPct    = _minUsability,
+                User               = CurrentUser.Name,
+                PriorityWarehouses = _priorityWarehouses.ToList(),
+            });
+            sw.Stop();
+            Snackbar.Add(
+                $"Schedule built in {FormatDuration(sw.Elapsed)} — {result.ScheduledBoxes:N0} scheduled, {result.DeferredBoxes:N0} deferred, {result.DropboxBoxes:N0} dropboxes.",
+                Severity.Success, cfg => cfg.VisibleStateDuration = 12000);
+
+            _busy = false;
+            await LoadScheduleAsync();
+        }
+        catch (Exception ex)
+        {
+            sw.Stop();
+            _lastError = FormatError("Generate failed", ex);
+            Snackbar.Add($"Generate failed: {(ex.InnerException?.Message ?? ex.Message)}",
+                         Severity.Error, cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task ApproveAsync()
+    {
+        if (_selectedBatch is not long bn || _schedule is null) return;
+        var ok = await DialogService.ShowMessageBox("Approve schedule",
+            $"Approve production schedule for batch #{bn}? Once approved, it cannot be re-generated until you Delete it.",
+            yesText: "Approve", cancelText: "Cancel");
+        if (ok != true) return;
+
+        _busy = true; StateHasChanged();
+        try
+        {
+            await Scheduler.ApproveAsync(bn, CurrentUser.Name);
+            Snackbar.Add($"Schedule for batch #{bn} approved.", Severity.Success);
+            _busy = false;
+            await LoadScheduleAsync();
+        }
+        catch (Exception ex)
+        {
+            _lastError = FormatError("Approve failed", ex);
+            Snackbar.Add($"Approve failed: {(ex.InnerException?.Message ?? ex.Message)}",
+                         Severity.Error, cfg => cfg.RequireInteraction = true);
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (_selectedBatch is not long bn || _schedule is null) return;
+        var ok = await DialogService.ShowMessageBox("Delete schedule",
+            $"Delete production schedule for batch #{bn}? This clears the Day on every output row and removes the schedule header. The SIM batch itself stays intact.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+
+        _busy = true; StateHasChanged();
+        try
+        {
+            await Scheduler.DeleteAsync(bn, CurrentUser.Name);
+            Snackbar.Add($"Schedule for batch #{bn} deleted.", Severity.Success);
+            _busy = false;
+            await LoadScheduleAsync();
+        }
+        catch (Exception ex)
+        {
+            _lastError = FormatError("Delete failed", ex);
+            Snackbar.Add($"Delete failed: {(ex.InnerException?.Message ?? ex.Message)}",
+                         Severity.Error, cfg => cfg.RequireInteraction = true);
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task ExportDaysAsync()
+    {
+        if (_days.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        await SaveExcelAsync($"ProductionSchedule_Days_{_selectedBatch}.xlsx", "Days", sheet =>
+        {
+            string[] headers = { "Day", "Boxes", "Qty", "Stores Touched", "Avg Usability %" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < _days.Count; i++)
+            {
+                var d = _days[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value = d.Day == 0 ? "Unscheduled" : $"Day {d.Day}";
+                sheet.Cell(row, 2).Value = d.BoxCount;
+                sheet.Cell(row, 3).Value = d.Qty;
+                sheet.Cell(row, 4).Value = d.StoreCount;
+                sheet.Cell(row, 5).Value = (double?)d.AvgUsability;
+            }
+            FormatNumeric(sheet, _days.Count, new[] { 2, 3, 4 });
+            sheet.Range(2, 5, _days.Count + 1, 5).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task ExportBoxesAsync()
+    {
+        if (_boxes.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        var rows = _boxes.Where(b =>
+                (_dayFilter is null || b.Day == _dayFilter)
+             && (_statusFilter == "" || b.Status == _statusFilter))
+            .ToList();
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export (filters yield 0 rows).", Severity.Info); return; }
+
+        await SaveExcelAsync($"ProductionSchedule_Boxes_{_selectedBatch}.xlsx", "Boxes", sheet =>
+        {
+            string[] headers = { "Day", "Box No", "LPMDt", "SIM Qty", "Box Capacity", "Usability %", "Stores", "Divs", "Status" };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var b = rows[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value = b.Day?.ToString() ?? "—";
+                sheet.Cell(row, 2).Value = b.BoxNo;
+                sheet.Cell(row, 3).Value = b.LPMDt?.ToString("yyyy-MM-dd") ?? "";
+                sheet.Cell(row, 4).Value = b.BoxQty;
+                sheet.Cell(row, 5).Value = b.Capacity;
+                sheet.Cell(row, 6).Value = (double?)b.UsabilityPct;
+                sheet.Cell(row, 7).Value = b.StoreCount;
+                sheet.Cell(row, 8).Value = b.DivisionCount;
+                sheet.Cell(row, 9).Value = b.Status ?? "";
+            }
+            FormatNumeric(sheet, rows.Count, new[] { 4, 5, 7, 8 });
+            sheet.Range(2, 6, rows.Count + 1, 6).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task ExportDivisionsAsync()
+    {
+        if (_divs.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        await SaveExcelAsync($"ProductionSchedule_Divisions_{_selectedBatch}.xlsx", "Divisions", sheet =>
+        {
+            string[] headers = {
+                "Div Code", "Division",
+                "Merch Need (Week)", "Merch Need (Day)",
+                "Total Qty", "Scheduled Qty", "Deferred Qty",
+                "Boxes", "Scheduled Boxes", "Deferred Boxes",
+                "Stores", "% of Sched."
+            };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < _divs.Count; i++)
+            {
+                var d = _divs[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value  = d.DivCode;
+                sheet.Cell(row, 2).Value  = d.DivisionName;
+                sheet.Cell(row, 3).Value  = d.MerchNeedWeek;
+                sheet.Cell(row, 4).Value  = d.MerchNeedDay;
+                sheet.Cell(row, 5).Value  = d.TotalQty;
+                sheet.Cell(row, 6).Value  = d.ScheduledQty;
+                sheet.Cell(row, 7).Value  = d.DeferredQty;
+                sheet.Cell(row, 8).Value  = d.BoxCount;
+                sheet.Cell(row, 9).Value  = d.ScheduledBoxes;
+                sheet.Cell(row, 10).Value = d.DeferredBoxes;
+                sheet.Cell(row, 11).Value = d.StoreCount;
+                sheet.Cell(row, 12).Value = (double?)d.PctOfTotal;
+            }
+            FormatNumeric(sheet, _divs.Count, new[] { 3, 4, 5, 6, 7, 8, 9, 10, 11 });
+            sheet.Range(2, 12, _divs.Count + 1, 12).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task SaveExcelAsync(string fileName, string sheetName, Action<IXLWorksheet> populate)
+    {
+        try
+        {
+            using var wb    = new XLWorkbook();
+            var sheet       = wb.Worksheets.Add(sheetName);
+            populate(sheet);
+            sheet.Columns().AdjustToContents();
+            using var ms    = new MemoryStream();
+            wb.SaveAs(ms);
+            var b64         = Convert.ToBase64String(ms.ToArray());
+            var url         = $"data:application/octet-stream;base64,{b64}";
+            await JS.InvokeVoidAsync("lpmDownload", url, fileName);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Excel export failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private static void ApplyHeaders(IXLWorksheet sheet, string[] headers)
+    {
+        for (int c = 0; c < headers.Length; c++) sheet.Cell(1, c + 1).Value = headers[c];
+        sheet.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+        sheet.Range(1, 1, 1, headers.Length).Style.Fill.BackgroundColor = XLColor.LightGray;
+    }
+
+    private static void FormatNumeric(IXLWorksheet sheet, int rowCount, int[] cols)
+    {
+        if (rowCount < 1) return;
+        foreach (var col in cols)
+            sheet.Range(2, col, rowCount + 1, col).Style.NumberFormat.Format = "#,##0";
+    }
+
+    private static string FormatDuration(TimeSpan t)
+    {
+        if (t.TotalMinutes >= 1) return $"{(int)t.TotalMinutes}m {t.Seconds}s";
+        if (t.TotalSeconds >= 1) return $"{t.TotalSeconds:0.0}s";
+        return $"{t.TotalMilliseconds:0}ms";
+    }
+
+    private static string FormatError(string prefix, Exception ex)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"{prefix}.").AppendLine();
+        var cur = ex; var depth = 0;
+        while (cur is not null && depth < 5)
+        {
+            sb.AppendLine($"[{depth}] {cur.GetType().Name}: {cur.Message}");
+            cur = cur.InnerException; depth++;
+        }
+        sb.AppendLine().AppendLine(ex.StackTrace);
+        return sb.ToString();
+    }
+}

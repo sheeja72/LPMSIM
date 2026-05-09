@@ -10,10 +10,12 @@
 @inject LpmSimGenerator Sim
 @inject LpmSimReportService Reports
 @inject LpmSimInvestigator Investigator
+@inject SkuMaxBuildJobManager SkuMaxJobs
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
 @inject IJSRuntime JS
+@implements IDisposable
 
 <PageTitle>LPM SIM Generate</PageTitle>
 
@@ -62,6 +64,16 @@
                     where <code>cumDiv</code> spans every phase. <strong>Hard ceiling</strong> — leftover qty in a box stays unallocated when this hits zero.</li>
             </ul>
 
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Box read-order — warehouse priority</h4>
+            <p style="margin:.1rem 0 .5rem;">
+                The allocator reads boxes in this order:
+                <strong>(1)</strong> warehouse priority from <code>dbo.LPM_WarehousePriority</code> — lower number first; warehouses missing from that table sort last,
+                <strong>(2)</strong> larger-qty boxes first within a warehouse, then
+                <strong>(3)</strong> deterministic tiebreak on Box No / Item code.
+                The <strong>Warehouses</strong> dropdown at the top of the filter bar is a <em>filter</em> — it controls which warehouses participate in this run; it does not change priority order.
+                The order does not change <em>which</em> boxes get allocated — only <em>which one is processed first</em>; per-(Store, Item) caps and SKU Max ceilings still apply identically across all warehouses.
+            </p>
+
             <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Phase 1a / 2a fill strategies</h4>
             <p style="margin:.1rem 0 .5rem;">
                 The radio in the filter bar controls how each box-line spreads units across the eligible
@@ -77,7 +89,7 @@
                 </thead>
                 <tbody>
                     <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;vertical-align:top;">
-                            <strong>Equal qty / store</strong><br/>
+                            <strong>Ranking + RR</strong><br/>
                             <span style="color:#64748b;font-size:.78rem;">(default)</span>
                         </td>
                         <td style="padding:6px 10px;border:1px solid #e2e8f0;">
@@ -116,9 +128,9 @@
                     <tr style="background:#f1f5f9;">
                         <th style="text-align:left;padding:5px 10px;border:1px solid #e2e8f0;">Store</th>
                         <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">EomBalance</th>
-                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal qty / store → qty</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Ranking + RR → qty</th>
                         <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal fill-rate % → qty</th>
-                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal-qty FillRate%</th>
+                        <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Ranking+RR FillRate%</th>
                         <th style="text-align:right;padding:5px 10px;border:1px solid #e2e8f0;">Equal-rate FillRate%</th>
                     </tr>
                 </thead>
@@ -144,7 +156,7 @@
                 </tbody>
             </table>
             <p style="margin:.1rem 0 .9rem;color:#64748b;font-size:.78rem;">
-                Equal qty / store → all three stores get nearly identical qty (~27 each), but FillRate% spreads from 0.4% to 1.3%.
+                Ranking + RR → all three stores get nearly identical qty (~27 each), but FillRate% spreads from 0.4% to 1.3%.
                 Equal fill-rate % → qty scales with EomBalance, so all three stores land at the same ~0.6% fill.
             </p>
 
@@ -164,7 +176,7 @@
                             <strong>LPM boxes, round-robin fill.</strong> Behaviour depends on the
                             <em>Phase 1a / 2a fill</em> radio in the filter bar:
                             <ul style="margin:.3rem 0 .3rem 1.1rem;">
-                                <li><strong>Equal qty / store</strong> (default) — walk stores in
+                                <li><strong>Ranking + RR</strong> (default) — walk stores in
                                     <code>PriorityRank ASC, WtAvgSoldQty DESC</code> order and deal
                                     <strong>1 unit per store per cycle</strong>. Same per-line qty across stores; per-store
                                     cap differences mean Division-level FillRate% can still skew.</li>
@@ -281,10 +293,14 @@
 
 <div class="lpm-section lpm-filter-bar lpm-filter-compact">
     <MudGrid Spacing="2" Class="align-center">
-        @* ─── Row 1 (md = 2+2+2+2+2+2 = 12): the most-changed inputs ─── *@
+        @* ─── Row 1 — six dropdowns, all md=2 (12 cols total) ────────────
+           Country, Run Date, Box Source, LPM Months (conditional),
+           Pallet Categories, Warehouses. When LPM Months is hidden
+           (= Non-LPM-only run) the row falls back to 5 selectors and
+           the grid wraps the rest naturally. *@
         <MudItem xs="6" sm="4" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
-                       ValueChanged="async v => { _country = v ?? string.Empty; await LoadStoresForCountryAsync(); await CheckAsync(); }"
+                       ValueChanged="async v => { _country = v ?? string.Empty; _viewBatchNo = null; await LoadStoresForCountryAsync(); await CheckAsync(); }"
                        Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
                 @foreach (var c in _countries)
                 {
@@ -297,66 +313,61 @@
                            DateChanged="OnRunDateChanged"
                            Variant="Variant.Outlined" Margin="Margin.Dense" />
         </MudItem>
-
         <MudItem xs="6" sm="4" md="2">
-            <div class="lpm-fb-group">
-                <span class="lpm-fb-label">Box Source</span>
-                <div class="d-flex flex-wrap gap-2 align-center">
-                    <MudCheckBox T="bool" Value="_srcLpm" ValueChanged="async (bool v) => { _srcLpm = v; await CheckAsync(); }"
-                                 Color="Color.Primary" Dense="true" Size="Size.Small">LPM</MudCheckBox>
-                    <MudCheckBox T="bool" Value="_srcNonLpm" ValueChanged="async (bool v) => { _srcNonLpm = v; await CheckAsync(); }"
-                                 Color="Color.Primary" Dense="true" Size="Size.Small">Non-LPM</MudCheckBox>
-                </div>
-            </div>
-        </MudItem>
-
-        <MudItem xs="6" sm="4" md="2">
-            <div class="lpm-fb-group">
-                <span class="lpm-fb-label">Season</span>
-                <div class="d-flex flex-wrap gap-2 align-center">
-                    <MudCheckBox T="bool" Value="_seasonSummer" ValueChanged="async (bool v) => { _seasonSummer = v; await CheckAsync(); }"
-                                 Color="Color.Primary" Dense="true" Size="Size.Small">Summer</MudCheckBox>
-                    <MudCheckBox T="bool" Value="_seasonWinter" ValueChanged="async (bool v) => { _seasonWinter = v; await CheckAsync(); }"
-                                 Color="Color.Primary" Dense="true" Size="Size.Small">Winter</MudCheckBox>
-                </div>
-            </div>
-        </MudItem>
-
-        @* RR Usability % — gates Phase 1b / 2b. Tooltip replaces the helper
-           text to save vertical space. *@
-        <MudItem xs="6" sm="4" md="2">
-            <MudTooltip Text="Round-robin runs only for boxes whose post-normal usability % is ≥ this value. Both SKU Max and EOM Div remain hard caps." Placement="Placement.Top">
-                <MudNumericField T="int" Label="RR Usability %"
-                                 Value="_overridePct"
-                                 ValueChanged="(int v) => _overridePct = v"
-                                 Min="0" Max="100" Step="5"
-                                 Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
-            </MudTooltip>
-        </MudItem>
-
-        <MudItem xs="6" sm="4" md="2">
-            <div class="lpm-fb-group">
-                <span class="lpm-fb-label">Phase 1a / 2a fill</span>
-                <MudRadioGroup T="LpmSimFillStrategy" Value="_fillStrategy"
-                               ValueChanged="(LpmSimFillStrategy v) => _fillStrategy = v"
-                               Class="lpm-fb-radio">
-                    <MudRadio T="LpmSimFillStrategy" Value="LpmSimFillStrategy.EqualPerStore"
-                              Color="Color.Primary" Dense="true" Size="Size.Small">Equal qty</MudRadio>
-                    <MudRadio T="LpmSimFillStrategy" Value="LpmSimFillStrategy.EqualFillRate"
-                              Color="Color.Primary" Dense="true" Size="Size.Small">Equal fill %</MudRadio>
-                </MudRadioGroup>
-            </div>
-        </MudItem>
-
-        @* ─── Row 2 (md = 4+2+6 = 12): warehouses, verbose, action buttons ─── *@
-        <MudItem xs="12" sm="6" md="4">
-            <MudSelect T="string" Label="Warehouses"
-                       SelectedValues="_selectedWarehouses"
-                       SelectedValuesChanged="async (IEnumerable<string> vs) => { _selectedWarehouses = vs?.ToHashSet() ?? new(); await CheckAsync(); }"
+            <MudSelect T="string" Label="Box Source"
+                       SelectedValues="_selectedSources"
+                       SelectedValuesChanged="OnBoxSourceChangedAsync"
                        MultiSelection="true"
                        Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
                        Clearable
-                       Placeholder="(All warehouses)"
+                       Placeholder="(Pick at least one)">
+                <MudSelectItem T="string" Value="@("LPM")">LPM</MudSelectItem>
+                <MudSelectItem T="string" Value="@("Non-LPM")">Non-LPM</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+        @if (_srcLpm)
+        {
+            <MudItem xs="6" sm="4" md="2">
+                <MudSelect T="DateTime" Label="LPM Months"
+                           SelectedValues="_selectedLpmMonths"
+                           SelectedValuesChanged="async (IEnumerable<DateTime> vs) => { _selectedLpmMonths = vs?.ToHashSet() ?? new HashSet<DateTime>(); await CheckAsync(); }"
+                           MultiSelection="true"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                           Clearable
+                           Placeholder="(All)"
+                           SelectAll="true" SelectAllText="All months"
+                           MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedLpmMonthsText))">
+                    @foreach (var m in _allLpmMonths)
+                    {
+                        <MudSelectItem T="DateTime" Value="m">@m.ToString("MMM-yy")</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+        }
+        <MudItem xs="6" sm="4" md="2">
+            <MudSelect T="string" Label="Pallet Categories"
+                       SelectedValues="_selectedPalletCategories"
+                       SelectedValuesChanged="async (IEnumerable<string> vs) => { _selectedPalletCategories = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); await CheckAsync(); }"
+                       MultiSelection="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Clearable
+                       Placeholder="(All)"
+                       SelectAll="true" SelectAllText="All categories"
+                       MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedPalletCategoriesText))">
+                @foreach (var pc in _allPalletCategories)
+                {
+                    <MudSelectItem T="string" Value="pc">@pc</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="4" md="2">
+            <MudSelect T="string" Label="Warehouses"
+                       SelectedValues="_selectedWarehouses"
+                       SelectedValuesChanged="OnWarehousesSelectionChanged"
+                       MultiSelection="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Clearable
+                       Placeholder="(All)"
                        SelectAll="true" SelectAllText="All warehouses"
                        MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedWarehousesText))">
                 @foreach (var w in _allWarehouses)
@@ -366,14 +377,66 @@
             </MudSelect>
         </MudItem>
 
-        <MudItem xs="6" sm="3" md="2" Class="d-flex align-center">
+        @* ─── Row 2 — strategy + flags packed together (12 cols) ─────────
+           Phase fill (radios), Box% override (numeric), Season (checkboxes),
+           SKU Max only (checkbox), Include Non-Purchased (checkbox), Verbose
+           trace (checkbox). Aligned vertically with the row above. *@
+        <MudItem xs="12" sm="6" md="3">
+            <div class="lpm-fb-group">
+                <span class="lpm-fb-label">Phase 1a / 2a fill</span>
+                <MudRadioGroup T="LpmSimFillStrategy" Value="_fillStrategy"
+                               ValueChanged="(LpmSimFillStrategy v) => _fillStrategy = v"
+                               Class="lpm-fb-radio">
+                    <MudRadio T="LpmSimFillStrategy" Value="LpmSimFillStrategy.EqualPerStore"
+                              Color="Color.Primary" Dense="true" Size="Size.Small">Ranking + RR</MudRadio>
+                    <MudRadio T="LpmSimFillStrategy" Value="LpmSimFillStrategy.EqualFillRate"
+                              Color="Color.Primary" Dense="true" Size="Size.Small">Equal fill %</MudRadio>
+                </MudRadioGroup>
+            </div>
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudTooltip Text="Phase 1b / 2b override threshold. Round-robin runs only for boxes whose post-normal usability % is ≥ this value." Placement="Placement.Top">
+                <MudNumericField T="int" Label="Box% override"
+                                 Value="_overridePct"
+                                 ValueChanged="(int v) => _overridePct = v"
+                                 Min="0" Max="100" Step="5"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+            </MudTooltip>
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <div class="lpm-fb-group">
+                <span class="lpm-fb-label">Season</span>
+                <div class="d-flex flex-wrap gap-1 align-center">
+                    <MudCheckBox T="bool" Value="_seasonSummer" ValueChanged="async (bool v) => { _seasonSummer = v; await CheckAsync(); }"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small">Summer</MudCheckBox>
+                    <MudCheckBox T="bool" Value="_seasonWinter" ValueChanged="async (bool v) => { _seasonWinter = v; await CheckAsync(); }"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small">Winter</MudCheckBox>
+                </div>
+            </div>
+        </MudItem>
+        <MudItem xs="12" sm="6" md="5" Class="d-flex flex-wrap align-center gap-2">
+            <MudTooltip Text="When ON, the allocator bypasses Merch Need (Week) and uses SKU Max as the only cap. EqualFillRate switches its denominator from MerchNeedWeek to SkuMax."
+                        Placement="Placement.Top">
+                <MudCheckBox T="bool" Value="_ignoreMerchNeed"
+                             ValueChanged="(bool v) => _ignoreMerchNeed = v"
+                             Color="Color.Warning" Size="Size.Small" Dense="true"
+                             Label="SKU Max only" />
+            </MudTooltip>
+            <MudTooltip Text="When ON, drops the ShopEligible <> 'E' filter so already-shopped boxes (ShopEligible='E') are also pulled into SIM."
+                        Placement="Placement.Top">
+                <MudCheckBox T="bool" Value="_includePurchasedBoxes"
+                             ValueChanged="async (bool v) => { _includePurchasedBoxes = v; await CheckAsync(); }"
+                             Color="Color.Warning" Size="Size.Small" Dense="true"
+                             Label="Incl. Non-Purchased" />
+            </MudTooltip>
             <MudCheckBox T="bool" @bind-Value="_verboseTrace" Color="Color.Primary"
                          Dense="true" Size="Size.Small">
                 Verbose trace
             </MudCheckBox>
         </MudItem>
 
-        <MudItem xs="12" sm="9" md="6" Class="d-flex align-center gap-2 justify-end flex-wrap">
+        @* ─── Row 3 — action buttons (full-width, right-aligned) ───── *@
+        <MudItem xs="12" Class="d-flex align-center gap-2 justify-end flex-wrap">
             @* Re-check forces a full refresh by clearing the batch cache. *@
             <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
                        StartIcon="@Icons.Material.Filled.Refresh"
@@ -381,11 +444,15 @@
                        OnClick="@(async () => { _loadedBatchNo = null; await CheckAsync(); })">
                 Re-check
             </MudButton>
-            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
-                       StartIcon="@Icons.Material.Filled.PlayArrow"
-                       Disabled="@(_readiness?.CanGenerate != true || _busy)" OnClick="GenerateAsync">
-                Generate
-            </MudButton>
+            <MudTooltip Text="@(_skuMaxStatus?.LastBuildTS is null ? "Click Build SKU Max first — no snapshot exists for this period" : "")"
+                        Disabled="@(_skuMaxStatus?.LastBuildTS is not null)">
+                <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                           StartIcon="@Icons.Material.Filled.PlayArrow"
+                           Disabled="@(_readiness?.CanGenerate != true || _busy || _isBuildingSkuMax || _skuMaxStatus?.LastBuildTS is null)"
+                           OnClick="GenerateAsync">
+                    Generate
+                </MudButton>
+            </MudTooltip>
             <MudButton Color="Color.Success" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
                        StartIcon="@Icons.Material.Filled.CheckCircle"
                        Disabled="@(_readiness?.CanApprove != true || _busy)" OnClick="ApproveAsync">
@@ -397,6 +464,76 @@
                 Delete
             </MudButton>
         </MudItem>
+
+        @* ─── Row 3 — Current Batch banner (full-width, centered) ───
+           Lives inside the input frame so the planner sees the active
+           batch right next to the inputs that produced it. Batch # is
+           displayed in a larger, accent-colored font for at-a-glance
+           recognition. *@
+        @if (_readiness is not null)
+        {
+            <MudItem xs="12" Class="d-flex align-center justify-center flex-wrap gap-2"
+                     Style="padding-top:.25rem;padding-bottom:.25rem;border-top:1px solid #e2e8f0;margin-top:.4rem;">
+                <span style="font-weight:700;color:#475569;letter-spacing:.04em;text-transform:uppercase;font-size:0.72rem;">
+                    Current Batch
+                </span>
+                @if (_readiness.CurrentBatchNo is null)
+                {
+                    <span style="color:#94a3b8;font-size:0.85rem;">
+                        No batch yet for @_country on @_runDate?.ToString("yyyy-MM-dd")
+                    </span>
+                }
+                else
+                {
+                    var _bnNo  = _readiness.CurrentBatchNo;
+                    var _bSt   = _readiness.CurrentStatus ?? "";
+                    var _bSrc  = _readiness.CurrentBatchSources;
+                    var _bSea  = _readiness.CurrentBatchSeasons;
+                    var _bRr   = _readiness.CurrentBatchOverrideUsabilityPct;
+                    var _bWh   = _readiness.CurrentBatchWarehouses;
+                    var _bFs   = _readiness.CurrentBatchFillStrategy;
+                    var _stCol = _bSt == "Approved" ? "#16a34a" : (_bSt == "Draft" ? "#d97706" : "#475569");
+                    <span style="font-size:1.35rem;font-weight:800;color:#2563eb;line-height:1;">
+                        #@_bnNo
+                    </span>
+                    <span style="font-size:0.85rem;font-weight:700;color:@_stCol;padding:.1rem .5rem;border:1px solid @_stCol;border-radius:999px;">
+                        @_bSt
+                    </span>
+                    @if (_readiness.CurrentRunDate is DateTime _bRunDt)
+                    {
+                        <span style="color:#475569;font-size:0.78rem;">
+                            · RunDate <strong>@_bRunDt.ToString("dd-MMM-yyyy")</strong>
+                        </span>
+                    }
+                    @if (_readiness.CurrentCreateTS is DateTime _bCts)
+                    {
+                        <span style="color:#475569;font-size:0.78rem;">
+                            · Generated <strong>@_bCts.ToString("dd-MMM-yyyy HH:mm")</strong>@(string.IsNullOrEmpty(_readiness.CurrentCreatedBy) ? "" : $" by {_readiness.CurrentCreatedBy}")
+                        </span>
+                    }
+                    @if (_readiness.ExistingApproved && _readiness.CurrentApprovedTS is not null)
+                    {
+                        <span style="color:#16a34a;font-size:0.78rem;">
+                            · Approved <strong>@_readiness.CurrentApprovedTS?.ToString("dd-MMM-yyyy HH:mm")</strong> by @_readiness.CurrentApprovedBy
+                        </span>
+                    }
+                    <span style="color:#cbd5e1;font-size:0.85rem;">|</span>
+                    <span style="color:#64748b;font-size:0.78rem;">
+                        Sources: <strong style="color:#334155;">@(string.IsNullOrEmpty(_bSrc) ? "(unknown)" : _bSrc)</strong>
+                        &nbsp;·&nbsp; Seasons: <strong style="color:#334155;">@(string.IsNullOrEmpty(_bSea) ? "(unknown)" : _bSea)</strong>
+                        &nbsp;·&nbsp; Box%: <strong style="color:#334155;">@(_bRr?.ToString() ?? "—")</strong>
+                        &nbsp;·&nbsp; Fill: <strong style="color:#334155;">@FillLabel(_bFs)</strong>
+                        &nbsp;·&nbsp; WH: <strong style="color:#334155;">@(string.IsNullOrEmpty(_bWh) ? "(All)" : _bWh)</strong>
+                    </span>
+                    @if (!FilterMatchesCurrent())
+                    {
+                        <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined">
+                            Checkboxes differ — Generate again to apply
+                        </MudChip>
+                    }
+                }
+            </MudItem>
+        }
     </MudGrid>
 </div>
 
@@ -407,52 +544,197 @@
 
 @if (_readiness is not null)
 {
-    <MudGrid Spacing="2" Class="mb-3">
-        <MudItem xs="12" sm="6" md="3">
-            <div class="lpm-metric-card @(_readiness.EomReady ? "lpm-accent-green" : "lpm-accent-rose")">
-                <div class="lpm-metric-label">EOM Output</div>
-                <div class="lpm-metric-sub">@_readiness.EomDetail</div>
-            </div>
-        </MudItem>
-        <MudItem xs="12" sm="6" md="3">
-            <div class="lpm-metric-card @(_readiness.LocStockReady ? "lpm-accent-green" : "lpm-accent-amber")">
-                <div class="lpm-metric-label">SOH (LPM_LocStock)</div>
-                <div class="lpm-metric-sub">@_readiness.LocStockDetail</div>
-            </div>
-        </MudItem>
-        <MudItem xs="12" sm="6" md="3">
-            <div class="lpm-metric-card @(_readiness.BoxesReady ? "lpm-accent-green" : "lpm-accent-rose")">
-                <div class="lpm-metric-label">Eligible Boxes (Selected)</div>
-                <div class="lpm-metric-sub">@_readiness.BoxesDetail</div>
-            </div>
-        </MudItem>
-        <MudItem xs="12" sm="6" md="3">
-            <div class="lpm-metric-card @CurrentBatchAccent()">
-                <div class="lpm-metric-label">Current Batch</div>
-                <div class="lpm-metric-sub">
-                    @if (_readiness.CurrentBatchNo is null)
-                    {
-                        <span>No batch yet for @_country on @_runDate?.ToString("yyyy-MM-dd")</span>
-                    }
-                    else
-                    {
-                        <span>#@_readiness.CurrentBatchNo · <strong>@_readiness.CurrentStatus</strong></span>
-                        if (_readiness.ExistingApproved && _readiness.CurrentApprovedTS is not null)
-                        {
-                            <br />
-                            <span>Approved @_readiness.CurrentApprovedTS?.ToString("yyyy-MM-dd HH:mm") by @_readiness.CurrentApprovedBy</span>
-                        }
-                    }
-                </div>
-            </div>
-        </MudItem>
-    </MudGrid>
+    @* ---- SKU Max Build — single compact line at the top ----
+       Builds LPM_SimItemSkuMax for the run period. SIM Generate refuses to
+       run unless this snapshot is fresh today. Rebuild whenever WH Box
+       items, SKU Max Rules, or Volume Group assignments change. *@
+    var _sku      = _skuMaxStatus;
+    var _skuStale = _sku?.IsFreshToday != true;
+    var _inf      = _inputFreshness;
+    <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-2"
+         style="padding:0.35rem 0.75rem;font-size:0.78rem;">
+        <span style="font-weight:700;color:#475569;letter-spacing:.04em;text-transform:uppercase;">
+            SKU Max (@_country @_runDate?.ToString("yyyy-MM"))
+        </span>
+        @if (_sku is null)
+        {
+            <span style="color:#64748b;">Loading…</span>
+        }
+        else if (_sku.LastBuildTS is null)
+        {
+            <span style="color:#dc2626;font-weight:600;">✕ No snapshot — click Build first.</span>
+        }
+        else if (_skuStale)
+        {
+            <span style="color:#d97706;font-weight:600;">
+                ⚠ Stale — last @_sku.LastBuildTS?.ToString("dd-MMM HH:mm")@(string.IsNullOrEmpty(_sku.LastBuildBy) ? "" : $" · {_sku.LastBuildBy}") · @_sku.RowCount.ToString("N0") rows@(_sku.LastBuildDuration is { } dur1 ? $" · in {FormatDuration(dur1)}" : "")
+            </span>
+        }
+        else
+        {
+            <span style="color:#16a34a;font-weight:600;">
+                ✓ Built @_sku.LastBuildTS?.ToString("dd-MMM HH:mm")@(string.IsNullOrEmpty(_sku.LastBuildBy) ? "" : $" · {_sku.LastBuildBy}") · @_sku.RowCount.ToString("N0") rows@(_sku.LastBuildDuration is { } dur2 ? $" · in {FormatDuration(dur2)}" : "")
+            </span>
+        }
+        @if (_inf is not null)
+        {
+            <span style="color:#94a3b8;">|</span>
+            <span style="color:#64748b;">
+                WH Box @(_inf.LastWHBoxLoad?.ToString("dd-MMM") ?? "—")
+                &nbsp;·&nbsp; Rule @(_inf.LastSkuMaxRuleChange?.ToString("dd-MMM") ?? "—")
+                &nbsp;·&nbsp; EOM @(_inf.LastVolumeGroupChange?.ToString("dd-MMM HH:mm") ?? "—")
+            </span>
+        }
+        @* Scope selector — lets the planner refresh only LPM-items, only
+           Non-LPM items, or every item. Each scope's DELETE only removes
+           rows for items present in that scope, so building "LPM Only"
+           leaves the Non-LPM rows untouched (and vice versa). The scope
+           dropdown shows the SKU count for the currently-selected scope
+           inline (e.g. "All items · 48,612 SKUs"); the small chip-row
+           below shows all three counts at once for comparison. *@
+        <MudSelect T="LpmSimSkuMaxScope" Value="_selectedSkuMaxScope"
+                   ValueChanged="@(v => _selectedSkuMaxScope = v)"
+                   Label="Scope" Variant="Variant.Outlined" Margin="Margin.Dense"
+                   Dense="true" Class="ml-auto" Style="max-width:170px;"
+                   Disabled="@_isBuildingSkuMax">
+            <MudSelectItem Value="LpmSimSkuMaxScope.All">All items</MudSelectItem>
+            <MudSelectItem Value="LpmSimSkuMaxScope.LpmOnly">LPM only</MudSelectItem>
+            <MudSelectItem Value="LpmSimSkuMaxScope.NonLpmOnly">Non-LPM only</MudSelectItem>
+        </MudSelect>
+        @if (_skuMaxScopeCounts is { } counts)
+        {
+            var sel = _selectedSkuMaxScope switch
+            {
+                LpmSimSkuMaxScope.LpmOnly    => counts.Lpm,
+                LpmSimSkuMaxScope.NonLpmOnly => counts.NonLpm,
+                _                             => counts.All,
+            };
+            <span style="font-size:0.78rem;color:#0f172a;font-weight:600;white-space:nowrap;"
+                  title="@($"All {counts.All:N0} · LPM {counts.Lpm:N0} · Non-LPM {counts.NonLpm:N0}")">
+                @sel.ToString("N0") SKUs
+            </span>
+            <span style="font-size:0.7rem;color:#64748b;white-space:nowrap;">
+                (All @counts.All.ToString("N0") · LPM @counts.Lpm.ToString("N0") · Non-LPM @counts.NonLpm.ToString("N0"))
+            </span>
+        }
+        else if (!string.IsNullOrEmpty(_country))
+        {
+            <span style="font-size:0.75rem;color:#94a3b8;white-space:nowrap;">…</span>
+        }
+        <MudButton Color="@(_skuStale ? Color.Warning : Color.Default)"
+                   Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                   StartIcon="@Icons.Material.Filled.Build"
+                   Disabled="@(_busy || _isBuildingSkuMax || string.IsNullOrEmpty(_country) || _runDate is null || _readiness?.EomReady != true)"
+                   OnClick="BuildSkuMaxAsync">
+            @if (_isBuildingSkuMax) { <text>Building…</text> } else { <text>Build SKU Max</text> }
+        </MudButton>
+    </div>
+    @* SKU Max build timing — Start / End / Duration. Live elapsed while
+       building; persistent timestamps after the build completes. Tucked
+       below the SKU Max status row so it doesn't compete with the
+       primary status indicator. *@
+    @if (_isBuildingSkuMax && _skuMaxBuildStartTS.HasValue)
+    {
+        var elapsed = DateTime.Now - _skuMaxBuildStartTS.Value;
+        var startedBy = _activeBuildJob?.StartedBy;
+        var stage     = _activeBuildJob?.StatusMessage;
+        var scopeTag  = SkuMaxScopeLabel(_activeBuildJob?.Scope ?? LpmSimSkuMaxScope.All);
+        <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-3"
+             style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#fef3c7;border:1px solid #fcd34d;color:#78350f;">
+            <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">SKU Max Build — Running</span>
+            <span><strong>Scope:</strong> @scopeTag</span>
+            <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span>
+            <span><strong>Elapsed:</strong> @FormatDuration(elapsed)</span>
+            @if (!string.IsNullOrEmpty(startedBy))
+            {
+                <span><strong>By:</strong> @startedBy</span>
+            }
+            @if (!string.IsNullOrEmpty(stage))
+            {
+                <span style="font-style:italic;color:#92400e;"><strong>Stage:</strong> @stage</span>
+            }
+            <MudButton Variant="Variant.Outlined" Color="Color.Error" Size="Size.Small"
+                       DropShadow="false" StartIcon="@Icons.Material.Filled.Cancel"
+                       Class="ml-auto" OnClick="CancelSkuMaxBuildAsync">
+                Cancel build
+            </MudButton>
+        </div>
+        <MudProgressLinear Color="Color.Warning" Indeterminate="true" Class="mb-2" />
+    }
+    else if (_activeBuildJob is { Status: SkuMaxBuildStatus.Cancelled })
+    {
+        <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-3"
+             style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#fef3c7;border:1px solid #fcd34d;color:#92400e;">
+            <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">SKU Max Build — Cancelled</span>
+            @if (_skuMaxBuildStartTS.HasValue)
+            { <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            @if (_skuMaxBuildEndTS.HasValue)
+            { <span><strong>End:</strong> @_skuMaxBuildEndTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            @if (_skuMaxBuildDuration.HasValue)
+            { <span><strong>Duration:</strong> @FormatDuration(_skuMaxBuildDuration.Value)</span> }
+        </div>
+    }
+    else if (_activeBuildJob is { Status: SkuMaxBuildStatus.Failed })
+    {
+        <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-3"
+             style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;">
+            <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">SKU Max Build — Failed</span>
+            @if (_skuMaxBuildStartTS.HasValue)
+            { <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            @if (_skuMaxBuildEndTS.HasValue)
+            { <span><strong>End:</strong> @_skuMaxBuildEndTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            @if (_skuMaxBuildDuration.HasValue)
+            { <span><strong>Duration:</strong> @FormatDuration(_skuMaxBuildDuration.Value)</span> }
+            @if (!string.IsNullOrEmpty(_activeBuildJob?.Error))
+            { <span style="margin-left:.5rem;">— @_activeBuildJob!.Error</span> }
+        </div>
+    }
+    else if (_skuMaxBuildStartTS.HasValue && _skuMaxBuildEndTS.HasValue && _skuMaxBuildDuration.HasValue)
+    {
+        <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-3"
+             style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;">
+            <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">Last SKU Max Build</span>
+            <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span>
+            <span><strong>End:</strong> @_skuMaxBuildEndTS.Value.ToString("dd-MMM HH:mm:ss")</span>
+            <span><strong>Duration:</strong> @FormatDuration(_skuMaxBuildDuration.Value)</span>
+        </div>
+    }
 
-    @if (_readiness.BoxSegments is BoxSegmentCounts seg)
+    @* Current Batch banner now lives inside the input frame above (Row 3
+       of the MudGrid). Removing the duplicate here keeps the page compact. *@
+
+    @* ---- Input Readiness — collapsible toggle (collapsed by default) ----
+       The 3 readiness cards (EOM / SOH / Eligible Boxes) plus the per-source
+       Box segments table live here. Hidden until the planner needs to
+       investigate the inputs — saves vertical space on the everyday flow. *@
+    <MudExpansionPanels Elevation="0" Class="mb-3">
+        <MudExpansionPanel Text="Input Readiness — EOM, SOH, Eligible Boxes" Icon="@Icons.Material.Filled.Inventory">
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" sm="6" md="4">
+                    <div class="lpm-metric-card @(_readiness.EomReady ? "lpm-accent-green" : "lpm-accent-rose")">
+                        <div class="lpm-metric-label">EOM Output</div>
+                        <div class="lpm-metric-sub">@_readiness.EomDetail</div>
+                    </div>
+                </MudItem>
+                <MudItem xs="12" sm="6" md="4">
+                    <div class="lpm-metric-card @(_readiness.LocStockReady ? "lpm-accent-green" : "lpm-accent-amber")">
+                        <div class="lpm-metric-label">SOH (LPM_LocStock)</div>
+                        <div class="lpm-metric-sub">@_readiness.LocStockDetail</div>
+                    </div>
+                </MudItem>
+                <MudItem xs="12" sm="6" md="4">
+                    <div class="lpm-metric-card @(_readiness.BoxesReady ? "lpm-accent-green" : "lpm-accent-rose")">
+                        <div class="lpm-metric-label">Eligible Boxes (Selected)</div>
+                        <div class="lpm-metric-sub">@_readiness.BoxesDetail</div>
+                    </div>
+                </MudItem>
+            </MudGrid>
+
+            @if (_readiness.BoxSegments is BoxSegmentCounts seg)
     {
         <div class="lpm-section mb-3" style="padding:0.6rem 1rem;">
             <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
-                All eligible boxes (PalletCategory = ELIGIBLE, ShopEligible &lt;&gt; 'E')
+                Eligible boxes (@CurrentFilterCaption())
             </MudText>
             <MudText Typo="Typo.caption" Style="display:block;color:#64748b;font-size:0.72rem;margin-top:.15rem;">
                 <strong>LPM</strong>: LPMDt is set AND its Year/Month is on or before the run period
@@ -500,7 +782,9 @@
             </MudSimpleTable>
             <MudText Typo="Typo.caption" Style="color:#64748b;">Counts are Boxes; quantity in parentheses.</MudText>
         </div>
-    }
+            }
+        </MudExpansionPanel>
+    </MudExpansionPanels>
 
     @if (_readiness.ExistingApproved)
     {
@@ -526,30 +810,65 @@
 
 @if (_readiness?.CurrentBatchNo is long currentBn)
 {
-    <MudText Typo="Typo.h6" Class="mb-1">
-        Result preview &mdash; batch #@currentBn (@(_readiness?.CurrentStatus))
-    </MudText>
-    <div class="lpm-page-subtitle" style="margin-bottom: 0.6rem; font-size:0.82rem;">
-        @{
-            var rs   = _readiness?.CurrentBatchSources;
-            var rsea = _readiness?.CurrentBatchSeasons;
-            var rover= _readiness?.CurrentBatchOverrideUsabilityPct;
-            var rwh  = _readiness?.CurrentBatchWarehouses;
-            var rfs  = _readiness?.CurrentBatchFillStrategy;
-        }
-        Generated with:
-        <strong>Sources:</strong> @(string.IsNullOrEmpty(rs) ? "(unknown — pre-snapshot batch)" : rs)
-        &nbsp;·&nbsp; <strong>Seasons:</strong> @(string.IsNullOrEmpty(rsea) ? "(unknown)" : rsea)
-        &nbsp;·&nbsp; <strong>RR Usability %:</strong> @(rover?.ToString() ?? "—")
-        &nbsp;·&nbsp; <strong>Fill:</strong> @(string.IsNullOrEmpty(rfs) ? "—" : (rfs == "EqualFillRate" ? "Equal fill-rate %" : "Equal qty / store"))
-        &nbsp;·&nbsp; <strong>Warehouses:</strong> @(string.IsNullOrEmpty(rwh) ? "(All)" : rwh)
-        @if (!FilterMatchesCurrent())
+    @* Snapshot of inputs (Sources / Seasons / Box% / Fill / Warehouses) lives
+       in the always-visible "Current Batch" line above. Result preview keeps
+       just the section header to anchor the result tabs below + the Batch #
+       lookup so the planner can jump to a previous run without first
+       knowing its (Country, RunDate). *@
+    <div class="d-flex flex-wrap align-center gap-3 mb-2">
+        <MudText Typo="Typo.h6" Class="ma-0">
+            Result preview &mdash; batch #@currentBn (@(_readiness?.CurrentStatus))
+        </MudText>
+        @if (_viewBatchNo.HasValue)
         {
-            <MudChip T="string" Size="Size.Small" Color="Color.Warning" Variant="Variant.Outlined" Class="ml-2">
-                Current checkboxes differ — Generate again to apply
-            </MudChip>
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Secondary"
+                       DropShadow="false" StartIcon="@Icons.Material.Filled.ArrowBack"
+                       OnClick="BackToLatestBatchAsync">
+                Back to latest
+            </MudButton>
+        }
+        <span style="color:#cbd5e1;">|</span>
+        <MudText Typo="Typo.caption" Style="color:#64748b;">View another batch:</MudText>
+        <MudNumericField T="long?" Value="_loadByBatchNo"
+                         ValueChanged="(long? v) => _loadByBatchNo = v"
+                         Min="1" HideSpinButtons="true" Clearable
+                         Placeholder="Batch #"
+                         Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                         Style="max-width:140px;" />
+        <MudButton Color="Color.Primary" Variant="Variant.Outlined" Size="Size.Small"
+                   DropShadow="false" StartIcon="@Icons.Material.Filled.Search"
+                   Disabled="@(_loadByBatchNo is null)"
+                   OnClick="LoadByBatchNoAsync">Load</MudButton>
+        @if (!string.IsNullOrEmpty(_loadByBatchError))
+        {
+            <span style="color:#dc2626;font-size:0.78rem;">@_loadByBatchError</span>
         }
     </div>
+
+    @* Pill list of every batch for this (Country, RunDate) — Draft + all
+       Approved. Click a pill to switch the result preview to that batch.
+       The currently-viewed batch's pill is filled; others are outlined. *@
+    @if (_periodBatches.Count > 1)
+    {
+        <div class="d-flex flex-wrap align-center gap-2 mb-3"
+             style="font-size:0.78rem;">
+            <span style="color:#64748b;">All batches for @_country @_runDate?.ToString("yyyy-MM-dd"):</span>
+            @foreach (var b in _periodBatches)
+            {
+                var isCurrent = b.LPMBatchNo == currentBn;
+                var statusCol = b.Status == "Approved" ? "Color.Success"
+                              : b.Status == "Draft"    ? "Color.Warning"
+                              : "Color.Default";
+                <MudButton Variant="@(isCurrent ? Variant.Filled : Variant.Outlined)"
+                           Color="@(b.Status == "Approved" ? Color.Success : (b.Status == "Draft" ? Color.Warning : Color.Default))"
+                           Size="Size.Small" DropShadow="false"
+                           OnClick="@(() => ViewBatchAsync(b.LPMBatchNo))">
+                    #@b.LPMBatchNo @b.Status
+                    <span style="margin-left:.4rem;color:#94a3b8;font-weight:400;">@b.CreateTS.ToString("dd-MMM HH:mm")</span>
+                </MudButton>
+            }
+        </div>
+    }
 
     @if (_aggregates is BatchAggregates ba)
     {
@@ -608,19 +927,23 @@
             }
 
             <MudGrid Spacing="2" Class="mb-2">
+                @* Search + checkbox filters via MultiSelectFilter component.
+                   Combines free-text search with per-item checkboxes — solves
+                   the "long division/store list is hard to scan" problem
+                   while keeping exact-match (so "Menswear" doesn't also match
+                   "Womenswear" the way the old Contains-based filter did). *@
                 <MudItem xs="12" md="3">
-                    <MudAutocomplete T="string" Label="Filter Store" Value="_filterStore"
-                                     ValueChanged="v => { _filterStore = v ?? string.Empty; StateHasChanged(); }"
-                                     SearchFunc="@((s, c) => SearchAllStores(s))"
-                                     Variant="Variant.Outlined" Margin="Margin.Dense"
-                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable Placeholder="All stores" />
+                    <MultiSelectFilter Label="Filter Store" Placeholder="All stores"
+                                       Items="@(_allStores.OrderBy(s => s.StoreID).Select(s => s.StoreID).ToList())"
+                                       LabelOf="@(id => { var match = _allStores.FirstOrDefault(s => s.StoreID == id); return string.IsNullOrEmpty(match.StoreName) ? id : $"{id} · {match.StoreName}"; })"
+                                       Selected="_filterStoresMulti"
+                                       SelectedChanged="@((HashSet<string> s) => { _filterStoresMulti = s; StateHasChanged(); })" />
                 </MudItem>
                 <MudItem xs="12" md="3">
-                    <MudAutocomplete T="string" Label="Filter Division" Value="_filterDivision"
-                                     ValueChanged="v => { _filterDivision = v ?? string.Empty; StateHasChanged(); }"
-                                     SearchFunc="@((s, c) => SearchAllDivisions(s))"
-                                     Variant="Variant.Outlined" Margin="Margin.Dense"
-                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable Placeholder="All divisions" />
+                    <MultiSelectFilter Label="Filter Division" Placeholder="All divisions"
+                                       Items="@(_allDivisions.OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList())"
+                                       Selected="_filterDivisionsMulti"
+                                       SelectedChanged="@((HashSet<string> s) => { _filterDivisionsMulti = s; StateHasChanged(); })" />
                 </MudItem>
                 <MudItem xs="6" md="2">
                     <MudNumericField T="decimal?" Label="Min Box Usability %"
@@ -648,30 +971,42 @@
             {
                 var sumEom    = FilteredSummary.Sum(r => r.EOM ?? 0m);
                 var sumSoh    = FilteredSummary.Sum(r => (long)r.SOH);
-                var sumBal    = FilteredSummary.Sum(r => r.Balance ?? 0m);
+                var sumMnw    = FilteredSummary.Sum(r => (long)(r.MerchNeedWeek ?? 0));
                 var sumSimQty = FilteredSummary.Sum(r => r.LpmSimQty);
                 var sumRrQty  = FilteredSummary.Sum(r => r.RoundRobinQty);
+                var sumOvr    = FilteredSummary.Sum(r => r.OverrideQty);
 
                 <MudTable T="EomSummaryRow" Items="FilteredSummary" Hover Striped Dense
-                          FixedHeader Height="55vh" AllowUnsorted="false">
+                          FixedHeader Height="55vh" AllowUnsorted="false"
+                          Class="lpm-eom-preview">
                     <HeaderContent>
-                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreName" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total">&nbsp;</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.PriorityRank ?? decimal.MaxValue">Rank</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumEom.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.EOM ?? 0m">EOM</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumSoh.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><div class="th-total">@sumBal.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.Balance ?? 0m">Balance</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Week) = SIM cap (replaced legacy EOM Balance).">@sumMnw.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.MerchNeedWeek ?? 0">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumSimQty.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.LpmSimQty">LPM SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumRrQty.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Subset of SIM Qty produced by P1b/P2b OVERRIDE round-robin (above SKU Max / Merch Need caps).">@sumOvr.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.OverrideQty">Override<br />Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Use %</MudTh>
                     </HeaderContent>
                     <RowTemplate>
-                        <MudTd>@context.StoreName</MudTd>
+                        <MudTd>
+                            @* StoreID prefix means a row still identifies a store
+                               even when DataSettings.PBFullname is null/empty
+                               (which is what produced the "blank store" rows in
+                               the Summary view). Same pattern as Item Details. *@
+                            <code>@context.StoreID</code>@if (!string.IsNullOrEmpty(context.StoreName)) { <text> </text><MudText Typo="Typo.caption" Color="Color.Secondary" Inline="true">@context.StoreName</MudText> }
+                        </MudTd>
+                        <MudTd Style="text-align:right;">@(context.PriorityRank?.ToString("0.##") ?? "—")</MudTd>
                         <MudTd>@context.DivisionName</MudTd>
                         <MudTd>@(context.EOM?.ToString("N0"))</MudTd>
                         <MudTd>@context.SOH.ToString("N0")</MudTd>
-                        <MudTd>@(context.Balance?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.MerchNeedWeek?.ToString("N0") ?? "—")</MudTd>
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
+                        <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
                         <MudTd>@(SummaryUsability(context)?.ToString("0.0") ?? "—")%</MudTd>
                     </RowTemplate>
                     <PagerContent>
@@ -733,42 +1068,169 @@
                 var ssRows  = FilteredStoreSummary.ToList();
                 var sumEom  = ssRows.Sum(r => r.EOM);
                 var sumSoh  = ssRows.Sum(r => r.SOH);
-                var sumDiff = ssRows.Sum(r => r.EomDiff);
+                var sumMnw  = ssRows.Sum(r => r.MerchNeedWeek);
                 var sumSim  = ssRows.Sum(r => r.SimQty);
                 var sumRr   = ssRows.Sum(r => r.RrQty);
+                var sumOvr  = ssRows.Sum(r => r.OverrideQty);
 
                 <MudTable T="StoreSummaryRow" Items="ssRows" Hover Striped Dense
-                          FixedHeader Height="55vh" AllowUnsorted="false">
+                          FixedHeader Height="55vh" AllowUnsorted="false"
+                          Class="lpm-eom-preview">
                     <HeaderContent>
                         <MudTh><div class="th-total">@ssRows.Count.ToString("N0") rows</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.StoreName">Store Name</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumEom.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.EOM">EOM</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumSoh.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><div class="th-total">@sumDiff.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.EomDiff">EOM Diff</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Week) for this store = SIM cap.">@sumMnw.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumSim.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumRr.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.RrQty">RR Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Subset of SIM Qty above SKU Max / Merch Need caps (P1b/P2b override).">@sumOvr.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.OverrideQty">Override<br />Qty</MudTableSortLabel></MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd><code>@context.StoreID</code></MudTd>
                         <MudTd>@context.StoreName</MudTd>
                         <MudTd>@context.EOM.ToString("N0")</MudTd>
                         <MudTd>@context.SOH.ToString("N0")</MudTd>
-                        <MudTd style="@(context.EomDiff < 0 ? "color:#dc2626;" : "")">@context.EomDiff.ToString("N0")</MudTd>
+                        <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
                         <MudTd>@context.SimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RrQty > 0 ? context.RrQty.ToString("N0") : "—")</MudTd>
+                        <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
                     </RowTemplate>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
                     </PagerContent>
                 </MudTable>
                 <MudText Typo="Typo.caption" Class="mt-2" Style="color:#64748b;">
-                    Negative <strong>EOM Diff</strong> = store is over-stocked relative to plan (SOH &gt; EOM).
-                    Positive = headroom. <strong>SIM Qty</strong> = total allocated to this store this run; <strong>RR Qty</strong> = subset that came from round-robin.
+                    <strong>Merch Need (Week)</strong> = weekly open-to-receive that drives the SIM cap.
+                    <strong>SIM Qty</strong> = total allocated to this store this run; <strong>RR Qty</strong> = subset from round-robin.
+                    <strong>Override Qty</strong> = qty allocated above SKU Max / Merch Need caps (P1b/P2b override mode).
                 </MudText>
             }
             else if (!_loadingStoreSummary)
             {
                 <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No store rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Division Summary" Icon="@Icons.Material.Filled.Category">
+            @if (_loadingDivisionSummary)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="3">
+                    @* Multi-select division filter — empty/All shows every row.
+                       Items list is built from the rows currently loaded for
+                       this batch so it always matches what the planner sees. *@
+                    <MudSelect T="string" Label="Divisions"
+                               SelectedValues="_divisionSummaryFilter"
+                               SelectedValuesChanged="(IEnumerable<string> vs) => { _divisionSummaryFilter = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); StateHasChanged(); }"
+                               MultiSelection="true"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                               Clearable
+                               Placeholder="(All)"
+                               SelectAll="true" SelectAllText="All divisions"
+                               MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedDivisionsText))">
+                        @foreach (var d in _divisionSummary
+                                              .Select(r => r.DivisionName)
+                                              .Where(n => !string.IsNullOrWhiteSpace(n))
+                                              .Distinct(StringComparer.OrdinalIgnoreCase)
+                                              .OrderBy(n => n))
+                        {
+                            <MudSelectItem T="string" Value="d">@d</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Min Box Usability %"
+                                     Value="_minUsability"
+                                     ValueChanged="async (decimal? v) => { _minUsability = v; await ReloadDivisionSummaryAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     Min="0m" Max="100m" Step="5m" Clearable
+                                     HelperText="e.g. 50 to count only boxes ≥50% used" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="decimal?" Label="Max Box Usability %"
+                                     Value="_maxUsability"
+                                     ValueChanged="async (decimal? v) => { _maxUsability = v; await ReloadDivisionSummaryAsync(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     Min="0m" Max="100m" Step="5m" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="5" Class="d-flex align-end justify-end gap-2">
+                    <MudButton Variant="Variant.Text" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.FilterAltOff"
+                               Disabled="@(_minUsability is null && _maxUsability is null && _divisionSummaryFilter.Count == 0)"
+                               OnClick="ClearDivisionSummaryFilters">
+                        Clear filters
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_divisionSummary.Count == 0)" OnClick="ExportDivisionSummaryAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_divisionSummary.Count > 0)
+            {
+                var dsRows  = FilteredDivisionSummary.ToList();
+                var dsumEom = dsRows.Sum(r => r.EOM);
+                var dsumSoh = dsRows.Sum(r => r.SOH);
+                var dsumMnw = dsRows.Sum(r => r.MerchNeedWeek);
+                var dsumSim = dsRows.Sum(r => r.SimQty);
+                var dsumRr  = dsRows.Sum(r => r.RrQty);
+                var dsumOvr = dsRows.Sum(r => r.OverrideQty);
+
+                // Footer totals derived from the totals already computed above.
+                // Division-wide Fill Rate uses Σ SOH / Σ EOM (true weighted
+                // total, not avg of avgs). EOM Balance is just Σ EOM − Σ SOH.
+                // Merch Need (Day) total = Σ MerchNeedWeek / 6.
+                decimal totalEomBalance = dsumEom - dsumSoh;
+                decimal? totalFillRate  = dsumEom > 0m
+                    ? Math.Round((decimal)dsumSoh * 100m / dsumEom, 1)
+                    : (decimal?)null;
+                long totalMerchDay      = (long)Math.Round((decimal)dsumMnw / 6m, MidpointRounding.AwayFromZero);
+                <MudTable T="DivisionSummaryRow" Items="dsRows" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false"
+                          Class="lpm-eom-preview">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@dsRows.Count.ToString("N0") rows</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.DivCode" InitialDirection="SortDirection.Ascending">Div Code</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@dsumEom.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.EOM">EOM</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@dsumSoh.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ EOM − Σ SOH. Positive = headroom; negative = overstocked vs plan.">@totalEomBalance.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.EomBalance"><span title="EOM Balance = EOM − SOH">EOM<br />Balance</span></MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Total SOH ÷ Total EOM × 100 across all rows in view.">@(totalFillRate?.ToString("0.0") ?? "—")%</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.CurrentFillRate ?? -1m"><span title="Current Fill Rate % = SOH ÷ EOM × 100">Current<br />Fill Rate %</span></MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Week) for this division = SIM cap.">@dsumMnw.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Week) ÷ 6 (fixed 6-day production week).">@totalMerchDay.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.MerchNeedDay"><span title="Merch Need (Day) = Merch Need (Week) ÷ 6">Merch Need<br />(Day)</span></MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@dsumSim.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@dsumRr.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.RrQty">RR Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Subset of SIM Qty above SKU Max / Merch Need caps (P1b/P2b override).">@dsumOvr.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.OverrideQty">Override<br />Qty</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.DivCode</code></MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
+                        <MudTd>@context.EOM.ToString("N0")</MudTd>
+                        <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd style="@(context.EomBalance < 0m ? "color:#dc2626;" : "")">@context.EomBalance.ToString("N0")</MudTd>
+                        <MudTd>@(context.CurrentFillRate?.ToString("0.0") ?? "—")%</MudTd>
+                        <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
+                        <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
+                        <MudTd>@context.SimQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.RrQty > 0 ? context.RrQty.ToString("N0") : "—")</MudTd>
+                        <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 25, 50, 100, 200 }" />
+                    </PagerContent>
+                </MudTable>
+                <MudText Typo="Typo.caption" Class="mt-2" Style="color:#64748b;">
+                    Aggregated across all stores. <strong>Merch Need (Week)</strong> drives the SIM cap.
+                    <strong>Override Qty</strong> = qty allocated above SKU Max / Merch Need caps (P1b/P2b override mode).
+                </MudText>
+            }
+            else if (!_loadingDivisionSummary)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No division rows for this batch.</MudAlert>
             }
         </MudTabPanel>
 
@@ -915,9 +1377,29 @@
             @if (_itemRows.Count > 0)
             {
                 var filteredItems  = FilteredItems.ToList();
-                var totalItemQty   = filteredItems.Sum(r => r.BoxItemQty ?? 0);
-                var totalSkuMax    = filteredItems.Sum(r => (long)(r.SKUMax ?? 0));
-                var totalSohItem   = filteredItems.Sum(r => (long)r.SOH);
+                // Qty column shows BoxItemQty (warehouse stock for the
+                // (Box, Item) pair). Each Item Details row is keyed by
+                // (Box, Item, Store), so the SAME BoxItemQty repeats across
+                // every store that received an allocation from that
+                // (Box, Item). Summing across rows would inflate the total
+                // by the number of receiving stores per (Box, Item).
+                // De-duplicate by (BoxNo, Itemcode) so the column total
+                // reflects the true warehouse stock that backed this batch
+                // (which for an LPM-only run is the total LPM-box stock).
+                var totalItemQty   = filteredItems
+                                        .GroupBy(r => (r.BoxNo, r.Itemcode))
+                                        .Sum(g => g.First().BoxItemQty ?? 0);
+                // SKU Max and SOH are per-(Store, Item) values that repeat
+                // across every Box-row for the same (Store, Item) pair, so
+                // they're de-duplicated the same way as Qty. LPM Qty and
+                // RR Qty are genuine per-row allocation amounts (one number
+                // per (Box, Item, Store) ship), so they sum directly.
+                var totalSkuMax    = filteredItems
+                                        .GroupBy(r => (r.StoreID, r.Itemcode))
+                                        .Sum(g => (long)(g.First().SKUMax ?? 0));
+                var totalSohItem   = filteredItems
+                                        .GroupBy(r => (r.StoreID, r.Itemcode))
+                                        .Sum(g => (long)g.First().SOH);
                 var totalLpmQty    = filteredItems.Sum(r => (long)r.LpmQty);
                 var totalRrItem    = filteredItems.Sum(r => (long)r.RoundRobinQty);
 
@@ -926,12 +1408,13 @@
                     <HeaderContent>
                         <MudTh><div class="th-total">@filteredItems.Count.ToString("N0") rows</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.StoreID">Store</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
-                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.PriorityRank ?? decimal.MaxValue">Rank</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Itemcode">Item</MudTableSortLabel></MudTh>
-                        <MudTh><div class="th-total">@totalItemQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalItemQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">BoxQty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxKind">LPM</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalSkuMax.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SKUMax ?? 0">SKU Max</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalSohItem.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><div class="th-total">@totalLpmQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.LpmQty">LPM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalLpmQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.LpmQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalRrItem.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Phase ?? string.Empty">Phase</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Use %</MudTh>
@@ -942,9 +1425,19 @@
                             <MudText Typo="Typo.caption" Color="Color.Secondary">@context.StoreName</MudText>
                         </MudTd>
                         <MudTd>@context.DivisionName</MudTd>
-                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd Style="text-align:right;">@(context.PriorityRank?.ToString("0.##") ?? "—")</MudTd>
                         <MudTd><code>@context.Itemcode</code></MudTd>
                         <MudTd>@(context.BoxItemQty?.ToString("N0"))</MudTd>
+                        <MudTd>
+                            @if (context.BoxKind == "LPM")
+                            {
+                                <span class="lpm-status lpm-accent-blue">LPM</span>
+                            }
+                            else
+                            {
+                                <span class="lpm-status lpm-accent-amber">Non-LPM</span>
+                            }
+                        </MudTd>
                         <MudTd>@(context.SKUMax?.ToString("N0"))</MudTd>
                         <MudTd>@context.SOH.ToString("N0")</MudTd>
                         <MudTd>@context.LpmQty.ToString("N0")</MudTd>
@@ -960,6 +1453,101 @@
             else if (!_loadingItems)
             {
                 <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">No item rows for this batch.</MudAlert>
+            }
+        </MudTabPanel>
+
+        <MudTabPanel Text="Custom Report" Icon="@Icons.Material.Filled.Tune">
+            @* The planner picks Group By + Columns, then clicks Run.
+               Field names come from a server-side whitelist (CustomReportField
+               enum) so the dynamic SQL stays injection-safe by construction.
+               Empty Columns = nothing to show. Dimensions in Columns are
+               auto-included in Group By by the SQL builder, so the planner
+               doesn't have to remember to tick them in both places. *@
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="5">
+                    <MudSelect T="CustomReportField" Label="Group By"
+                               SelectedValues="_customGroupBy"
+                               SelectedValuesChanged="@((IEnumerable<CustomReportField> v) => _customGroupBy = v?.ToList() ?? new())"
+                               MultiSelection="true"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                               Placeholder="(none — single aggregate row)"
+                               MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedFieldsText))">
+                        @foreach (var f in CustomReportDimensionFields)
+                        {
+                            <MudSelectItem T="CustomReportField" Value="@f">@CustomReportFieldLabel(f)</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="12" md="5">
+                    <MudSelect T="CustomReportField" Label="Columns"
+                               SelectedValues="_customColumns"
+                               SelectedValuesChanged="@((IEnumerable<CustomReportField> v) => _customColumns = v?.ToList() ?? new())"
+                               MultiSelection="true"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                               Placeholder="Pick fields to display"
+                               MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedFieldsText))">
+                        @foreach (var f in CustomReportAllFields)
+                        {
+                            <MudSelectItem T="CustomReportField" Value="@f">@CustomReportFieldLabel(f)</MudSelectItem>
+                        }
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="12" md="2" Class="d-flex align-end gap-1">
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.PlayArrow"
+                               Disabled="@(_loadingCustom || _customColumns.Count == 0 || _readiness?.CurrentBatchNo is null)"
+                               OnClick="RunCustomReportAsync">
+                        Run
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Color="Color.Primary" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_customResult is null || _customResult.Rows.Count == 0)"
+                               OnClick="ExportCustomReportAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_loadingCustom)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (_customResult is { Columns.Count: > 0 } cr && cr.Rows.Count > 0)
+            {
+                <MudText Typo="Typo.caption" Style="color:#475569;margin-bottom:.4rem;">
+                    @cr.Rows.Count.ToString("N0") rows
+                </MudText>
+                <MudTable T="Dictionary<string, object?>" Items="cr.Rows" Hover Striped Dense
+                          FixedHeader Height="55vh">
+                    <HeaderContent>
+                        @foreach (var col in cr.Columns)
+                        {
+                            <MudTh Style="@(col.IsNumeric ? "text-align:right;" : "")">@col.DisplayName</MudTh>
+                        }
+                    </HeaderContent>
+                    <RowTemplate>
+                        @foreach (var col in cr.Columns)
+                        {
+                            <MudTd Style="@(col.IsNumeric ? "text-align:right;" : "")">@FormatCustomCell(context, col)</MudTd>
+                        }
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (_customResult is { Rows.Count: 0 } && !_loadingCustom)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    No rows for this combination of Group By and Columns. Try a different selection or confirm the batch has data.
+                </MudAlert>
+            }
+            else if (!_loadingCustom)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    Pick Group By + Columns and click <strong>Run</strong>. Numeric columns are summed at the chosen grain. Field list is a whitelist — no raw SQL exposed.
+                </MudAlert>
             }
         </MudTabPanel>
 
@@ -1139,6 +1727,121 @@
             }
         </MudTabPanel>
 
+        <MudTabPanel Text="SKU Max Detail" Icon="@Icons.Material.Filled.Rule">
+            @* Per-(Store × Item × Season) SKU Max snapshot — built fresh each
+               SIM Generate from LPM_SimItemSkuMax. The filter is mandatory:
+               at least one of Division / Store / Item must be supplied to
+               keep the result set sane (could be 1M+ rows otherwise). *@
+            <MudText Typo="Typo.subtitle2" Class="mb-1">SKU Max per Item</MudText>
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-3">
+                Each row is one (Store × Item × Season) cap that SIM Generate honoured during allocation.
+                <code>WHStock</code> is the eligible warehouse stock for that item / season; the
+                <code>LPM_SKUMaxRule</code> band that brackets <code>WHStock</code> determines
+                <code>SKUMax</code>. Filter by Division <strong>or</strong> Store <strong>or</strong> Item — at least one is required.
+            </MudText>
+
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="3">
+                    <MudAutocomplete T="string" Label="Division"
+                                     Value="_skuFilterDivisionText"
+                                     ValueChanged="OnSkuMaxDivisionChanged"
+                                     SearchFunc="SearchDivisionsForSkuMax"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable
+                                     Placeholder="(any)" />
+                </MudItem>
+                <MudItem xs="12" md="3">
+                    <MudAutocomplete T="string" Label="Store"
+                                     Value="_skuFilterStoreText"
+                                     ValueChanged="OnSkuMaxStoreChanged"
+                                     SearchFunc="SearchStoresForSkuMax"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense"
+                                     CoerceText="true" ResetValueOnEmptyText="true" Clearable
+                                     Placeholder="(any)" />
+                </MudItem>
+                <MudItem xs="12" md="3">
+                    <MudTextField T="string" Label="Item code (contains)"
+                                  Value="_skuFilterItem"
+                                  ValueChanged="(string v) => { _skuFilterItem = v ?? string.Empty; }"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                  Clearable
+                                  Placeholder="(any)" />
+                </MudItem>
+                <MudItem xs="12" md="3" Class="d-flex align-end gap-2">
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Search"
+                               OnClick="LoadSkuMaxDetailAsync"
+                               Disabled="@_loadingSkuMax">
+                        Apply
+                    </MudButton>
+                    <MudButton Color="Color.Primary" Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_skuMaxRows.Count == 0)"
+                               OnClick="ExportSkuMaxAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_loadingSkuMax)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (_skuMaxFilterError is string err)
+            {
+                <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-2">@err</MudAlert>
+            }
+            else if (_skuMaxRows.Count == 0 && _skuMaxLoaded)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    No rows matched. Either the batch wasn't generated yet, or the filter doesn't match anything in
+                    <code>LPM_SimItemSkuMax</code>.
+                </MudAlert>
+            }
+            else if (_skuMaxRows.Count > 0)
+            {
+                <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-1">
+                    @_skuMaxRows.Count.ToString("N0") row(s) shown@( _skuMaxRows.Count >= 5000 ? " (capped at 5,000 — narrow the filter for the rest)" : "" )
+                </MudText>
+                <MudTable T="ItemSkuMaxRow" Items="_skuMaxRows" Hover Striped Dense
+                          FixedHeader Height="60vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><MudTableSortLabel T="ItemSkuMaxRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel></MudTh>
+                        <MudTh>Store Name</MudTh>
+                        <MudTh><MudTableSortLabel T="ItemSkuMaxRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="ItemSkuMaxRow" SortBy="r => r.ItemCode">Item Code</MudTableSortLabel></MudTh>
+                        <MudTh>Season</MudTh>
+                        <MudTh class="text-right"><MudTableSortLabel T="ItemSkuMaxRow" SortBy="r => r.WHBoxQty">WH Stock</MudTableSortLabel></MudTh>
+                        <MudTh>Vol Group</MudTh>
+                        <MudTh class="text-right"><MudTableSortLabel T="ItemSkuMaxRow" SortBy="r => r.SKUMax">SKU Max</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.StoreID</code></MudTd>
+                        <MudTd>@context.StoreName</MudTd>
+                        <MudTd>@context.DivisionName <span style="color:#94a3b8;">(@context.DivCode)</span></MudTd>
+                        <MudTd><code>@context.ItemCode</code></MudTd>
+                        <MudTd>
+                            @if (context.Season == "W")
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Info">Winter</MudChip>
+                            }
+                            else
+                            {
+                                <MudChip T="string" Size="Size.Small" Color="Color.Warning">Summer</MudChip>
+                            }
+                        </MudTd>
+                        <MudTd Class="text-right">@context.WHBoxQty.ToString("N0")</MudTd>
+                        <MudTd>@(context.VolumeGroup ?? "")</MudTd>
+                        <MudTd Class="text-right"><strong>@context.SKUMax.ToString("N0")</strong></MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 250, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+        </MudTabPanel>
+
         <MudTabPanel Text="Q&amp;A" Icon="@Icons.Material.Filled.QuestionAnswer">
             <MudText Typo="Typo.subtitle2" Class="mb-1">Investigate this batch's results</MudText>
             <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-3">
@@ -1287,27 +1990,225 @@
     private List<string> _countries = new();
     private string _country = "UAE";
     private DateTime? _runDate = DateTime.Today;
-    private bool _srcLpm = true;
+    private bool _srcLpm    = true;
     private bool _srcNonLpm = false;
+    /// <summary>
+    /// Drives the Box Source multi-select. Initialised from the same
+    /// defaults as the bool flags so the dropdown shows the right state
+    /// on first render. Whenever it changes, the bool flags are kept in
+    /// sync (CurrentSources still reads from them) and CheckAsync re-runs.
+    /// </summary>
+    private HashSet<string> _selectedSources = new(StringComparer.OrdinalIgnoreCase) { "LPM" };
     private bool _seasonSummer = true;
     private bool _seasonWinter = false;
     private int _overridePct = 60;
     private bool _verboseTrace = false;   // off by default — drops ~90% of trace insert time
+
+    // ── SKU Max Detail tab state ────────────────────────────────────────────
+    private List<ItemSkuMaxRow> _skuMaxRows = new();
+    private bool   _loadingSkuMax;
+    private bool   _skuMaxLoaded;            // becomes true after first Apply, so empty != "click apply"
+    private string? _skuMaxFilterError;
+    private string _skuFilterDivisionText = "";
+    private int    _skuFilterDiv;
+    private string _skuFilterStoreText    = "";
+    private string _skuFilterStore        = "";
+    private string _skuFilterItem         = "";
+    // Default = Ranking + RR (per planner request — matches the strict
+    // "fill highest-priority store first" mental model most planners assume).
+    // Equal fill % is still selectable on the radio for cases where the
+    // planner wants proportional balancing across stores instead.
     private LpmSimFillStrategy _fillStrategy = LpmSimFillStrategy.EqualPerStore;
+    /// <summary>
+    /// When TRUE the allocator ignores the Merch Need (Week) cap and sizes
+    /// allocations against SKU Max only. Surfaced as a checkbox next to the
+    /// fill-strategy radios — see LpmSimGenerateRequest.IgnoreMerchNeed.
+    /// </summary>
+    private bool _ignoreMerchNeed = false;
+
+    /// <summary>
+    /// When TRUE the eligibility filter drops the ShopEligible &lt;&gt; 'E'
+    /// predicate so already-shopped boxes (which the business calls
+    /// "Non-Purchased") are also pulled into the allocation pool.
+    /// See LpmSimGenerateRequest.IncludePurchasedBoxes — surfaced as the
+    /// "Include Non-Purchased Boxes" checkbox.
+    /// </summary>
+    private bool _includePurchasedBoxes = false;
+
+    /// <summary>
+    /// PalletCategory values the planner has picked for this run. Default
+    /// is just "ELIGIBLE" (legacy SIM behaviour). Empty = no filter (all
+    /// categories included). Drives the Pallet Categories multi-select.
+    /// </summary>
+    private HashSet<string> _selectedPalletCategories = new(StringComparer.OrdinalIgnoreCase) { "ELIGIBLE" };
+
+    /// <summary>Distinct PalletCategory values from bfldata.dbo.pallettype, loaded once at init.</summary>
+    private List<string> _allPalletCategories = new();
+
+    /// <summary>
+    /// Specific LPM months the planner has picked for this run. Empty = use
+    /// the legacy behaviour (all months with LPMDt &lt; first of next month
+    /// after RunDate). Stored as month-start <see cref="DateTime"/> values
+    /// (1st of each month) so the request type can serialize cleanly.
+    /// </summary>
+    private HashSet<DateTime> _selectedLpmMonths = new();
+
+    /// <summary>Distinct LPM months from racks.dbo.whboxitems, loaded once at init.</summary>
+    private List<DateTime> _allLpmMonths = new();
     private List<string> _allWarehouses = new();
-    private HashSet<string> _selectedWarehouses = new(StringComparer.OrdinalIgnoreCase);
+    // Ordered list — index 0 = highest priority. The chip-list UI lets the
+    // planner re-order via Up/Down arrows; the engine reads boxes warehouse
+    // by warehouse in this order (see ReadBoxesAsync ORDER BY).
+    private List<string> _selectedWarehouses = new();
 
     private string SelectedWarehousesText(List<string> selected)
     {
         if (selected is null || selected.Count == 0)            return "(All warehouses)";
         if (selected.Count == _allWarehouses.Count)             return "All warehouses";
-        if (selected.Count <= 3)                                return string.Join(", ", selected);
+        if (selected.Count <= 3)                                return string.Join(" → ", selected);
         return $"{selected.Count} of {_allWarehouses.Count} selected";
+    }
+
+    /// <summary>
+    /// MudSelect change handler — keeps <c>_selectedWarehouses</c> in sync
+    /// with the multi-select. The Warehouses field is now ONLY a filter
+    /// (which warehouses to include); priority order moved to
+    /// <c>dbo.LPM_WarehousePriority</c> in the engine, so the order of items
+    /// in this list no longer carries any meaning.
+    /// </summary>
+    private async Task OnWarehousesSelectionChanged(IEnumerable<string>? values)
+    {
+        _selectedWarehouses = (values ?? Enumerable.Empty<string>())
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        await CheckAsync();
+    }
+
+    /// <summary>Compact "X selected" rendering for the Pallet Categories multi-select chip.</summary>
+    private string SelectedPalletCategoriesText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0)            return "(All categories)";
+        if (selected.Count == _allPalletCategories.Count)       return "All categories";
+        if (selected.Count <= 3)                                return string.Join(", ", selected);
+        return $"{selected.Count} of {_allPalletCategories.Count} selected";
+    }
+
+    /// <summary>
+    /// Compact "X selected" rendering for the LPM Months multi-select chip.
+    /// MudSelect's MultiSelectionTextFunc is hardcoded to
+    /// <c>Func&lt;List&lt;string&gt;, string&gt;</c> regardless of T —
+    /// the values get .ToString()'d before reaching us. We parse the
+    /// stringified DateTimes back to format them as "MMM-yy".
+    /// </summary>
+    private string SelectedLpmMonthsText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0)    return "(All months)";
+        if (selected.Count == _allLpmMonths.Count)      return "All months";
+        if (selected.Count <= 3)
+        {
+            var pretty = selected.Select(s =>
+                DateTime.TryParse(s, out var dt) ? dt.ToString("MMM-yy") : s);
+            return string.Join(", ", pretty);
+        }
+        return $"{selected.Count} of {_allLpmMonths.Count} selected";
+    }
+
+    /// <summary>
+    /// Builds the readable caption that sits next to the segments table —
+    /// reflects whatever the user has picked in the filter strip so the
+    /// table heading matches the numbers shown below it.
+    /// </summary>
+    private string CurrentFilterCaption()
+    {
+        var parts = new List<string>(4);
+        if (_selectedPalletCategories.Count == 0)
+            parts.Add("PalletCategory: All");
+        else if (_selectedPalletCategories.Count == 1)
+            parts.Add($"PalletCategory = '{_selectedPalletCategories.First()}'");
+        else
+            parts.Add($"PalletCategory IN ({string.Join(", ", _selectedPalletCategories.Select(c => $"'{c}'"))})");
+
+        parts.Add(_includePurchasedBoxes
+            ? "incl. ShopEligible='E'"
+            : "ShopEligible <> 'E'");
+
+        if (_srcLpm && _selectedLpmMonths.Count > 0 && _selectedLpmMonths.Count <= 4)
+            parts.Add($"LPM Months: {string.Join(", ", _selectedLpmMonths.OrderBy(m => m).Select(m => m.ToString("MMM-yy")))}");
+        else if (_srcLpm && _selectedLpmMonths.Count > 4)
+            parts.Add($"LPM Months: {_selectedLpmMonths.Count} selected");
+
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>
+    /// Box Source multi-select handler. Mirrors the chosen items into the
+    /// legacy _srcLpm / _srcNonLpm bool flags so CurrentSources and all
+    /// downstream code don't need to change.
+    /// </summary>
+    private async Task OnBoxSourceChangedAsync(IEnumerable<string> values)
+    {
+        _selectedSources = values?.ToHashSet(StringComparer.OrdinalIgnoreCase)
+            ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        _srcLpm    = _selectedSources.Contains("LPM");
+        _srcNonLpm = _selectedSources.Contains("Non-LPM");
+        await CheckAsync();
     }
     private LpmSimReadiness? _readiness;
     private string _lastError = "";
+    /// <summary>Drives the "View another batch" input next to the result preview header.</summary>
+    private long? _loadByBatchNo;
+    private string _loadByBatchError = "";
+
+    /// <summary>
+    /// When non-null, the page is previewing this specific batch (could be
+    /// an old Approved one or the current Draft) instead of the period's
+    /// latest. Cleared whenever the user changes Country/RunDate or
+    /// generates a new batch.
+    /// </summary>
+    private long? _viewBatchNo;
+    /// <summary>All batches for the current (Country, RunDate) — newest first.</summary>
+    private List<LpmSimReportService.BatchListEntry> _periodBatches = new();
     private TimeSpan? _lastRunDuration;
     private string? _lastRunSummary;
+
+    // ── SKU Max Build state ─────────────────────────────────────────────────
+    // The big bulk-build is now a separate user-driven step (decoupled from
+    // SIM Generate so iterating on filters doesn't pay for it). Status is
+    // refreshed whenever Country/RunDate changes and after every Build.
+    private LpmSimSkuMaxBuildStatus? _skuMaxStatus;
+    private LpmSimInputFreshness?    _inputFreshness;
+    // Live job reference — populated when the page is wired up to a Running
+    // (or recently completed) job in the SkuMaxBuildJobManager. Drives the
+    // banner state + button enable/disable. The job itself outlives the page.
+    private SkuMaxBuildJob?          _activeBuildJob;
+    // Convenience: the page treats any "Running" job for the current period
+    // as the build state. The flag is derived from _activeBuildJob.
+    private bool _isBuildingSkuMax => _activeBuildJob is { Status: SkuMaxBuildStatus.Running };
+    // Last-run timing so the user can see what the build is doing in
+    // real time (Start time + live elapsed) and after it completes
+    // (Start, End, Duration). These persist on the page so a planner can
+    // come back to it later and still see how long the last build took.
+    private DateTime?  _skuMaxBuildStartTS;
+    private DateTime?  _skuMaxBuildEndTS;
+    private TimeSpan?  _skuMaxBuildDuration;
+    private System.Threading.Timer? _skuMaxLiveTimer;
+
+    // Which subset of items the next Build SKU Max click will refresh.
+    // "All" wipes & rebuilds every row for the period; "LpmOnly" only
+    // touches items currently appearing in LPM boxes (LPMDt IS NOT NULL),
+    // and "NonLpmOnly" only touches items in Non-LPM boxes (LPMDt IS NULL).
+    // The scope-aware DELETE in BuildItemSkuMaxAsync ensures rows for items
+    // outside the selected scope are preserved (so a "LPM Only" rebuild
+    // doesn't blow away the Non-LPM rows that were built earlier, and
+    // vice-versa). Default = All (legacy behaviour).
+    private LpmSimSkuMaxScope _selectedSkuMaxScope = LpmSimSkuMaxScope.All;
+
+    // Distinct-item counts per scope, refreshed when Country changes. Shown
+    // next to the Scope dropdown so the planner sees how many items each
+    // scope will rebuild before clicking Build SKU Max. Null while loading
+    // or when no Country is selected.
+    private SkuMaxScopeCounts? _skuMaxScopeCounts;
 
     private LpmSimSourceFlags CurrentSources =>
         (_srcLpm    ? LpmSimSourceFlags.LpmBoxes    : LpmSimSourceFlags.None)
@@ -1331,11 +2232,32 @@
     private string _filterItem = "";
     private string _filterBox = "";
     private string _filterDivision = "";
+
+    // Multi-select replacements for the Summary tab — exact-match by StoreID
+    // / Division name. Empty set = no filter (show all). The HashSet is
+    // case-insensitive so picking "menswear" matches "Menswear" but NOT
+    // "Womenswear" (Contains-style match was the bug we just fixed).
+    private HashSet<string> _filterStoresMulti    = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _filterDivisionsMulti = new(StringComparer.OrdinalIgnoreCase);
+    private string SelectedFilterStoresText(List<string> selected)
+        => selected is null || selected.Count == 0 ? "All stores"
+         : selected.Count <= 3 ? string.Join(", ", selected)
+         : $"{selected.Count} stores";
+    private string SelectedFilterDivisionsText(List<string> selected)
+        => selected is null || selected.Count == 0 ? "All divisions"
+         : selected.Count <= 3 ? string.Join(", ", selected)
+         : $"{selected.Count} divisions";
     private int _activeTab;
     private bool _loadingSummary;
     private bool _loadingStoreSummary;
     private List<StoreSummaryRow> _storeSummary = new();
     private string _storeSummaryFilter = "";
+
+    private List<DivisionSummaryRow> _divisionSummary = new();
+    // Multi-select filter — empty = no filter (show all). Compared by Division
+    // name (case-insensitive) against the loaded summary rows.
+    private HashSet<string> _divisionSummaryFilter = new(StringComparer.OrdinalIgnoreCase);
+    private bool   _loadingDivisionSummary;
     // Note: Box Usability % filter (_minUsability / _maxUsability) is declared
     // earlier and is shared across all report tabs.
 
@@ -1348,6 +2270,16 @@
             return _storeSummary.Where(r =>
                 r.StoreID.Contains(f, StringComparison.OrdinalIgnoreCase) ||
                 r.StoreName.Contains(f, StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private IEnumerable<DivisionSummaryRow> FilteredDivisionSummary
+    {
+        get
+        {
+            if (_divisionSummaryFilter.Count == 0) return _divisionSummary;
+            return _divisionSummary.Where(r =>
+                _divisionSummaryFilter.Contains(r.DivisionName));
         }
     }
     private bool _loadingBoxes;
@@ -1508,8 +2440,12 @@
             .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase)));
     }
 
+    /// <summary>SIM Qty as a % of the SIM cap (Merch Need Week). >100% means
+    /// override RR pushed allocations past the cap.</summary>
     private static decimal? SummaryUsability(EomSummaryRow r) =>
-        r.EOM is decimal eom && eom > 0 ? Math.Round((decimal)r.LpmSimQty * 100m / eom, 1) : null;
+        r.MerchNeedWeek is int mnw && mnw > 0
+            ? Math.Round((decimal)r.LpmSimQty * 100m / mnw, 1)
+            : null;
 
     private static decimal? ItemUsability(ItemDetailRow r) =>
         r.BoxItemQty is long q && q > 0 ? Math.Round((decimal)r.LpmQty * 100m / q, 1) : null;
@@ -1518,6 +2454,18 @@
     /// Re-fetch the currently-visible tab using the latest Box Usability
     /// filter values. Called when Min/Max Box Usability % changes on any tab.
     /// Other tabs invalidate their cached data so they refetch on next switch.
+    ///
+    /// Tab indices MUST stay in sync with the MudTabPanel order in the razor:
+    ///   0 = Summary (Store × Division)
+    ///   1 = Store Summary
+    ///   2 = Division Summary
+    ///   3 = SIM Boxes
+    ///   4 = Item Details
+    ///   5 = Allocation Trace
+    /// (Earlier this method only had 5 cases — Division Summary was added
+    /// later and the indices drifted by one. The old switch sent Item
+    /// Details filter-change events to LoadTraceAsync and CLEARED _itemRows,
+    /// which surfaced as Excel export producing the "wrong" tab's data.)
     /// </summary>
     private async Task ReloadActiveTabAsync()
     {
@@ -1528,19 +2476,23 @@
         // "show all" behaviour the user expects).
         try { _aggregates = await Reports.GetBatchAggregatesAsync(bn, _minUsability, _maxUsability); }
         catch { /* surfaced by tab load below */ }
-        // Invalidate other tabs' cached data — next OnTabChanged will refetch.
+        // Invalidate every OTHER tab's cached data — next OnTabChanged will
+        // refetch. The current tab's list is reloaded below by the switch.
         if (_activeTab != 0) _summary.Clear();
-        if (_activeTab != 2) _boxRows.Clear();
-        if (_activeTab != 3) _itemRows.Clear();
-        if (_activeTab != 4) _traceRows.Clear();
+        if (_activeTab != 1) _storeSummary.Clear();
+        if (_activeTab != 2) _divisionSummary.Clear();
+        if (_activeTab != 3) _boxRows.Clear();
+        if (_activeTab != 4) _itemRows.Clear();
+        if (_activeTab != 5) _traceRows.Clear();
         // Refresh the visible tab now.
         switch (_activeTab)
         {
-            case 0: await LoadSummaryAsync(bn); break;
-            case 1: await LoadStoreSummaryAsync(bn); break;
-            case 2: await LoadBoxesAsync(bn);   break;
-            case 3: await LoadItemsAsync(bn);   break;
-            case 4: await LoadTraceAsync();      break;
+            case 0: await LoadSummaryAsync(bn);         break;
+            case 1: await LoadStoreSummaryAsync(bn);    break;
+            case 2: await LoadDivisionSummaryAsync(bn); break;
+            case 3: await LoadBoxesAsync(bn);           break;
+            case 4: await LoadItemsAsync(bn);           break;
+            case 5: await LoadTraceAsync();             break;
         }
     }
 
@@ -1573,14 +2525,17 @@
             // Box Usability filter is now SERVER-side (the SQL only returns rows
             // for qualifying boxes), so we don't apply UsabilityInRange here.
             // Store / Division filters stay client-side.
+            //
+            // Filters use the new multi-select sets (_filterStoresMulti /
+            // _filterDivisionsMulti) — empty set = no filter. Exact match by
+            // StoreID / DivisionName (case-insensitive) replaces the older
+            // Contains() substring match that incorrectly matched "Menswear"
+            // inside "Womenswear".
             IEnumerable<EomSummaryRow> q = _summary;
-            if (!string.IsNullOrWhiteSpace(_filterStore))
-            {
-                var f = _filterStore.Trim();
-                q = q.Where(r => r.StoreName.Contains(f, StringComparison.OrdinalIgnoreCase));
-            }
-            if (!string.IsNullOrWhiteSpace(_filterDivision))
-                q = q.Where(r => r.DivisionName.Contains(_filterDivision.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (_filterStoresMulti.Count > 0)
+                q = q.Where(r => _filterStoresMulti.Contains(r.StoreID));
+            if (_filterDivisionsMulti.Count > 0)
+                q = q.Where(r => _filterDivisionsMulti.Contains(r.DivisionName));
             return q;
         }
     }
@@ -1636,17 +2591,21 @@
         if (_readiness?.CurrentBatchNo is not long bn) return;
         // Tab indices match the order they're declared in the razor:
         //   0 = Summary (Store × Division)
-        //   1 = Store Summary  (NEW)
-        //   2 = SIM Boxes
-        //   3 = Item Details
-        //   4 = Allocation Trace
+        //   1 = Store Summary
+        //   2 = Division Summary  (NEW — rolled up by Division)
+        //   3 = SIM Boxes
+        //   4 = Item Details
+        //   5 = Allocation Trace
+        // (Higher indices for SKU Max Detail / Q&A tabs are not lazy-loaded
+        //  here — they handle their own load logic on Apply.)
         switch (idx)
         {
-            case 0: if (_summary.Count == 0)      await LoadSummaryAsync(bn);     break;
-            case 1: if (_storeSummary.Count == 0) await LoadStoreSummaryAsync(bn); break;
-            case 2: if (_boxRows.Count == 0)      await LoadBoxesAsync(bn);        break;
-            case 3: if (_itemRows.Count == 0)     await LoadItemsAsync(bn);        break;
-            case 4:
+            case 0: if (_summary.Count == 0)         await LoadSummaryAsync(bn);          break;
+            case 1: if (_storeSummary.Count == 0)    await LoadStoreSummaryAsync(bn);     break;
+            case 2: if (_divisionSummary.Count == 0) await LoadDivisionSummaryAsync(bn);  break;
+            case 3: if (_boxRows.Count == 0)         await LoadBoxesAsync(bn);            break;
+            case 4: if (_itemRows.Count == 0)        await LoadItemsAsync(bn);            break;
+            case 5:
                 if (_traceCounts is null) _traceCounts = await Reports.GetAllocTraceCountsAsync(bn);
                 if (_traceRows.Count == 0) await LoadTraceAsync();
                 break;
@@ -1673,6 +2632,46 @@
         _minUsability  = null;
         _maxUsability  = null;
         await ReloadStoreSummaryAsync();
+    }
+
+    /// <summary>
+    /// Loads the Division Summary rollup. Mirrors LoadStoreSummaryAsync —
+    /// applies the same Box Usability % filters server-side so the SimQty /
+    /// RrQty / OverrideQty totals agree with the Store Summary tab.
+    /// </summary>
+    private async Task LoadDivisionSummaryAsync(long batchNo)
+    {
+        _loadingDivisionSummary = true; StateHasChanged();
+        try { _divisionSummary = await Reports.GetDivisionSummaryAsync(batchNo, _minUsability, _maxUsability); }
+        catch (Exception ex) { Snackbar.Add($"Division Summary failed: {ex.Message}", Severity.Error); _divisionSummary = new(); }
+        finally { _loadingDivisionSummary = false; StateHasChanged(); }
+    }
+
+    /// <summary>Re-fetches Division Summary with the current usability filter values.</summary>
+    private async Task ReloadDivisionSummaryAsync()
+    {
+        if (_readiness?.CurrentBatchNo is long bn) await LoadDivisionSummaryAsync(bn);
+    }
+
+    private async Task ClearDivisionSummaryFilters()
+    {
+        _divisionSummaryFilter.Clear();
+        _minUsability          = null;
+        _maxUsability          = null;
+        await ReloadDivisionSummaryAsync();
+    }
+
+    /// <summary>
+    /// Compact "X selected" / "Bags + 2 more" / "All divisions" rendering for
+    /// the multi-select chip when many divisions are picked. Mirrors the
+    /// pattern used by the Warehouses multi-select up top.
+    /// </summary>
+    private string SelectedDivisionsText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0) return "(All)";
+        if (selected.Count == 1) return selected[0];
+        if (selected.Count <= 3)  return string.Join(", ", selected);
+        return $"{selected[0]} + {selected.Count - 1} more";
     }
 
     private async Task LoadTraceAsync()
@@ -1720,6 +2719,184 @@
         finally { _loadingItems = false; StateHasChanged(); }
     }
 
+    // ── Custom Report state + handlers ──────────────────────────────────────
+    // Field picks live in plain List<CustomReportField> — order is preserved
+    // from the multi-select for both Group By (drives row grain) and Columns
+    // (display order in the result table).
+    private List<CustomReportField> _customGroupBy = new();
+    private List<CustomReportField> _customColumns = new();
+    private CustomReportResult?      _customResult;
+    private bool                     _loadingCustom;
+
+    /// <summary>Group-By dropdown — only dimension fields are eligible.</summary>
+    private static readonly CustomReportField[] CustomReportDimensionFields =
+    {
+        CustomReportField.StoreID,    CustomReportField.StoreName,
+        CustomReportField.Division,   CustomReportField.DivCode,
+        CustomReportField.BoxNo,      CustomReportField.Itemcode,
+        CustomReportField.Brand,      CustomReportField.TrnDate,
+        CustomReportField.LPMDt,      CustomReportField.BoxKind,
+        CustomReportField.Phase,
+    };
+
+    /// <summary>Columns dropdown — every whitelisted field shows up here.</summary>
+    private static readonly CustomReportField[] CustomReportAllFields =
+    {
+        // Dimensions
+        CustomReportField.StoreID,    CustomReportField.StoreName,
+        CustomReportField.Division,   CustomReportField.DivCode,
+        CustomReportField.BoxNo,      CustomReportField.Itemcode,
+        CustomReportField.Brand,      CustomReportField.TrnDate,
+        CustomReportField.LPMDt,      CustomReportField.BoxKind,
+        CustomReportField.Phase,
+        // Measures
+        CustomReportField.BoxItemQty, CustomReportField.BoxQty,
+        CustomReportField.SIMQty,     CustomReportField.RRQty,
+        CustomReportField.OverrideQty,
+        CustomReportField.SOH,        CustomReportField.SKUMax,
+        CustomReportField.DivSOH,     CustomReportField.DivEOMBalance,
+        CustomReportField.DivMerchNeed,
+        CustomReportField.PriorityRank, CustomReportField.WtAvgSoldQty,
+    };
+
+    private static string CustomReportFieldLabel(CustomReportField f) => f switch
+    {
+        CustomReportField.StoreID       => "Store ID",
+        CustomReportField.StoreName     => "Store Name",
+        CustomReportField.Division      => "Division",
+        CustomReportField.DivCode       => "Div Code",
+        CustomReportField.BoxNo         => "Box No",
+        CustomReportField.Itemcode      => "Itemcode",
+        CustomReportField.Brand         => "Brand",
+        CustomReportField.TrnDate       => "TrnDate",
+        CustomReportField.LPMDt         => "LPM Date",
+        CustomReportField.BoxKind       => "LPM (kind)",
+        CustomReportField.Phase         => "Phase",
+        CustomReportField.BoxItemQty    => "Box×Item Qty",
+        CustomReportField.BoxQty        => "Box Qty",
+        CustomReportField.SIMQty        => "SIM Qty",
+        CustomReportField.RRQty         => "RR Qty",
+        CustomReportField.OverrideQty   => "Override Qty",
+        CustomReportField.SOH           => "SOH",
+        CustomReportField.SKUMax        => "SKU Max",
+        CustomReportField.DivSOH        => "Div SOH",
+        CustomReportField.DivEOMBalance => "Div EOM Balance",
+        CustomReportField.DivMerchNeed  => "Div Merch Need",
+        CustomReportField.PriorityRank  => "Rank (Store × Div)",
+        CustomReportField.WtAvgSoldQty  => "Wt Avg Sold Qty",
+        _                                => f.ToString(),
+    };
+
+    private string SelectedFieldsText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0) return "(none)";
+        if (selected.Count <= 3) return string.Join(", ", selected);
+        return $"{selected.Count} selected";
+    }
+
+    private async Task RunCustomReportAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long bn)
+        {
+            Snackbar.Add("No batch selected.", Severity.Info);
+            return;
+        }
+        if (_customColumns.Count == 0)
+        {
+            Snackbar.Add("Pick at least one Column.", Severity.Info);
+            return;
+        }
+        _loadingCustom = true;
+        await InvokeAsync(StateHasChanged);
+        try
+        {
+            var spec = new CustomReportSpec(_customGroupBy.ToList(), _customColumns.ToList());
+            _customResult = await Reports.RunCustomReportAsync(bn, spec);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Custom Report failed: {(ex.InnerException?.Message ?? ex.Message)}",
+                         Severity.Error, cfg => cfg.VisibleStateDuration = 8000);
+            _customResult = null;
+        }
+        finally
+        {
+            _loadingCustom = false;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+
+    /// <summary>
+    /// Render a single cell for the Custom Report table. Numeric values get
+    /// the N0 format; dates render as dd-MMM-yyyy; everything else uses
+    /// ToString. Null becomes blank.
+    /// </summary>
+    private static string FormatCustomCell(Dictionary<string, object?> row, CustomReportColumnInfo col)
+    {
+        if (!row.TryGetValue(col.Key, out var v) || v is null) return "";
+        return v switch
+        {
+            DateTime dt   => dt.ToString("dd-MMM-yyyy"),
+            decimal dec   => dec.ToString("N0"),
+            double dbl    => dbl.ToString("N0"),
+            float flt     => flt.ToString("N0"),
+            long l        => l.ToString("N0"),
+            int i         => i.ToString("N0"),
+            short s       => s.ToString("N0"),
+            byte by       => by.ToString("N0"),
+            _             => v.ToString() ?? "",
+        };
+    }
+
+    private async Task ExportCustomReportAsync()
+    {
+        if (_customResult is null || _customResult.Rows.Count == 0)
+        {
+            Snackbar.Add("Nothing to export — Run the report first.", Severity.Info);
+            return;
+        }
+        var bn  = _readiness?.CurrentBatchNo ?? 0;
+        var ts  = DateTime.Now.ToString("yyyyMMdd-HHmm");
+        var cr  = _customResult;
+        await SaveExcelAsync($"LPMSIM_Custom_{bn}_{ts}.xlsx", "Custom", sheet =>
+        {
+            for (int c = 0; c < cr.Columns.Count; c++)
+            {
+                var cell = sheet.Cell(1, c + 1);
+                cell.Value = cr.Columns[c].DisplayName;
+                cell.Style.Font.Bold = true;
+                cell.Style.Font.FontColor = ClosedXML.Excel.XLColor.White;
+                cell.Style.Fill.BackgroundColor = ClosedXML.Excel.XLColor.FromArgb(0x0F, 0x17, 0x2A);
+                cell.Style.Alignment.Horizontal = cr.Columns[c].IsNumeric
+                    ? ClosedXML.Excel.XLAlignmentHorizontalValues.Right
+                    : ClosedXML.Excel.XLAlignmentHorizontalValues.Left;
+            }
+            for (int r = 0; r < cr.Rows.Count; r++)
+            {
+                var row = cr.Rows[r];
+                for (int c = 0; c < cr.Columns.Count; c++)
+                {
+                    var col = cr.Columns[c];
+                    var cell = sheet.Cell(r + 2, c + 1);
+                    if (row.TryGetValue(col.Key, out var v) && v is not null)
+                    {
+                        switch (v)
+                        {
+                            case DateTime dt: cell.Value = dt; cell.Style.NumberFormat.Format = "dd-mmm-yyyy"; break;
+                            case decimal dec: cell.Value = (double)dec; if (col.IsNumeric) cell.Style.NumberFormat.Format = "#,##0"; break;
+                            case double dbl:  cell.Value = dbl;          if (col.IsNumeric) cell.Style.NumberFormat.Format = "#,##0"; break;
+                            case long l:      cell.Value = l;            if (col.IsNumeric) cell.Style.NumberFormat.Format = "#,##0"; break;
+                            case int i:       cell.Value = i;            if (col.IsNumeric) cell.Style.NumberFormat.Format = "#,##0"; break;
+                            default:          cell.Value = v.ToString(); break;
+                        }
+                    }
+                }
+            }
+        });
+        Snackbar.Add($"Exported {cr.Rows.Count:N0} rows to LPMSIM_Custom_{bn}_{ts}.xlsx",
+                     Severity.Success, cfg => cfg.VisibleStateDuration = 4000);
+    }
+
     private string CurrentBatchAccent() =>
         _readiness?.ExistingApproved == true ? "lpm-accent-purple"
         : _readiness?.ExistingDraft == true ? "lpm-accent-amber"
@@ -1729,6 +2906,10 @@
     {
         var prev = _runDate;
         _runDate = date;
+        // Changing run date drops out of any "viewing specific batch" mode —
+        // the user is asking for a different period; the override only made
+        // sense for the previous period.
+        _viewBatchNo = null;
         // Day-of-month doesn't affect any readiness counter (the box / EOM /
         // SOH queries all key on Year+Month), so when the user just changes
         // the day inside the same month we can skip the heavy readiness
@@ -1773,14 +2954,14 @@
         {
             if (existing is not null)
             {
-                _summary.Clear(); _storeSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
+                _summary.Clear(); _storeSummary.Clear(); _divisionSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
                 _traceCounts = null;
                 _aggregates = await Reports.GetBatchAggregatesAsync(existing.LPMBatchNo, _minUsability, _maxUsability);
                 _ = LoadSummaryAsync(existing.LPMBatchNo);
             }
             else
             {
-                _summary = new(); _storeSummary = new(); _boxRows = new();
+                _summary = new(); _storeSummary = new(); _divisionSummary = new(); _boxRows = new();
                 _itemRows = new(); _traceRows = new(); _traceCounts = null;
                 _aggregates = null;
             }
@@ -1805,6 +2986,16 @@
         // Distinct warehouses (from racks.dbo.whboxitems) for the multi-select.
         try { _allWarehouses = await Reports.GetDistinctWarehousesAsync(); }
         catch { _allWarehouses = new(); }
+        // Distinct pallet categories (from bfldata.dbo.pallettype) for the
+        // Pallet Categories multi-select. Default selection stays as
+        // {"ELIGIBLE"} unless the user picks something else.
+        try { _allPalletCategories = await Reports.GetDistinctPalletCategoriesAsync(); }
+        catch { _allPalletCategories = new(); }
+        // Distinct LPM months (from racks.dbo.whboxitems.LPMDt) for the
+        // LPM Months multi-select. Default selection is empty (legacy
+        // "all months up to run period").
+        try { _allLpmMonths = await Reports.GetDistinctLpmMonthsAsync(); }
+        catch { _allLpmMonths = new(); }
         await LoadStoresForCountryAsync();
         if (!string.IsNullOrEmpty(_country)) await CheckAsync();
     }
@@ -1831,7 +3022,12 @@
 
     private async Task CheckAsync()
     {
-        if (string.IsNullOrEmpty(_country) || _runDate is null) { _readiness = null; _lines.Clear(); StateHasChanged(); return; }
+        if (string.IsNullOrEmpty(_country) || _runDate is null) { _readiness = null; _lines.Clear(); _skuMaxStatus = null; _inputFreshness = null; _skuMaxScopeCounts = null; StateHasChanged(); return; }
+
+        // Reload the SKU Max panel alongside readiness so the user sees the
+        // current build status when they change Country / RunDate. This is
+        // a cheap query (max + count) so doing it on every Check is fine.
+        _ = LoadSkuMaxStatusAsync();
 
         // Reentrancy guard. If a Check is already running, just flag that one
         // more pass is needed and return — the in-flight call will loop again.
@@ -1846,7 +3042,11 @@
             {
                 _checkPending = false;
                 var d = _runDate.Value.Date;
-                _readiness = await Sim.CheckAsync(_country, d.Year, d.Month, d, CurrentSources, CurrentSeasons, _selectedWarehouses.ToList());
+                _readiness = await Sim.CheckAsync(_country, d.Year, d.Month, d, CurrentSources, CurrentSeasons, _selectedWarehouses.ToList(), _includePurchasedBoxes, _selectedPalletCategories.ToList(), _selectedLpmMonths.ToList(), _viewBatchNo);
+                // Refresh the list of batches for this period so the result-preview
+                // pills show every Draft + Approved the planner can flip to.
+                try { _periodBatches = await Reports.GetBatchesForPeriodAsync(_country, d); }
+                catch { _periodBatches = new(); }
                 var bnNow = _readiness.CurrentBatchNo;
 
                 // Only reload the heavy result tabs when the batch number
@@ -1859,7 +3059,7 @@
                 {
                     if (bnNow is long bn)
                     {
-                        _summary.Clear(); _storeSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
+                        _summary.Clear(); _storeSummary.Clear(); _divisionSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
                         _traceCounts = null;
                         _aggregates = await Reports.GetBatchAggregatesAsync(bn, _minUsability, _maxUsability);
 
@@ -1876,6 +3076,7 @@
                         _lines = new List<LpmSimOutput>();
                         _summary = new List<EomSummaryRow>();
                         _storeSummary = new List<StoreSummaryRow>();
+                        _divisionSummary = new List<DivisionSummaryRow>();
                         _boxRows = new List<BoxDetailRow>();
                         _itemRows = new List<ItemDetailRow>();
                         _traceRows = new List<AllocTraceRow>();
@@ -1928,6 +3129,10 @@
                 Warehouses           = _selectedWarehouses.ToList(),
                 VerboseTrace         = _verboseTrace,
                 FillStrategy         = _fillStrategy,
+                IgnoreMerchNeed      = _ignoreMerchNeed,
+                IncludePurchasedBoxes = _includePurchasedBoxes,
+                PalletCategories     = _selectedPalletCategories.ToList(),
+                LpmMonths            = _selectedLpmMonths.ToList(),
             });
             sw.Stop();
             _lastRunDuration = sw.Elapsed;
@@ -1948,7 +3153,28 @@
                     $"Skipped {result.ItemsWithoutDivision:N0} items without division mapping; {result.BoxesSkipped:N0} item lines had no EOM rows for their division.",
                     Severity.Warning,
                     cfg => cfg.VisibleStateDuration = 15000);
+
+            // Release the busy flag BEFORE awaiting CheckAsync. CheckAsync's
+            // reentrancy guard returns early when _busy is true (it's the
+            // shared "another op is running" gate), which would otherwise
+            // leave _readiness stale and the Current Batch line stuck on the
+            // pre-Generate state. The finally below still re-clears _busy
+            // for safety on the catch paths.
+            _busy = false;
+            // A successful Generate produces the new latest batch — drop any
+            // "viewing older batch" override so the result preview snaps to
+            // the brand-new run.
+            _viewBatchNo = null;
             await CheckAsync();
+        }
+        catch (SkuMaxStaleException sse)
+        {
+            // Refresh the panel so the user sees the same status the engine saw,
+            // then nudge them to click Build SKU Max.
+            sw.Stop();
+            _skuMaxStatus = sse.Status;
+            Snackbar.Add(sse.Message, Severity.Warning,
+                cfg => { cfg.RequireInteraction = true; cfg.VisibleStateDuration = 15000; });
         }
         catch (Exception ex)
         {
@@ -1974,11 +3200,382 @@
         finally { _busy = false; StateHasChanged(); }
     }
 
+    /// <summary>
+    /// Reloads SKU Max build status + input freshness for the current
+    /// Country / RunDate.
+    ///
+    /// Status (count + max ts on our local table) is cheap and drives the
+    /// status badge — fetched first and rendered immediately. Input freshness
+    /// (MAX(LPMDt) on whboxitems, MAX(CreateTS) on rules / EOM) takes longer
+    /// on cold cache and is informational only — fetched second so the user
+    /// isn't staring at "Loading…" while the slow queries complete.
+    ///
+    /// Both stages call <see cref="ComponentBase.InvokeAsync"/> +
+    /// <see cref="ComponentBase.StateHasChanged"/> so the panel re-renders
+    /// even when this method is fired with <c>_ = LoadSkuMaxStatusAsync()</c>
+    /// from outside an event handler.
+    /// </summary>
+    private async Task LoadSkuMaxStatusAsync()
+    {
+        if (_runDate is null || string.IsNullOrEmpty(_country))
+        {
+            _skuMaxStatus   = null;
+            _inputFreshness = null;
+            // Detach from any prior period's job — the manager keeps it; only
+            // the page-side reference + ticker need to clear.
+            _activeBuildJob = null;
+            _skuMaxLiveTimer?.Dispose();
+            _skuMaxLiveTimer = null;
+            _skuMaxBuildStartTS = null;
+            _skuMaxBuildEndTS = null;
+            _skuMaxBuildDuration = null;
+            await InvokeAsync(StateHasChanged);
+            return;
+        }
+        var d = _runDate.Value.Date;
+
+        // Reattach to the singleton manager's job state for this period —
+        // covers both the "build still running after navigation" case and
+        // the "build finished while user was elsewhere" case.
+        var existingJob = SkuMaxJobs.Get(_country, d.Year, d.Month);
+        if (existingJob is not null)
+        {
+            AttachJob(existingJob);
+        }
+        else
+        {
+            // No active job for this period — clear the banner state.
+            _activeBuildJob = null;
+            _skuMaxLiveTimer?.Dispose();
+            _skuMaxLiveTimer = null;
+            _skuMaxBuildStartTS = null;
+            _skuMaxBuildEndTS = null;
+            _skuMaxBuildDuration = null;
+        }
+
+        // Stage 1 — status badge (sub-second; LPM_SimItemSkuMax has good indexes).
+        try
+        {
+            _skuMaxStatus = await Sim.GetLastSkuMaxBuildAsync(_country, d.Year, d.Month);
+        }
+        catch (Exception ex)
+        {
+            _skuMaxStatus = null;
+            await InvokeAsync(() =>
+            {
+                Snackbar.Add($"Could not load SKU Max status: {(ex.InnerException?.Message ?? ex.Message)}",
+                             Severity.Warning, cfg => cfg.VisibleStateDuration = 8000);
+                StateHasChanged();
+            });
+            return;
+        }
+        await InvokeAsync(StateHasChanged);
+
+        // Stage 2 — input freshness (informational; runs after status renders).
+        try
+        {
+            _inputFreshness = await Sim.GetInputFreshnessAsync(_country, d.Year, d.Month);
+        }
+        catch
+        {
+            // Non-fatal — panel just won't show input timestamps until next reload.
+            _inputFreshness = null;
+        }
+        await InvokeAsync(StateHasChanged);
+
+        // Stage 3 — distinct-item counts per scope (drives the "10,408 SKUs"
+        // chip next to the Scope dropdown). Independent of period — depends
+        // only on whboxitems × upc_subclass — so we don't refetch when the
+        // RunDate changes (Country still triggers a refresh because the
+        // underlying tables can vary by deployment).
+        try
+        {
+            _skuMaxScopeCounts = await Sim.GetSkuMaxScopeCountsAsync(_country);
+        }
+        catch
+        {
+            // Non-fatal — chip just won't show until next page load.
+            _skuMaxScopeCounts = null;
+        }
+        await InvokeAsync(StateHasChanged);
+    }
+
+    /// <summary>
+    /// User-triggered Build SKU Max for the current Country / RunDate. The
+    /// run can take several minutes for large catalogs (UAE: ~1-7M rows).
+    ///
+    /// Flow:
+    ///   1. If a snapshot already exists, ask "Rebuild?" (skip-rebuild prompt).
+    ///   2. Run a quick preview query (PreviewSkuMaxBuildAsync) so the
+    ///      planner sees how many items will be processed and how many
+    ///      existing rows are about to be replaced vs preserved (the
+    ///      scope-aware DELETE only touches items in scope).
+    ///   3. On confirm, kick the build off in the background.
+    /// </summary>
+    private async Task BuildSkuMaxAsync()
+    {
+        if (_runDate is null || string.IsNullOrEmpty(_country)) return;
+
+        var d = _runDate.Value.Date;
+        if (SkuMaxJobs.IsRunning(_country, d.Year, d.Month))
+        {
+            Snackbar.Add("A SKU Max build is already running for this period.", Severity.Info);
+            return;
+        }
+
+        // Skip-rebuild prompt: any time a SKU Max snapshot already exists for
+        // this period (today's or older), ask the user whether they want to
+        // pay for a fresh build or reuse the existing one. SIM Generate
+        // accepts stale snapshots — the multi-million-row rebuild is only
+        // needed when WHBox items / SKU Max Rules / Volume Group changed.
+        if (_skuMaxStatus is { LastBuildTS: not null } sExist)
+        {
+            var when     = sExist.LastBuildTS?.ToString("dd-MMM HH:mm") ?? "earlier";
+            var who      = string.IsNullOrEmpty(sExist.LastBuildBy) ? "" : $" by {sExist.LastBuildBy}";
+            var freshTag = sExist.IsFreshToday ? "" : " (older than today — stale)";
+            var ok       = await DialogService.ShowMessageBox(
+                "SKU Max snapshot exists",
+                $"SKU Max for {_country} {_runDate.Value:yyyy-MM} was last built {when}{who}{freshTag}, with {sExist.RowCount:N0} rows.\n\n" +
+                "You can use the existing snapshot to generate SIM right away. Rebuild only if WH Box items, SKU Max Rules, or Volume Group assignments changed since.\n\n" +
+                "Rebuild anyway?",
+                yesText: "Rebuild", cancelText: "Use existing");
+            if (ok != true)
+            {
+                Snackbar.Add($"Using existing SKU Max ({sExist.RowCount:N0} rows). Click Generate to run SIM.",
+                             Severity.Info, cfg => cfg.VisibleStateDuration = 6000);
+                return;
+            }
+        }
+
+        // Pre-build preview: count how many items the build will process
+        // for the chosen scope, plus how many existing rows will be replaced
+        // vs preserved. Surfaces the scale of the operation so the planner
+        // can sanity-check before paying for the multi-minute rebuild.
+        SkuMaxBuildPreview? preview = null;
+        try
+        {
+            _busy = true;            // disables Generate while we count
+            await InvokeAsync(StateHasChanged);
+            preview = await Sim.PreviewSkuMaxBuildAsync(_country, d.Year, d.Month, _selectedSkuMaxScope);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not preview SKU Max build: {ex.Message}", Severity.Error);
+            return;
+        }
+        finally
+        {
+            _busy = false;
+            await InvokeAsync(StateHasChanged);
+        }
+
+        // Different message per scope — keeps the planner from second-guessing
+        // what the build will and won't touch.
+        string msg;
+        switch (_selectedSkuMaxScope)
+        {
+            case LpmSimSkuMaxScope.LpmOnly:
+                msg =
+                    $"Build SKU Max — LPM items only (LPMDt IS NOT NULL)\n" +
+                    $"Country: {_country}   Period: {_runDate.Value:yyyy-MM}\n\n" +
+                    $"LPM items to rebuild: {preview.ItemsInScope:N0}" +
+                    (preview.DroppedNoMaster > 0
+                        ? $"  ({preview.DroppedNoMaster:N0} skipped — not in upc_subclass)"
+                        : "") + "\n" +
+                    $"Existing LPM rows that will be REPLACED: {preview.ExistingRowsInScope:N0}\n" +
+                    $"Non-LPM rows that will be PRESERVED (untouched): {preview.ExistingRowsKept:N0}\n\n" +
+                    "Proceed?";
+                break;
+
+            case LpmSimSkuMaxScope.NonLpmOnly:
+                msg =
+                    $"Build SKU Max — Non-LPM items only (LPMDt IS NULL)\n" +
+                    $"Country: {_country}   Period: {_runDate.Value:yyyy-MM}\n\n" +
+                    $"Non-LPM items to rebuild: {preview.ItemsInScope:N0}" +
+                    (preview.DroppedNoMaster > 0
+                        ? $"  ({preview.DroppedNoMaster:N0} skipped — not in upc_subclass)"
+                        : "") + "\n" +
+                    $"Existing Non-LPM rows that will be REPLACED: {preview.ExistingRowsInScope:N0}\n" +
+                    $"LPM rows that will be PRESERVED (untouched): {preview.ExistingRowsKept:N0}\n\n" +
+                    "Proceed?";
+                break;
+
+            default: // All
+                msg =
+                    $"Build SKU Max — ALL items (full rebuild)\n" +
+                    $"Country: {_country}   Period: {_runDate.Value:yyyy-MM}\n\n" +
+                    $"Items to rebuild: {preview.ItemsInScope:N0}" +
+                    (preview.DroppedNoMaster > 0
+                        ? $"  ({preview.DroppedNoMaster:N0} skipped — not in upc_subclass)"
+                        : "") + "\n" +
+                    $"Existing rows for the period (will all be DELETED + rebuilt): {preview.ExistingRowsInScope:N0}\n\n" +
+                    "Proceed?";
+                break;
+        }
+
+        var go = await DialogService.ShowMessageBox(
+            "Confirm SKU Max Build", msg,
+            yesText: "Build", cancelText: "Cancel");
+        if (go != true) return;
+        var scopeLabel = SkuMaxScopeLabel(_selectedSkuMaxScope);
+
+        _lastError = "";
+        try
+        {
+            // Hand the build off to the singleton manager — it owns the
+            // task lifecycle and uses its own CancellationTokenSource, so
+            // the build keeps running if the user navigates to a different
+            // page. Returning to SIM Generate re-attaches via OnInitialized.
+            var job = SkuMaxJobs.Start(_country, d.Year, d.Month, CurrentUser?.Name ?? "", _selectedSkuMaxScope);
+            AttachJob(job);
+            Snackbar.Add(
+                $"SKU Max build started in background ({scopeLabel}, {preview.ItemsInScope:N0} items). " +
+                "You can navigate away — it'll keep running.",
+                Severity.Success, cfg => cfg.VisibleStateDuration = 6000);
+        }
+        catch (InvalidOperationException ex)
+        {
+            Snackbar.Add(ex.Message, Severity.Warning);
+        }
+    }
+
+    private async Task CancelSkuMaxBuildAsync()
+    {
+        if (_runDate is null || string.IsNullOrEmpty(_country)) return;
+        var d = _runDate.Value.Date;
+        var ok = await DialogService.ShowMessageBox(
+            "Cancel SKU Max build?",
+            $"Stop the SKU Max build for {_country} {d:yyyy-MM}? Any rows already inserted will remain " +
+            "in the table (the next Build will wipe them and start over).",
+            yesText: "Cancel build", cancelText: "Keep running");
+        if (ok != true) return;
+
+        if (SkuMaxJobs.Cancel(_country, d.Year, d.Month))
+            Snackbar.Add("Cancelling SKU Max build…", Severity.Info);
+        else
+            Snackbar.Add("No active SKU Max build to cancel.", Severity.Warning);
+    }
+
+    /// <summary>
+    /// Attach the page UI to a job: keep its reference, start a 1s ticker
+    /// while running so the elapsed time refreshes, and subscribe to the
+    /// manager's JobChanged event so the UI updates the moment the build
+    /// finishes (Completed / Failed / Cancelled).
+    /// </summary>
+    private void AttachJob(SkuMaxBuildJob job)
+    {
+        _activeBuildJob = job;
+        _skuMaxBuildStartTS  = job.StartedAt;
+        _skuMaxBuildEndTS    = job.CompletedAt;
+        _skuMaxBuildDuration = job.Duration;
+
+        // Subscribe (idempotent — DetachJob clears prior handler reference).
+        SkuMaxJobs.JobChanged -= OnSkuMaxJobChanged;
+        SkuMaxJobs.JobChanged += OnSkuMaxJobChanged;
+
+        if (job.Status == SkuMaxBuildStatus.Running)
+        {
+            _skuMaxLiveTimer?.Dispose();
+            _skuMaxLiveTimer = new System.Threading.Timer(
+                _ => InvokeAsync(StateHasChanged), null, 1000, 1000);
+        }
+        else
+        {
+            _skuMaxLiveTimer?.Dispose();
+            _skuMaxLiveTimer = null;
+        }
+    }
+
+    private void OnSkuMaxJobChanged(object? sender, SkuMaxBuildJob job)
+    {
+        // Only react to events for the period currently shown on screen.
+        if (_runDate is null || string.IsNullOrEmpty(_country)) return;
+        var d = _runDate.Value.Date;
+        if (!string.Equals(job.Country, _country, StringComparison.OrdinalIgnoreCase) ||
+            job.Year != d.Year || job.Month != d.Month) return;
+
+        InvokeAsync(async () =>
+        {
+            _activeBuildJob       = job;
+            _skuMaxBuildStartTS   = job.StartedAt;
+            _skuMaxBuildEndTS     = job.CompletedAt;
+            _skuMaxBuildDuration  = job.Duration;
+
+            if (job.Status == SkuMaxBuildStatus.Completed)
+            {
+                // Refresh the SKU Max status row + input freshness from DB.
+                try
+                {
+                    _skuMaxStatus = await Sim.GetLastSkuMaxBuildAsync(_country, d.Year, d.Month);
+                    _inputFreshness = await Sim.GetInputFreshnessAsync(_country, d.Year, d.Month);
+                }
+                catch { /* non-fatal */ }
+                Snackbar.Add(job.StatusMessage ?? "SKU Max build completed.",
+                    Severity.Success, cfg => cfg.VisibleStateDuration = 8000);
+                _skuMaxLiveTimer?.Dispose();
+                _skuMaxLiveTimer = null;
+            }
+            else if (job.Status == SkuMaxBuildStatus.Cancelled)
+            {
+                Snackbar.Add(job.StatusMessage ?? "SKU Max build cancelled.",
+                    Severity.Warning, cfg => cfg.VisibleStateDuration = 6000);
+                _skuMaxLiveTimer?.Dispose();
+                _skuMaxLiveTimer = null;
+            }
+            else if (job.Status == SkuMaxBuildStatus.Failed)
+            {
+                _lastError = job.Error ?? "Unknown error";
+                Snackbar.Add($"SKU Max build failed: {job.Error}",
+                    Severity.Error, cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
+                _skuMaxLiveTimer?.Dispose();
+                _skuMaxLiveTimer = null;
+            }
+            StateHasChanged();
+        });
+    }
+
+    public void Dispose()
+    {
+        // Unsubscribe so the manager doesn't hold a dead delegate reference.
+        // The build itself is OWNED by the manager — it keeps running.
+        SkuMaxJobs.JobChanged -= OnSkuMaxJobChanged;
+        _skuMaxLiveTimer?.Dispose();
+        _skuMaxLiveTimer = null;
+    }
+
     private static string FormatDuration(TimeSpan t)
     {
         if (t.TotalMinutes >= 1) return $"{(int)t.TotalMinutes}m {t.Seconds}s";
         if (t.TotalSeconds >= 1) return $"{t.TotalSeconds:0.0}s";
         return $"{t.TotalMilliseconds:0}ms";
+    }
+
+    /// <summary>Short, planner-friendly label for the SKU Max build scope.</summary>
+    private static string SkuMaxScopeLabel(LpmSimSkuMaxScope scope) => scope switch
+    {
+        LpmSimSkuMaxScope.LpmOnly    => "LPM only",
+        LpmSimSkuMaxScope.NonLpmOnly => "Non-LPM only",
+        _                             => "All items",
+    };
+
+    /// <summary>
+    /// Render the FillStrategy column from LPMSIM_Batch into a planner-friendly
+    /// label. The DB value can carry the "(SM)" suffix when the batch was
+    /// generated with IgnoreMerchNeed=true (compact tag fits in varchar(20)).
+    /// We expand "(SM)" → "(SKU Max only)" for display.
+    /// </summary>
+    private static string FillLabel(string? raw)
+    {
+        if (string.IsNullOrEmpty(raw)) return "—";
+        bool skuOnly = raw.EndsWith("(SM)", StringComparison.Ordinal);
+        var name = skuOnly ? raw[..raw.IndexOf("(SM)", StringComparison.Ordinal)].TrimEnd() : raw;
+        var pretty = name switch
+        {
+            "EqualFillRate" => "Equal fill %",
+            "EqualPerStore" => "Ranking + RR",
+            _               => name,
+        };
+        return skuOnly ? $"{pretty} (SKU Max only)" : pretty;
     }
 
     /// <summary>
@@ -2018,6 +3615,12 @@
         return string.Equals(curWh, batchWh, StringComparison.OrdinalIgnoreCase);
     }
 
+    /// <summary>
+    /// Canonicalised label for "current selection" — sorted alphabetically
+    /// so it compares cleanly against the saved batch's
+    /// <see cref="LpmSimReadiness.CurrentBatchWarehouses"/>. Order doesn't
+    /// matter (priority moved to dbo.LPM_WarehousePriority).
+    /// </summary>
     private static string WarehousesLabelStatic(IReadOnlyCollection<string>? selected)
     {
         if (selected is null || selected.Count == 0) return "";
@@ -2058,6 +3661,7 @@
         {
             await Sim.ApproveAsync(bn, CurrentUser.Name);
             Snackbar.Add($"Batch #{bn} approved.", Severity.Success);
+            _busy = false;          // release before CheckAsync (see GenerateAsync note)
             await CheckAsync();
         }
         catch (Exception ex)
@@ -2067,6 +3671,75 @@
                 cfg => { cfg.RequireInteraction = true; cfg.HideTransitionDuration = 0; });
         }
         finally { _busy = false; StateHasChanged(); }
+    }
+
+    /// <summary>
+    /// Click handler for the per-period batch pills. Sets _viewBatchNo and
+    /// re-runs CheckAsync — that surfaces the chosen batch's Sources /
+    /// Seasons / FillStrategy / etc. as the "current" readiness even when
+    /// a newer batch exists for the same period.
+    /// </summary>
+    private async Task ViewBatchAsync(long batchNo)
+    {
+        if (_viewBatchNo == batchNo) return;     // already viewing this one
+        _viewBatchNo = batchNo;
+        await CheckAsync();
+    }
+
+    /// <summary>Drops the override and re-renders the period's actual latest batch.</summary>
+    private async Task BackToLatestBatchAsync()
+    {
+        if (_viewBatchNo is null) return;
+        _viewBatchNo = null;
+        await CheckAsync();
+    }
+
+    /// <summary>
+    /// "View another batch" handler. Looks up the supplied LPMBatchNo on
+    /// LPMSIM_Batch, reads its Country + RunDate, and navigates the page to
+    /// that period — the existing CheckAsync flow then loads the readiness +
+    /// result tabs as if the planner had picked Country/RunDate manually.
+    /// </summary>
+    private async Task LoadByBatchNoAsync()
+    {
+        _loadByBatchError = "";
+        if (_loadByBatchNo is not long bn || bn <= 0)
+        {
+            _loadByBatchError = "Enter a valid Batch # > 0.";
+            return;
+        }
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var batch = await db.LpmSimBatches.AsNoTracking()
+                .Where(b => b.LPMBatchNo == bn)
+                .Select(b => new { b.LPMBatchNo, b.Country, b.RunDate })
+                .FirstOrDefaultAsync();
+            if (batch is null)
+            {
+                _loadByBatchError = $"Batch #{bn} not found.";
+                StateHasChanged();
+                return;
+            }
+            // Navigate to the batch's (Country, RunDate) AND set _viewBatchNo
+            // so CheckAsync surfaces THIS specific batch — even if a newer
+            // batch exists for the same period (e.g., the period has both an
+            // Approved and a later Draft, and the user wants to look at
+            // the older Approved).
+            _country     = batch.Country;
+            _runDate     = batch.RunDate;
+            _viewBatchNo = bn;
+            _loadByBatchNo = null;        // clear the input so the user can try another
+            await LoadStoresForCountryAsync();
+            await CheckAsync();
+            Snackbar.Add($"Loaded batch #{bn} — {batch.Country} {batch.RunDate:dd-MMM-yyyy}",
+                         Severity.Success, cfg => cfg.VisibleStateDuration = 5000);
+        }
+        catch (Exception ex)
+        {
+            _loadByBatchError = $"Lookup failed: {ex.InnerException?.Message ?? ex.Message}";
+        }
+        StateHasChanged();
     }
 
     private async Task DeleteAsync()
@@ -2082,6 +3755,7 @@
         {
             await Sim.DeleteAsync(bn, CurrentUser.Name);
             Snackbar.Add($"Batch #{bn} archived.", Severity.Success);
+            _busy = false;          // release before CheckAsync (see GenerateAsync note)
             await CheckAsync();
         }
         catch (Exception ex)
@@ -2102,22 +3776,60 @@
         var bn = _readiness?.CurrentBatchNo ?? 0;
         await SaveExcelAsync($"LPMSIM_Summary_{bn}.xlsx", "Summary", sheet =>
         {
-            string[] headers = { "Store", "Division", "EOM", "SOH", "Balance", "LPM SIM Qty", "RR Qty", "Use %" };
+            string[] headers = { "Store ID", "Store Name", "Rank", "Division", "EOM", "SOH", "Merch Need (Week)", "LPM SIM Qty", "RR Qty", "Override Qty", "Use %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
                 var r = rows[i]; int row = i + 2;
-                sheet.Cell(row, 1).Value = r.StoreName;
-                sheet.Cell(row, 2).Value = r.DivisionName;
-                sheet.Cell(row, 3).Value = (double?)r.EOM;
-                sheet.Cell(row, 4).Value = r.SOH;
-                sheet.Cell(row, 5).Value = (double?)r.Balance;
-                sheet.Cell(row, 6).Value = r.LpmSimQty;
-                sheet.Cell(row, 7).Value = r.RoundRobinQty;
-                sheet.Cell(row, 8).Value = (double?)SummaryUsability(r);
+                sheet.Cell(row, 1).Value  = r.StoreID;
+                sheet.Cell(row, 2).Value  = r.StoreName;
+                if (r.PriorityRank.HasValue) sheet.Cell(row, 3).Value = (double)r.PriorityRank.Value;
+                sheet.Cell(row, 4).Value  = r.DivisionName;
+                sheet.Cell(row, 5).Value  = (double?)r.EOM;
+                sheet.Cell(row, 6).Value  = r.SOH;
+                sheet.Cell(row, 7).Value  = r.MerchNeedWeek;
+                sheet.Cell(row, 8).Value  = r.LpmSimQty;
+                sheet.Cell(row, 9).Value  = r.RoundRobinQty;
+                sheet.Cell(row, 10).Value = r.OverrideQty;
+                sheet.Cell(row, 11).Value = (double?)SummaryUsability(r);
             }
-            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7 });
-            sheet.Range(2, 8, rows.Count + 1, 8).Style.NumberFormat.Format = "0.0";
+            FormatNumeric(sheet, rows.Count, new[] { 5, 6, 7, 8, 9, 10 });
+            sheet.Range(2, 3,  rows.Count + 1, 3).Style.NumberFormat.Format  = "0.##";
+            sheet.Range(2, 11, rows.Count + 1, 11).Style.NumberFormat.Format = "0.0";
+        });
+    }
+
+    private async Task ExportDivisionSummaryAsync()
+    {
+        var rows = FilteredDivisionSummary.ToList();
+        if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
+        var bn = _readiness?.CurrentBatchNo ?? 0;
+        await SaveExcelAsync($"LPMSIM_DivisionSummary_{bn}.xlsx", "DivisionSummary", sheet =>
+        {
+            string[] headers = {
+                "Div Code", "Division", "EOM", "SOH",
+                "EOM Balance", "Current Fill Rate %",
+                "Merch Need (Week)", "Merch Need (Day)",
+                "SIM Qty", "RR Qty", "Override Qty"
+            };
+            ApplyHeaders(sheet, headers);
+            for (int i = 0; i < rows.Count; i++)
+            {
+                var r = rows[i]; int row = i + 2;
+                sheet.Cell(row, 1).Value  = r.DivCode;
+                sheet.Cell(row, 2).Value  = r.DivisionName;
+                sheet.Cell(row, 3).Value  = (double)r.EOM;
+                sheet.Cell(row, 4).Value  = r.SOH;
+                sheet.Cell(row, 5).Value  = (double)r.EomBalance;
+                sheet.Cell(row, 6).Value  = (double?)r.CurrentFillRate;
+                sheet.Cell(row, 7).Value  = r.MerchNeedWeek;
+                sheet.Cell(row, 8).Value  = r.MerchNeedDay;
+                sheet.Cell(row, 9).Value  = r.SimQty;
+                sheet.Cell(row, 10).Value = r.RrQty;
+                sheet.Cell(row, 11).Value = r.OverrideQty;
+            }
+            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 7, 8, 9, 10, 11 });
+            sheet.Range(2, 6, rows.Count + 1, 6).Style.NumberFormat.Format = "0.0";
         });
     }
 
@@ -2128,7 +3840,7 @@
         var bn = _readiness?.CurrentBatchNo ?? 0;
         await SaveExcelAsync($"LPMSIM_StoreSummary_{bn}.xlsx", "StoreSummary", sheet =>
         {
-            string[] headers = { "Store ID", "Store Name", "EOM", "SOH", "EOM Diff", "SIM Qty", "RR Qty" };
+            string[] headers = { "Store ID", "Store Name", "EOM", "SOH", "Merch Need (Week)", "SIM Qty", "RR Qty", "Override Qty" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
@@ -2137,11 +3849,12 @@
                 sheet.Cell(row, 2).Value = r.StoreName;
                 sheet.Cell(row, 3).Value = (double)r.EOM;
                 sheet.Cell(row, 4).Value = r.SOH;
-                sheet.Cell(row, 5).Value = (double)r.EomDiff;
+                sheet.Cell(row, 5).Value = r.MerchNeedWeek;
                 sheet.Cell(row, 6).Value = r.SimQty;
                 sheet.Cell(row, 7).Value = r.RrQty;
+                sheet.Cell(row, 8).Value = r.OverrideQty;
             }
-            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7 });
+            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7, 8 });
         });
     }
 
@@ -2182,7 +3895,10 @@
         var bn = _readiness?.CurrentBatchNo ?? 0;
         await SaveExcelAsync($"LPMSIM_Items_{bn}.xlsx", "Items", sheet =>
         {
-            string[] headers = { "Store ID", "Store", "Division", "Box", "Item", "Qty", "SKU Max", "SOH", "LPM Qty", "RR Qty", "Phase", "Use %" };
+            // Excel columns mirror the on-screen Item Details table:
+            // BoxNo dropped, Qty renamed BoxQty, new LPM column, Rank column
+            // (per Store × Div), LPM Qty renamed SIM Qty.
+            string[] headers = { "Store ID", "Store", "Division", "Rank", "Item", "BoxQty", "LPM", "SKU Max", "SOH", "SIM Qty", "RR Qty", "Phase", "Use %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
@@ -2190,19 +3906,23 @@
                 sheet.Cell(row, 1).Value  = r.StoreID;
                 sheet.Cell(row, 2).Value  = r.StoreName;
                 sheet.Cell(row, 3).Value  = r.DivisionName;
-                sheet.Cell(row, 4).Value  = r.BoxNo;
+                if (r.PriorityRank.HasValue) sheet.Cell(row, 4).Value = (double)r.PriorityRank.Value;
                 sheet.Cell(row, 5).Value  = r.Itemcode;
                 sheet.Cell(row, 6).Value  = r.BoxItemQty ?? 0;
-                sheet.Cell(row, 7).Value  = r.SKUMax ?? 0;
-                sheet.Cell(row, 8).Value  = r.SOH;
-                sheet.Cell(row, 9).Value  = r.LpmQty;
-                sheet.Cell(row, 10).Value = r.RoundRobinQty;
-                sheet.Cell(row, 11).Value = r.Phase ?? "";
-                sheet.Cell(row, 12).Value = (double?)ItemUsability(r);
+                sheet.Cell(row, 7).Value  = r.BoxKind;
+                sheet.Cell(row, 8).Value  = r.SKUMax ?? 0;
+                sheet.Cell(row, 9).Value  = r.SOH;
+                sheet.Cell(row, 10).Value = r.LpmQty;
+                sheet.Cell(row, 11).Value = r.RoundRobinQty;
+                sheet.Cell(row, 12).Value = r.Phase ?? "";
+                sheet.Cell(row, 13).Value = (double?)ItemUsability(r);
             }
-            FormatNumeric(sheet, rows.Count, new[] { 6, 7, 8, 9, 10 });
-            sheet.Range(2, 12, rows.Count + 1, 12).Style.NumberFormat.Format = "0.0";
+            FormatNumeric(sheet, rows.Count, new[] { 6, 8, 9, 10, 11 });
+            sheet.Range(2, 4,  rows.Count + 1, 4).Style.NumberFormat.Format  = "0.##";
+            sheet.Range(2, 13, rows.Count + 1, 13).Style.NumberFormat.Format = "0.0";
         });
+        Snackbar.Add($"Exported {rows.Count:N0} item-detail rows to LPMSIM_Items_{bn}.xlsx",
+                     Severity.Success, cfg => cfg.VisibleStateDuration = 4000);
     }
 
     private async Task ExportTraceAsync()
@@ -2296,5 +4016,137 @@
         {
             Snackbar.Add($"Excel export failed: {ex.Message}", Severity.Error);
         }
+    }
+
+    // ── SKU Max Detail tab handlers ─────────────────────────────────────────
+    private Task<IEnumerable<string>> SearchDivisionsForSkuMax(string? value, CancellationToken ct)
+    {
+        // Pull divisions for which any allocation exists in this batch, formatted "Womenswear (419)".
+        var all = _summary
+            .Select(r => $"{r.DivisionName}  ({r.DivCode})")
+            .Distinct()
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<string>>(all.Take(50));
+        return Task.FromResult<IEnumerable<string>>(all
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase))
+            .Take(50));
+    }
+
+    private void OnSkuMaxDivisionChanged(string? v)
+    {
+        _skuFilterDivisionText = v ?? "";
+        _skuFilterDiv = 0;
+        if (!string.IsNullOrWhiteSpace(v))
+        {
+            var s = v.Trim();
+            var open  = s.LastIndexOf('(');
+            var close = s.LastIndexOf(')');
+            if (open >= 0 && close > open && close == s.Length - 1
+                && int.TryParse(s.Substring(open + 1, close - open - 1).Trim(), out var div))
+            {
+                _skuFilterDiv = div;
+            }
+        }
+        StateHasChanged();
+    }
+
+    private Task<IEnumerable<string>> SearchStoresForSkuMax(string? value, CancellationToken ct)
+    {
+        var all = _allStores
+            .Select(p => $"{p.Item2}  ({p.Item1})")
+            .Distinct()
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<string>>(all.Take(50));
+        return Task.FromResult<IEnumerable<string>>(all
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase))
+            .Take(50));
+    }
+
+    private void OnSkuMaxStoreChanged(string? v)
+    {
+        _skuFilterStoreText = v ?? "";
+        _skuFilterStore     = "";
+        if (!string.IsNullOrWhiteSpace(v))
+        {
+            var s = v.Trim();
+            var open  = s.LastIndexOf('(');
+            var close = s.LastIndexOf(')');
+            _skuFilterStore = (open >= 0 && close > open && close == s.Length - 1)
+                ? s.Substring(open + 1, close - open - 1).Trim()
+                : s;
+        }
+        StateHasChanged();
+    }
+
+    private async Task LoadSkuMaxDetailAsync()
+    {
+        _skuMaxFilterError = null;
+        if (_skuFilterDiv <= 0
+            && string.IsNullOrWhiteSpace(_skuFilterStore)
+            && string.IsNullOrWhiteSpace(_skuFilterItem))
+        {
+            _skuMaxFilterError = "Pick at least one of Division, Store, or Item code before applying.";
+            _skuMaxRows.Clear();
+            _skuMaxLoaded = true;
+            StateHasChanged();
+            return;
+        }
+        if (_runDate is null || string.IsNullOrEmpty(_country))
+        {
+            _skuMaxFilterError = "Country / Run date are required.";
+            return;
+        }
+
+        _loadingSkuMax = true; StateHasChanged();
+        try
+        {
+            var d = _runDate.Value.Date;
+            _skuMaxRows = await Reports.GetItemSkuMaxAsync(
+                _country, d.Year, d.Month,
+                _skuFilterDiv > 0 ? _skuFilterDiv : (int?)null,
+                string.IsNullOrWhiteSpace(_skuFilterStore) ? null : _skuFilterStore,
+                string.IsNullOrWhiteSpace(_skuFilterItem)  ? null : _skuFilterItem,
+                top: 5000);
+            _skuMaxLoaded = true;
+        }
+        catch (Exception ex)
+        {
+            _skuMaxFilterError = $"Load failed: {ex.Message}";
+        }
+        finally
+        {
+            _loadingSkuMax = false; StateHasChanged();
+        }
+    }
+
+    private async Task ExportSkuMaxAsync()
+    {
+        if (_skuMaxRows.Count == 0) return;
+        var fileName = $"SKU_Max_Detail_{_country}_{_runDate?.Year:0000}-{_runDate?.Month:00}.xlsx";
+        await SaveExcelAsync(fileName, "SKU Max Detail", ws =>
+        {
+            string[] headers = { "Store ID", "Store Name", "Division", "Item Code", "Season", "WH Stock", "Vol Group", "SKU Max" };
+            for (int c = 0; c < headers.Length; c++) ws.Cell(1, c + 1).Value = headers[c];
+            ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+            ws.Range(1, 1, 1, headers.Length).Style.Fill.BackgroundColor = XLColor.LightGray;
+
+            int row = 2;
+            foreach (var r in _skuMaxRows)
+            {
+                ws.Cell(row, 1).Value = r.StoreID;
+                ws.Cell(row, 2).Value = r.StoreName;
+                ws.Cell(row, 3).Value = $"{r.DivisionName} ({r.DivCode})";
+                ws.Cell(row, 4).Value = r.ItemCode;
+                ws.Cell(row, 5).Value = r.Season == "W" ? "Winter" : "Summer";
+                ws.Cell(row, 6).Value = r.WHBoxQty;
+                ws.Cell(row, 7).Value = r.VolumeGroup ?? "";
+                ws.Cell(row, 8).Value = r.SKUMax;
+                row++;
+            }
+            ws.Range(2, 6, row - 1, 6).Style.NumberFormat.Format = "#,##0";
+            ws.Range(2, 8, row - 1, 8).Style.NumberFormat.Format = "#,##0";
+        });
     }
 }

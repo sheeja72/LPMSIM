@@ -18,6 +18,13 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UserSecretsId>d895eeb3-6c53-45d7-99d2-1c4f7ead54ee</UserSecretsId>
+    <!-- App version surfaced in the sidebar footer. Bump on each release;
+         AssemblyInformationalVersion is what Assembly.GetCustomAttribute
+         reads at runtime. -->
+    <Version>1.7.0</Version>
+    <AssemblyVersion>1.7.0.0</AssemblyVersion>
+    <FileVersion>1.7.0.0</FileVersion>
+    <InformationalVersion>1.7.0 (Phase G — SQL-side SKU Max build)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

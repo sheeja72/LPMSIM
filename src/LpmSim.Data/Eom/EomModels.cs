@@ -42,4 +42,21 @@ public class EomRow
     public int WHStockSummer { get; set; }
     public int WHStockWinter { get; set; }
     public int SKUMax { get; set; }
+
+    /// <summary>Store-level division stock-on-hand (sum across items).</summary>
+    public int SOH { get; set; }
+
+    /// <summary>Open-to-receive for the month: TargetEOM − SOH + TargetSales.</summary>
+    public int MerchNeedMonth { get; set; }
+
+    /// <summary>Weekly view of <see cref="MerchNeedMonth"/> — divided by 4.</summary>
+    public int MerchNeedWeek { get; set; }
+
+    /// <summary>Daily slice — <see cref="MerchNeedWeek"/> divided by a fixed 6.</summary>
+    public int MerchNeedDay { get; set; }
+
+    /// <summary>Per-Division total qty of LPM-tagged eligible boxes (no
+    /// ShopEligible filter). Same value repeats across every store row of
+    /// the same division.</summary>
+    public int LPMBoxQty { get; set; }
 }

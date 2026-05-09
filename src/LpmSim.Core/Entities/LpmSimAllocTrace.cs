@@ -31,5 +31,9 @@ public class LpmSimAllocTrace
     /// <summary>P1 / P1_RR / P2 / P2_RR — which phase made the decision.</summary>
     public string Phase { get; set; } = "P1";
 
+    /// <summary>True when this trace row was an override allocation
+    /// (Phase 1b/2b RR with usability ≥ Box %, bypassing SKU Max + Merch Need caps).</summary>
+    public bool IsOverride { get; set; }
+
     public DateTime CreateTS { get; set; }
 }

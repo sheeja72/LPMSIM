@@ -1,0 +1,67 @@
+@using System.Linq
+
+<MudDialog>
+    <DialogContent>
+        <MudText Typo="Typo.body2" Class="mb-3">
+            Pick a warehouse from <code>racks.dbo.whboxitems</code> for <strong>@Country</strong>
+            and assign it a priority. Lower number = higher priority.
+        </MudText>
+        <MudGrid Spacing="2">
+            <MudItem xs="12" md="8">
+                <MudSelect T="string" Label="Warehouse" Value="_warehouse"
+                           ValueChanged="(string v) => _warehouse = v ?? string.Empty"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                           Placeholder="Pick a warehouse">
+                    @foreach (var w in Available)
+                    {
+                        <MudSelectItem T="string" Value="@w">@w</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="4">
+                <MudNumericField T="int" Label="Priority" Value="_priority"
+                                 ValueChanged="(int v) => _priority = v"
+                                 Min="1" Max="9999" Step="1"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+            </MudItem>
+        </MudGrid>
+        @if (!string.IsNullOrEmpty(_warehouse))
+        {
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                <strong>@_warehouse</strong> will be added at priority <strong>@_priority</strong> for
+                <strong>@Country</strong>.
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                   Disabled="@string.IsNullOrEmpty(_warehouse)"
+                   OnClick="Save">
+            Add
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private MudDialogInstance Dialog { get; set; } = default!;
+    [Parameter] public string Country { get; set; } = "";
+    [Parameter] public List<string> Available { get; set; } = new();
+    [Parameter] public int DefaultPriority { get; set; } = 1;
+
+    private string _warehouse = "";
+    private int _priority;
+
+    protected override void OnInitialized()
+    {
+        _priority = DefaultPriority < 1 ? 1 : DefaultPriority;
+    }
+
+    private void Save()
+    {
+        if (string.IsNullOrEmpty(_warehouse)) return;
+        Dialog.Close(DialogResult.Ok((Warehouse: _warehouse, Priority: _priority)));
+    }
+
+    private void Cancel() => Dialog.Cancel();
+}

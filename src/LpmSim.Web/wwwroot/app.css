@@ -43,6 +43,10 @@ html, body {
     background-color: var(--lpm-drawer-bg) !important;
     color: var(--lpm-drawer-text) !important;
     border-right: none !important;
+    /* Stack brand → nav → footer vertically; flex lets the footer pin to
+       the bottom via margin-top:auto on .lpm-drawer-footer */
+    display: flex !important;
+    flex-direction: column !important;
 }
 
 /* --------------- Sidebar brand --------------- */
@@ -57,6 +61,96 @@ html, body {
     font-weight: 700;
     font-size: 1.05rem;
     letter-spacing: 0.01em;
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+}
+
+.lpm-brand-version {
+    font-size: 0.65rem;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    color: rgba(226, 232, 240, 0.7);
+    background: rgba(255, 255, 255, 0.08);
+    padding: 0.1rem 0.4rem;
+    border-radius: 4px;
+    cursor: help;
+    user-select: none;
+}
+
+/* Warehouse Box Details — compact filter strip.
+   We rely on MudBlazor's built-in Margin="Margin.Dense" for the input
+   height/padding (consistent across MudAutocomplete, MudSelect,
+   MudTextField). Only THREE small tweaks here:
+     1. Slightly smaller label font (so 12+ filters fit on two rows).
+     2. Tighter vertical gap between filter rows.
+     3. Compact checkbox label.
+   The active-filter highlight (yellow tint) lives in the
+   .lpm-filter-active rules below this block. */
+.lpm-filter-bar .mud-input-label,
+.lpm-filter-bar .mud-input-label-shrink {
+    font-size: 0.78rem !important;
+}
+.lpm-filter-bar .mud-input-control input,
+.lpm-filter-bar .mud-input-control .mud-select-input {
+    font-size: 0.85rem !important;
+}
+.lpm-filter-bar .mud-grid > .mud-grid-item {
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+}
+.lpm-filter-bar .mud-checkbox .mud-typography {
+    font-size: 0.82rem !important;
+}
+
+/* Active-filter highlight — applied conditionally on each MudAutocomplete
+   /MudSelect/MudTextField when its value is non-default. Wraps the whole
+   control with a yellow tint so the planner immediately sees what's
+   filtered on. */
+.lpm-filter-active .mud-input-control {
+    background-color: #fef9c3 !important;
+    border-radius: 4px;
+}
+.lpm-filter-active .mud-input-label {
+    color: #b45309 !important;
+    font-weight: 700 !important;
+}
+.lpm-filter-active .mud-input-outlined-border {
+    border-color: #f59e0b !important;
+}
+
+/* In-header per-column totals — small bold subtitle under the column
+   name in each MudTh. Used by Warehouse Box Details so the planner
+   sees totals inline with the column headers (no extra "totals row"
+   needed and stays aligned even when columns auto-size).
+   Colour is white because the table headers in this report use the
+   app's dark-header MudTable styling, where a dark-blue/slate subtitle
+   was invisible against the black background. */
+.lpm-th-total {
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 700;
+    color: #ffffff !important;
+    margin-top: 2px;
+    letter-spacing: 0.01em;
+    line-height: 1.1;
+}
+.lpm-th-total.is-count {
+    color: #e2e8f0 !important;       /* slightly muted white for counts */
+    font-weight: 600;
+}
+
+/* Persistent footer at the bottom of the navigation drawer — small,
+   muted, hover-tooltip reveals full informational version (Phase tag etc.) */
+.lpm-drawer-footer {
+    margin-top: auto;
+    padding: 0.6rem 1.25rem;
+    font-size: 0.7rem;
+    letter-spacing: 0.02em;
+    color: rgba(203, 213, 225, 0.5);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    cursor: help;
+    user-select: none;
 }
 
 .lpm-brand-user {
@@ -557,14 +651,57 @@ html, body {
 }
 .lpm-eom-preview .mud-table-head th {
     white-space: normal !important;
-    word-break: break-word !important;
-    overflow-wrap: anywhere !important;
+    /* Wrap at spaces / explicit <br /> only — words must NEVER break in
+       the middle. `overflow-wrap: break-word` still let "Sold" / "Turns"
+       shred to "Sol/d" / "Tur/ns" when their 5%-wide column was a few
+       pixels too narrow. `overflow-wrap: normal` keeps words intact even
+       at the cost of a tiny visual bleed past the cell boundary. */
+    word-break: normal !important;
+    overflow-wrap: normal !important;
+    hyphens: none !important;
     line-height: 1.25 !important;
-    vertical-align: middle !important;
-    padding: 10px 4px !important;
+    vertical-align: top !important;
+    padding: 4px 3px 6px 3px !important;
     font-size: 0.72rem !important;
-    letter-spacing: 0.03em !important;
+    /* Tight letter-spacing — every pixel helps narrow columns fit short
+       words like "Sold" / "Turns" / "Rank" without wrapping awkwardly. */
+    letter-spacing: 0 !important;
+    /* Sized for 1 total band + up to 3 lines of wrapped header text. */
+    min-height: 90px !important;
+    height: 90px !important;
+}
+/* Cleanest separation: fixed-height block at the top of the th, with
+   margin-bottom that the sort-label cannot encroach on. The combination
+   of explicit height + display:block + bottom margin guarantees the
+   total occupies its own visual band — no overlap regardless of how
+   many lines the header text wraps to. */
+.lpm-eom-preview .mud-table-head th .th-total {
+    display: block !important;
+    box-sizing: border-box !important;
+    width: 100% !important;
+    height: 18px !important;
+    line-height: 18px !important;
+    margin: 0 0 8px 0 !important;
+    padding: 0 !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
+}
+/* Force the sort label to render BELOW the .th-total, anchored to the
+   top of the remaining space. inline-flex + align-items: flex-start
+   prevents MudTableSortLabel's default vertical-centering from
+   floating wrapped text up into the total band. */
+.lpm-eom-preview .mud-table-head th .mud-table-sort-label,
+.lpm-eom-preview .mud-table-head th .mud-button-root {
+    display: inline-flex !important;
+    align-items: flex-start !important;
     height: auto !important;
+    min-height: 0 !important;
+    vertical-align: top !important;
+}
+.lpm-eom-preview .mud-table-head th .mud-button-label {
+    align-self: flex-start !important;
+    line-height: 1.15 !important;
 }
 /* MudTableSortLabel wraps text in a flex container — let it wrap too. */
 .lpm-eom-preview .mud-table-head th .mud-table-sort-label,
