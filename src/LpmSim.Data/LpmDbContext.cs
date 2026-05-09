@@ -29,6 +29,11 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
     public DbSet<LpmWHStock> LpmWHStocks => Set<LpmWHStock>();
     public DbSet<LpmSKUMaxRule> LpmSKUMaxRules => Set<LpmSKUMaxRule>();
     public DbSet<LpmStoreDivAccess> LpmStoreDivAccesses => Set<LpmStoreDivAccess>();
+    public DbSet<LpmWarehousePriority> LpmWarehousePriorities => Set<LpmWarehousePriority>();
+    public DbSet<LpmSimItemSkuMax> LpmSimItemSkuMaxes => Set<LpmSimItemSkuMax>();
+    public DbSet<LpmSimProductionSchedule> LpmSimProductionSchedules => Set<LpmSimProductionSchedule>();
+    public DbSet<LpmSimAdmRun>     LpmSimAdmRuns      => Set<LpmSimAdmRun>();
+    public DbSet<LpmSimAdmBoxAlloc> LpmSimAdmBoxAllocs => Set<LpmSimAdmBoxAlloc>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -194,12 +199,36 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.UpdatedTS).HasColumnType("datetime2(0)");
         });
 
+        mb.Entity<LpmSimItemSkuMax>(e =>
+        {
+            e.ToTable("LPM_SimItemSkuMax");
+            e.HasKey(x => new { x.Country, x.Year1, x.Month1, x.StoreID, x.ItemCode, x.Season });
+            e.Property(x => x.Country).HasMaxLength(20);
+            e.Property(x => x.StoreID).HasMaxLength(25);
+            e.Property(x => x.ItemCode).HasMaxLength(30);
+            e.Property(x => x.Season).HasMaxLength(1).IsFixedLength();
+            e.Property(x => x.VolumeGroup).HasMaxLength(20);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+        });
+
         mb.Entity<LpmStoreDivAccess>(e =>
         {
             e.ToTable("LPM_StoreDivAccess");
             e.HasKey(x => new { x.Country, x.StoreID, x.DivCode });
             e.Property(x => x.Country).HasMaxLength(20);
             e.Property(x => x.StoreID).HasMaxLength(25);
+            e.Property(x => x.CreatedBy).HasMaxLength(100);
+            e.Property(x => x.UpdatedBy).HasMaxLength(100);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.Property(x => x.UpdatedTS).HasColumnType("datetime2(0)");
+        });
+
+        mb.Entity<LpmWarehousePriority>(e =>
+        {
+            e.ToTable("LPM_WarehousePriority");
+            e.HasKey(x => new { x.Country, x.Warehouse });
+            e.Property(x => x.Country).HasMaxLength(20);
+            e.Property(x => x.Warehouse).HasMaxLength(50);
             e.Property(x => x.CreatedBy).HasMaxLength(100);
             e.Property(x => x.UpdatedBy).HasMaxLength(100);
             e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
@@ -238,7 +267,7 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.Sources).HasMaxLength(20);
             e.Property(x => x.Seasons).HasMaxLength(20);
             e.Property(x => x.Warehouses).HasMaxLength(200);
-            e.Property(x => x.FillStrategy).HasMaxLength(20);
+            e.Property(x => x.FillStrategy).HasMaxLength(40);
         });
 
         mb.Entity<LpmSimOutput>(e =>
@@ -308,6 +337,57 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.LPMDt).HasColumnType("date");
             e.Property(x => x.UsabilityPct).HasColumnType("decimal(6,1)");
             e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+        });
+
+        mb.Entity<LpmSimProductionSchedule>(e =>
+        {
+            e.ToTable("LPMSIM_ProductionSchedule");
+            e.HasKey(x => x.LPMBatchNo);
+            e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("Draft");
+            e.Property(x => x.MinUsabilityPct).HasPrecision(5, 2);
+            e.Property(x => x.CreatedBy).HasMaxLength(100);
+            e.Property(x => x.ApprovedBy).HasMaxLength(100);
+            e.Property(x => x.PriorityWarehouses).HasMaxLength(500);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.Property(x => x.ApprovedTS).HasColumnType("datetime2(0)");
+            e.HasOne<LpmSimBatch>()
+                .WithOne()
+                .HasForeignKey<LpmSimProductionSchedule>(x => x.LPMBatchNo)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        mb.Entity<LpmSimAdmRun>(e =>
+        {
+            e.ToTable("LPMSIM_AdmRun");
+            e.HasKey(x => x.AdmRunNo);
+            e.Property(x => x.Country).HasMaxLength(20);
+            e.Property(x => x.Status).HasMaxLength(20).HasDefaultValue("Draft");
+            e.Property(x => x.RunDate).HasColumnType("date");
+            e.Property(x => x.Week1TargetPct).HasPrecision(5, 2);
+            e.Property(x => x.BrandCapPct).HasPrecision(5, 2);
+            e.Property(x => x.CreatedBy).HasMaxLength(80);
+            e.Property(x => x.ApprovedBy).HasMaxLength(80);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.Property(x => x.ApprovedTS).HasColumnType("datetime2(0)");
+        });
+
+        mb.Entity<LpmSimAdmBoxAlloc>(e =>
+        {
+            e.ToTable("LPMSIM_AdmBoxAlloc");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.BoxNo).HasMaxLength(50);
+            e.Property(x => x.Warehouse).HasMaxLength(40);
+            e.Property(x => x.LPMBrand).HasMaxLength(80);
+            e.Property(x => x.Division).HasMaxLength(80);
+            e.Property(x => x.LPMDt).HasColumnType("date");
+            e.Property(x => x.DivFillRatePct).HasPrecision(5, 2);
+            e.Property(x => x.DivFillGapPct).HasPrecision(5, 2);
+            e.Property(x => x.Reason).HasMaxLength(40);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.HasOne<LpmSimAdmRun>()
+                .WithMany()
+                .HasForeignKey(x => x.AdmRunNo)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

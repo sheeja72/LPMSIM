@@ -2,11 +2,14 @@
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditor)]
 @using LpmSim.Data.Eom
+@using ClosedXML.Excel
+@using System.IO
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject EomCalculator Eom
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IJSRuntime JS
 
 <PageTitle>EOM Generate</PageTitle>
 
@@ -159,30 +162,25 @@
 
                     <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Tgt EOM</strong></td>
                         <td style="padding:6px 10px;border:1px solid #e2e8f0;">
-                            <strong>Per-store end-of-month target stock</strong>, computed in two steps so the
-                            Division total reconciles back to the plan:
-                            <ol style="margin:.3rem 0 .3rem 1.2rem;padding-left:0;">
-                                <li>
-                                    <code>Initial[store] = (Tgt Turn × Tgt Sales) / weeksInMonth</code>
-                                    <span style="color:#64748b;"> — a weeks-of-cover approximation per store.</span>
-                                </li>
-                                <li>
-                                    <code>Tgt EOM[store] = (Initial[store] / Σ Initial in Division) × LPM_Planned.PlannedEOM</code>
-                                    <span style="color:#64748b;"> — proportional re-distribution so
-                                        <code>Σ Tgt EOM(Division) = PlannedEOM(Division)</code>.</span>
-                                </li>
-                            </ol>
-                            <code>weeksInMonth = max(1, DaysInMonth / 7)</code> (e.g. 4 for a 31-day month).
+                            <strong>Per-store end-of-month target stock</strong>, apportioned across the stores
+                            in the Division by their share of weighted-average sales:
+                            <br/>
+                            <code>Tgt EOM[store] = (Wt Avg Sold[store] ÷ Σ Wt Avg Sold in Division) × LPM_Planned.PlannedEOM</code>
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                Same shape as Tgt Sales — just apportions <code>PlannedEOM</code> instead of
+                                <code>PlannedSalesQty</code>. So a store's Tgt EOM <em>share</em> equals its
+                                Tgt Sales <em>share</em> within the Division.
+                                <br/>
+                                <strong>Reconciliation:</strong> <code>Σ Tgt EOM(Division) = PlannedEOM(Division)</code>.
+                                <br/>
+                                <strong>Note on Grade markup:</strong> markup affects Tgt Turn (premium grades
+                                turn slower) but is no longer fed into Tgt EOM. The EOM share is purely sales-driven.
+                            </span>
                             <br/>
                             <strong>SIM use:</strong> this is the hard cap SIM Generate honours when filling boxes —
                             the per-store EOM headroom is <code>TargetEOM − DivSOH</code>; SIM stops adding to a
                             (Store, Div) the moment cumulative allocation reaches that.
-                            <br/>
-                            <span style="color:#64748b;font-size:.8rem;">
-                                Why <em>not</em> simply <code>Tgt Sales × Tgt Turn</code>: that yields a per-store
-                                stock estimate but doesn't add up to the planned <code>PlannedEOM</code> at the
-                                Division level. The two-step proportional split above guarantees reconciliation.
-                            </span>
                         </td></tr>
 
                     <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Vol Grp</strong></td>
@@ -278,16 +276,16 @@
                 View Saved
             </MudButton>
             <MudButton Variant="Variant.Filled" Color="Color.Secondary" DropShadow="false"
-                       StartIcon="@Icons.Material.Filled.Visibility"
-                       Disabled="@(_readiness?.IsReady != true || _running)"
-                       OnClick="PreviewAsync">
-                Preview
-            </MudButton>
-            <MudButton Variant="Variant.Filled" Color="Color.Primary" DropShadow="false"
                        StartIcon="@Icons.Material.Filled.PlayArrow"
                        Disabled="@(_readiness?.IsReady != true || _running)"
                        OnClick="GenerateAsync">
                 Generate
+            </MudButton>
+            <MudButton Variant="Variant.Filled" Color="Color.Primary" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.CheckCircle"
+                       Disabled="@(_readiness?.IsReady != true || _running)"
+                       OnClick="ApproveAsync">
+                Approve
             </MudButton>
         </MudItem>
     </MudGrid>
@@ -300,39 +298,49 @@
 
 @if (_readiness is not null)
 {
-    <div class="lpm-section-title mb-2">Input readiness</div>
-    <MudGrid Spacing="2" Class="mb-3">
-        @foreach (var item in _readiness.All)
-        {
-            <MudItem xs="12" sm="6" md="4" lg="3">
-                <div class="lpm-metric-card @(item.Ok ? "lpm-accent-green" : "lpm-accent-rose")">
-                    <div class="d-flex align-center justify-space-between">
-                        <div class="lpm-metric-label">@item.Label</div>
-                        @if (item.Ok)
-                        {
-                            <span class="lpm-status lpm-status-ok">
-                                <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Size="Size.Small" /> Ready
-                            </span>
-                        }
-                        else
-                        {
-                            <span class="lpm-status lpm-status-err">
-                                <MudIcon Icon="@Icons.Material.Filled.ErrorOutline" Size="Size.Small" /> Blocked
-                            </span>
-                        }
-                    </div>
-                    <div class="lpm-metric-sub" style="margin-top:0.5rem;">@item.Detail</div>
-                </div>
-            </MudItem>
-        }
-    </MudGrid>
+    var blockedCount = _readiness.All.Count(x => !x.Ok);
+    var headerLabel  = blockedCount == 0
+        ? "Input readiness — all checks passed"
+        : $"Input readiness — {blockedCount} blocker(s) — click to expand";
 
-    @if (!_readiness.IsReady)
-    {
-        <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mb-3">
-            Resolve the <strong>Blocked</strong> items above before previewing or generating.
-        </MudAlert>
-    }
+    <MudExpansionPanels Elevation="0" Class="mb-3">
+        <MudExpansionPanel Text="@headerLabel"
+                           IsInitiallyExpanded="@(blockedCount > 0)"
+                           Icon="@(blockedCount == 0 ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.WarningAmber)">
+            <MudGrid Spacing="2">
+                @foreach (var item in _readiness.All)
+                {
+                    <MudItem xs="12" sm="6" md="4" lg="3">
+                        <div class="lpm-metric-card @(item.Ok ? "lpm-accent-green" : "lpm-accent-rose")">
+                            <div class="d-flex align-center justify-space-between">
+                                <div class="lpm-metric-label">@item.Label</div>
+                                @if (item.Ok)
+                                {
+                                    <span class="lpm-status lpm-status-ok">
+                                        <MudIcon Icon="@Icons.Material.Filled.CheckCircle" Size="Size.Small" /> Ready
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="lpm-status lpm-status-err">
+                                        <MudIcon Icon="@Icons.Material.Filled.ErrorOutline" Size="Size.Small" /> Blocked
+                                    </span>
+                                }
+                            </div>
+                            <div class="lpm-metric-sub" style="margin-top:0.5rem;">@item.Detail</div>
+                        </div>
+                    </MudItem>
+                }
+            </MudGrid>
+
+            @if (!_readiness.IsReady)
+            {
+                <MudAlert Severity="Severity.Warning" Variant="Variant.Outlined" Class="mt-3">
+                    Resolve the <strong>Blocked</strong> items above before Generate / Approve.
+                </MudAlert>
+            }
+        </MudExpansionPanel>
+    </MudExpansionPanels>
 }
 
 @if (_preview.Count > 0)
@@ -373,18 +381,23 @@
         </div></MudItem>
     </MudGrid>
 
+    <MudTabs Elevation="0" Rounded="true" KeepPanelsAlive="true" Class="mb-3">
+
+    @* ─── Tab 1: Store × Division (the existing detailed grid) ─────────────── *@
+    <MudTabPanel Text="Store × Division" Icon="@Icons.Material.Filled.GridOn">
     <div class="lpm-section">
-        <MudGrid Spacing="2" Class="mb-2">
+        <MudGrid Spacing="2" Class="mb-2 align-center">
             <MudItem xs="12" md="3">
-                <MudSelect T="int" Label="Filter Division" @bind-Value="_filterDiv" Variant="Variant.Outlined">
-                    <MudSelectItem T="int" Value="0">All Divisions</MudSelectItem>
-                    @foreach (var d in _preview.Select(r => (r.DivCode, r.DivisionName)).Distinct().OrderBy(x => x.DivCode))
-                    {
-                        <MudSelectItem T="int" Value="d.DivCode">@d.DivisionName</MudSelectItem>
-                    }
-                </MudSelect>
+                @* Searchable Division filter — type to narrow long lists. *@
+                <MudAutocomplete T="string" Label="Filter Division"
+                                 Value="_filterDivisionText"
+                                 ValueChanged="OnDivisionFilterChanged"
+                                 SearchFunc="SearchDivisions"
+                                 Variant="Variant.Outlined"
+                                 CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                                 Placeholder="All divisions" />
             </MudItem>
-            <MudItem xs="12" md="4">
+            <MudItem xs="12" md="3">
                 <MudAutocomplete T="string" Label="Filter Store"
                                  Value="_filterStore"
                                  ValueChanged="OnStoreFilterChanged"
@@ -393,6 +406,40 @@
                                  CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                                  Placeholder="All stores" />
             </MudItem>
+            <MudItem xs="6" md="2">
+                <MudSelect T="string" Label="Filter Grade" Value="_filterGrade"
+                           ValueChanged="(string v) => { _filterGrade = v ?? string.Empty; StateHasChanged(); }"
+                           Variant="Variant.Outlined" Clearable="true">
+                    <MudSelectItem T="string" Value="@(string.Empty)">All grades</MudSelectItem>
+                    @foreach (var g in _preview.Select(r => r.Grade ?? string.Empty)
+                                                .Where(g => !string.IsNullOrEmpty(g))
+                                                .Distinct().OrderBy(g => g))
+                    {
+                        <MudSelectItem T="string" Value="@g">@g</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="6" md="2">
+                <MudSelect T="string" Label="Filter Vol Grp" Value="_filterVolGrp"
+                           ValueChanged="(string v) => { _filterVolGrp = v ?? string.Empty; StateHasChanged(); }"
+                           Variant="Variant.Outlined" Clearable="true">
+                    <MudSelectItem T="string" Value="@(string.Empty)">All groups</MudSelectItem>
+                    @foreach (var g in _preview.Select(r => r.VolumeGroup ?? string.Empty)
+                                                .Where(g => !string.IsNullOrEmpty(g))
+                                                .Distinct().OrderBy(g => g))
+                    {
+                        <MudSelectItem T="string" Value="@g">@g</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="2" Class="d-flex justify-end">
+                <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Primary" DropShadow="false"
+                           StartIcon="@Icons.Material.Filled.Download"
+                           Disabled="@(_preview.Count == 0)"
+                           OnClick="ExportExcelAsync">
+                    Excel
+                </MudButton>
+            </MudItem>
         </MudGrid>
 
         @{
@@ -400,10 +447,18 @@
             // (Wt Avg Turn, Pri Rank, Tgt Turn) skip the totals row — summing
             // averages doesn't mean anything.
             var fp           = FilteredPreview.ToList();
-            var totalSold    = fp.Sum(r => (long)r.WtAvgSoldQty);
-            var totalTgtSales= fp.Sum(r => (long)r.TargetSales);
-            var totalTgtEom  = fp.Sum(r => (long)r.TargetEOM);
-            var totalSkuMax  = fp.Sum(r => (long)r.SKUMax);
+            // Sum the decimal values FIRST then round once at the end.
+            // Casting per-row to long loses fractional parts (up to 0.5 each)
+            // — with N rows that diverges from Excel's true decimal sum by
+            // up to N/2 units. Rounding the total once gives a single-unit
+            // ceiling difference vs. Excel.
+            var totalSold    = (long)Math.Round(fp.Sum(r => r.WtAvgSoldQty), MidpointRounding.AwayFromZero);
+            var totalTgtSales= (long)Math.Round(fp.Sum(r => r.TargetSales),  MidpointRounding.AwayFromZero);
+            var totalTgtEom  = (long)Math.Round(fp.Sum(r => r.TargetEOM),    MidpointRounding.AwayFromZero);
+            var totalSoh     = fp.Sum(r => (long)r.SOH);                      // SOH is int — no precision loss
+            var totalMerchM  = fp.Sum(r => (long)r.MerchNeedMonth);           // MerchNeed* are int
+            var totalMerchW  = fp.Sum(r => (long)r.MerchNeedWeek);
+            var totalMerchD  = fp.Sum(r => (long)r.MerchNeedDay);
             var rowCount     = fp.Count;
 
             // WH Summer / Winter are per-DIVISION values repeated on every
@@ -422,53 +477,62 @@
         <MudTable T="EomRow" Items="fp" Hover="true" Striped="true" Dense="true"
                   FixedHeader="true" Height="65vh" AllowUnsorted="false"
                   Class="lpm-eom-preview">
-            @* Each header label carries a `title` attribute → hovering it
-               shows the formula that produces the column. The HTML entity
-               `&#10;` renders as a line break in the native browser tooltip,
-               so multi-step formulas split cleanly. The long-form
-               explanation lives in the expansion panel above. *@
+            @* Hover tooltips only on the columns the planning team specified.
+               Store / Division / Sold Qty Rank / Turns Rank have no tooltip
+               by design — they're self-explanatory. *@
             <HeaderContent>
-                <MudTh Style="width:11%;"><div class="th-total">@rowCount.ToString("N0") rows</div><span title="Source: db.DataSettings&#10;Filter: ActiveStore = 'Y' AND Country = @@country">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></span></MudTh>
+                <MudTh Style="width:11%;"><div class="th-total">@rowCount.ToString("N0") rows</div>
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:9%;"><div class="th-total">&nbsp;</div><span title="Source: dbo.Division&#10;One row per (Store × Division) pair">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></span></MudTh>
+                <MudTh Style="width:9%;"><div class="th-total">&nbsp;</div>
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">@totalSold.ToString("N0")</div><span title="Wt Avg Sold Qty[store, div]  (per-period monthly average)&#10;= SUM( SoldQty(p) × WeightPct(p) )  /  N&#10;where N = COUNT of periods p in LPM_MonthlyWeight with WeightPct > 0.&#10;Example: 3 periods, weights 0.2/0.3/0.5, qty 200/300/500&#10;→ (40 + 90 + 250) / 3 = 126.67">
+                <MudTh Style="width:6%;"><div class="th-total">@totalSold.ToString("N0")</div><span title="WtAvgSold = Avg(Sum(Monthly Actual SoldQty after applying Weights))">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WtAvgSoldQty">Wt<br />Avg<br />Sold</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="Wt Avg Turn[store, div]  (per-period monthly average)&#10;= SUM( TurnsQty(p) × WeightPct(p) )  /  N&#10;where N = COUNT of periods p in LPM_MonthlyWeight with WeightPct > 0.">
+                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="WtAvgTurn = Avg(Sum(Monthly Actual Turns after applying Weights))">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WtAvgTurn">Wt<br />Avg<br />Turn</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div><span title="SoldQtyRank = competition rank of Wt Avg Sold DESC within the Division&#10;(highest seller = 1, ties share)&#10;If Wt Avg Sold = 0 → rank = 0 (unranked)">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.SoldQtyRank">Sold<br />Qty<br />Rank</MudTableSortLabel></span></MudTh>
+                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div>
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.SoldQtyRank">Sold<br />Qty<br />Rank</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div><span title="TurnsRank = competition rank of Wt Avg Turn ASC within the Division&#10;(lowest turn = 1, ties share)&#10;If Wt Avg Turn = 0 → rank = 0 (unranked)">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.TurnsRank">Turns<br />Rank</MudTableSortLabel></span></MudTh>
+                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div>
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.TurnsRank">Turns<br />Rank</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="PriorityRank — depends on which ranks apply:&#10;• Both > 0 → (SoldQtyRank + TurnsRank) ÷ 2&#10;• Only Sold > 0 → SoldQtyRank&#10;• Only Turn > 0 → TurnsRank&#10;• Both = 0 → 0 (unranked, skipped from Grade bucketing)&#10;Lower number = higher SIM priority">
+                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="PriRank = avg(SoldQtyrank and TurnsRank)">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.PriorityRank">Pri<br />Rank</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="Per-Division grade bucket&#10;Stores with PriorityRank > 0 are sorted by PriorityRank ASC, Wt Avg Sold DESC&#10;Bucketed by LPM_StoreGrade.SharePct (top SharePct → first grade, etc.)&#10;PriorityRank = 0 → Grade stays blank (no allocation)">Grade</span></MudTh>
+                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="Grade = Stores are ordered by PriorityRank and bucketed by Share% for each Grade">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.Grade ?? string.Empty">Grade</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="Tgt Turn = LPM_Planned.PlannedTurn × (1 − Grade.MarkupPct)&#10;Higher MarkupPct → lower Tgt Turn (premium grades turn slower)&#10;Blank Grade → MarkupPct = 0 → Tgt Turn = PlannedTurn">
+                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="TgtTurn = PlannedTurn × (1 − Markup%) based on Grade">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetTurn">Tgt<br />Turn</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:8%;"><div class="th-total">@totalTgtSales.ToString("N0")</div><span title="Tgt Sales[store] = (Wt Avg Sold[store] ÷ Σ Wt Avg Sold across stores in the Division) × LPM_Planned.PlannedSalesQty&#10;Σ Tgt Sales over the Division = LPM_Planned.PlannedSalesQty (reconciles)">
+                <MudTh Style="width:8%;"><div class="th-total">@totalTgtSales.ToString("N0")</div><span title="TargetSales = Apportion Planned Sales Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetSales">Tgt<br />Sales</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:8%;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="Tgt EOM is computed in two steps so the Division total reconciles to the plan:&#10;1) Initial[store] = (Tgt Turn × Tgt Sales) ÷ weeksInMonth&#10;2) Tgt EOM[store] = (Initial[store] ÷ Σ Initial across stores in the Division) × LPM_Planned.PlannedEOM&#10;weeksInMonth = max(1, DaysInMonth ÷ 7)">
+                <MudTh Style="width:8%;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM = Apportion Planned EOM Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetEOM">Tgt<br />EOM</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="Per-Division volume group&#10;Stores in the Division sorted by Tgt EOM DESC, then bucketed by LPM_VolumeGroup.SharePct&#10;Used ONLY for the SKU Max range lookup — does NOT change Tgt Sales / Tgt EOM">Vol<br />Grp</span></MudTh>
+                <MudTh Style="width:6%;"><div class="th-total">@totalSoh.ToString("N0")</div><span title="SOH = Sum of LPM_LocStock.SOH across all items for this (Store, Division). Source: racks.dbo.LPM_LocStock joined to active stores in DataSettings.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhSummer.ToString("N0")</div><span title="WH Summer per Division&#10;= SUM(racks.dbo.whboxitems.Qty) for items mapped to this Division where:&#10;• pt.PalletCategory = 'ELIGIBLE'&#10;• ShopEligible <> 'E'&#10;• LPMDt is set AND year/month ≤ run period, OR LPMDt IS NULL&#10;• ISNULL(pt.Season,'') ≠ 'W'  (Summer side)">
+                <MudTh Style="width:7%;"><div class="th-total">@totalMerchM.ToString("N0")</div><span title="Merch Need (Month) = TargetEOM − SOH + TargetSales. Open-to-receive: what WH must ship this month so the store ends at TargetEOM after selling TargetSales.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedMonth">Merch Need<br />(Month)</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total">@totalMerchW.ToString("N0")</div><span title="Merch Need (Week) = Merch Need (Month) / 4. Drives the weekly SIM allocation cap.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total">@totalMerchD.ToString("N0")</div><span title="Merch Need (Day) = Merch Need (Week) / 6. Reference daily slice assuming a 6-day production week.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="VolGrp = Stores are sorted by TgtEOM and bucketed by SharePct of Volume Groups">Vol<br />Grp</span></MudTh>
+
+                <MudTh Style="width:7%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhSummer.ToString("N0")</div><span title="WHSummer = Total Eligible Stock Summer per Division&#10;= SUM(Qty) for Summer-tagged eligible boxes mapped to this Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WHStockSummer">WH<br />Summer</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhWinter.ToString("N0")</div><span title="WH Winter per Division&#10;Same eligibility filters as WH Summer, but ISNULL(pt.Season,'') = 'W'">
+                <MudTh Style="width:7%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhWinter.ToString("N0")</div><span title="WHWinter = Total Eligible Stock Winter per Division&#10;= SUM(Qty) for Winter-tagged eligible boxes mapped to this Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WHStockWinter">WH<br />Winter</MudTableSortLabel></span></MudTh>
-
-                <MudTh Style="width:7%;"><div class="th-total">@totalSkuMax.ToString("N0")</div><span title="SKU Max — per-(Store, Item) cap inside SIM Generate&#10;Lookup: LPM_SKUMaxRule WHERE Country=@@country AND DivCode=@@div AND GroupCode=Vol Grp AND (WH Summer + WH Winter) BETWEEN WHStockFrom AND WHStockTo&#10;Override: any LPM_StoreDivAccess row with IsActive = 0 forces SKU Max = 0 for that (Store, Div)">SKU<br />Max</span></MudTh>
             </HeaderContent>
             <RowTemplate>
                 <MudTd>
@@ -480,21 +544,279 @@
                 <MudTd>@context.WtAvgTurn.ToString("N1")</MudTd>
                 <MudTd>@context.SoldQtyRank</MudTd>
                 <MudTd>@context.TurnsRank</MudTd>
-                <MudTd title="@($"({context.SoldQtyRank} + {context.TurnsRank}) / 2")">@context.PriorityRank.ToString("0.#")</MudTd>
+                <MudTd>@context.PriorityRank.ToString("0.#")</MudTd>
                 <MudTd><MudChip T="string" Size="Size.Small" Color="Color.Primary">@context.Grade</MudChip></MudTd>
                 <MudTd>@context.TargetTurn.ToString("N1")</MudTd>
                 <MudTd>@context.TargetSales.ToString("N0")</MudTd>
                 <MudTd>@context.TargetEOM.ToString("N0")</MudTd>
+                <MudTd>@context.SOH.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedMonth.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
                 <MudTd><MudChip T="string" Size="Size.Small" Color="Color.Info">@context.VolumeGroup</MudChip></MudTd>
                 <MudTd>@context.WHStockSummer.ToString("N0")</MudTd>
                 <MudTd>@context.WHStockWinter.ToString("N0")</MudTd>
-                <MudTd>@context.SKUMax</MudTd>
             </RowTemplate>
             <PagerContent>
                 <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
             </PagerContent>
         </MudTable>
     </div>
+    </MudTabPanel>
+
+    @* ─── Tab 2: Store Summary — rolled up across all divisions ──────────── *@
+    <MudTabPanel Text="Store Summary" Icon="@Icons.Material.Filled.Storefront">
+    <div class="lpm-section">
+        @{
+            // Roll up all rows for the current Country to one row per Store.
+            // Country scoping is implicit (the page-level _country selector
+            // already filters _preview).
+            var storeRoll = _preview
+                .GroupBy(r => new { r.StoreID, r.StoreName })
+                .Select(g => new StoreSummaryEom
+                {
+                    StoreID        = g.Key.StoreID,
+                    StoreName      = g.Key.StoreName ?? "",
+                    SOH            = g.Sum(r => (long)r.SOH),
+                    // TargetEOM / TargetSales are decimal — sum first, round
+                    // once at the end to match Excel's true-decimal totals.
+                    // Casting per-row to long would truncate fractional parts
+                    // and accumulate rounding error proportional to row count.
+                    TargetEOM      = (long)Math.Round(g.Sum(r => r.TargetEOM),   MidpointRounding.AwayFromZero),
+                    TargetSales    = (long)Math.Round(g.Sum(r => r.TargetSales), MidpointRounding.AwayFromZero),
+                    MerchNeedMonth = g.Sum(r => (long)r.MerchNeedMonth),
+                    MerchNeedWeek  = g.Sum(r => (long)r.MerchNeedWeek),
+                    MerchNeedDay   = g.Sum(r => (long)r.MerchNeedDay),
+                })
+                .Where(s => string.IsNullOrEmpty(_filterStoreSummary)
+                         || s.StoreID.Contains(_filterStoreSummary, StringComparison.OrdinalIgnoreCase)
+                         || s.StoreName.Contains(_filterStoreSummary, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(s => s.StoreID)
+                .ToList();
+
+            var ssCount        = storeRoll.Count;
+            var ssTotalSoh     = storeRoll.Sum(s => s.SOH);
+            var ssTotalTgtEom  = storeRoll.Sum(s => s.TargetEOM);
+            var ssTotalTgtSale = storeRoll.Sum(s => s.TargetSales);
+            var ssTotalMerchM  = storeRoll.Sum(s => s.MerchNeedMonth);
+            var ssTotalMerchW  = storeRoll.Sum(s => s.MerchNeedWeek);
+            var ssTotalMerchD  = storeRoll.Sum(s => s.MerchNeedDay);
+        }
+
+        <MudGrid Spacing="2" Class="mb-2 align-center">
+            <MudItem xs="12" md="4">
+                <MudAutocomplete T="string" Label="Filter Store"
+                                 Value="_filterStoreSummary"
+                                 ValueChanged="(string v) => { _filterStoreSummary = v ?? string.Empty; StateHasChanged(); }"
+                                 SearchFunc="SearchStores"
+                                 Variant="Variant.Outlined"
+                                 CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                                 Placeholder="All stores" />
+            </MudItem>
+            <MudItem xs="12" md="8" Class="d-flex justify-end align-center">
+                <MudText Typo="Typo.caption" Style="color:#64748b;">
+                    Aggregated across all divisions for @_country @_year-@_month.ToString("D2"). Excel export above writes both tabs.
+                </MudText>
+            </MudItem>
+        </MudGrid>
+
+        <MudTable T="StoreSummaryEom" Items="storeRoll" Hover="true" Striped="true" Dense="true"
+                  FixedHeader="true" Height="65vh" AllowUnsorted="false"
+                  Class="lpm-eom-preview">
+            <HeaderContent>
+                <MudTh Style="width:14%;">
+                    <div class="th-total">@ssCount.ToString("N0") rows</div>
+                    <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel>
+                </MudTh>
+                <MudTh Style="width:26%;">
+                    <div class="th-total">&nbsp;</div>
+                    <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.StoreName">Store Name</MudTableSortLabel>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@ssTotalSoh.ToString("N0")</div>
+                    <span title="Sum of LPM_LocStock.SOH across all (Store × Division) rows for this store.">
+                        <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.SOH">SOH</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@ssTotalTgtEom.ToString("N0")</div>
+                    <span title="Sum of TargetEOM across divisions for this store.">
+                        <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.TargetEOM">Target EOM</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@ssTotalTgtSale.ToString("N0")</div>
+                    <span title="Sum of TargetSales across divisions for this store.">
+                        <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.TargetSales">Target Sales</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@ssTotalMerchM.ToString("N0")</div>
+                    <span title="Σ Merch Need (Month) for this store. = TargetEOM − SOH + TargetSales (per Div, summed).">
+                        <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.MerchNeedMonth">Merch Need<br />(Month)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@ssTotalMerchW.ToString("N0")</div>
+                    <span title="Σ Merch Need (Week) for this store. = Merch Need (Month) / 4.">
+                        <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@ssTotalMerchD.ToString("N0")</div>
+                    <span title="Σ Merch Need (Day) for this store. = Merch Need (Week) / 6 (fixed 6-day production week).">
+                        <MudTableSortLabel T="StoreSummaryEom" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd><code>@context.StoreID</code></MudTd>
+                <MudTd>@context.StoreName</MudTd>
+                <MudTd>@context.SOH.ToString("N0")</MudTd>
+                <MudTd>@context.TargetEOM.ToString("N0")</MudTd>
+                <MudTd>@context.TargetSales.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedMonth.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
+            </RowTemplate>
+            <PagerContent>
+                <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+            </PagerContent>
+        </MudTable>
+    </div>
+    </MudTabPanel>
+
+    @* ─── Tab 3: Division Summary — rolled up across all stores ─────────── *@
+    <MudTabPanel Text="Division Summary" Icon="@Icons.Material.Filled.Category">
+    <div class="lpm-section">
+        @{
+            // Roll up all rows for the current Country to one row per Division.
+            // Country scoping is implicit via _preview.
+            var divRoll = _preview
+                .GroupBy(r => new { r.DivCode, r.DivisionName })
+                .Select(g => new DivisionSummaryEom
+                {
+                    DivCode        = g.Key.DivCode,
+                    DivisionName   = g.Key.DivisionName ?? "",
+                    SOH            = g.Sum(r => (long)r.SOH),
+                    // Sum decimal values first, round once. Per-row long
+                    // cast was truncating fractional parts before summing.
+                    TargetEOM      = (long)Math.Round(g.Sum(r => r.TargetEOM),   MidpointRounding.AwayFromZero),
+                    TargetSales    = (long)Math.Round(g.Sum(r => r.TargetSales), MidpointRounding.AwayFromZero),
+                    MerchNeedMonth = g.Sum(r => (long)r.MerchNeedMonth),
+                    MerchNeedWeek  = g.Sum(r => (long)r.MerchNeedWeek),
+                    MerchNeedDay   = g.Sum(r => (long)r.MerchNeedDay),
+                    // LPMBoxQty is per-Division (repeated across stores) —
+                    // take the value from any row in the group, not Sum().
+                    LPMBoxQty      = g.First().LPMBoxQty,
+                })
+                .Where(d => string.IsNullOrEmpty(_filterDivisionSummary)
+                         || d.DivisionName.Contains(_filterDivisionSummary, StringComparison.OrdinalIgnoreCase)
+                         || d.DivCode.ToString().Contains(_filterDivisionSummary, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(d => d.DivisionName)
+                .ToList();
+
+            var dsCount        = divRoll.Count;
+            var dsTotalSoh     = divRoll.Sum(d => d.SOH);
+            var dsTotalTgtEom  = divRoll.Sum(d => d.TargetEOM);
+            var dsTotalTgtSale = divRoll.Sum(d => d.TargetSales);
+            var dsTotalMerchM  = divRoll.Sum(d => d.MerchNeedMonth);
+            var dsTotalMerchW  = divRoll.Sum(d => d.MerchNeedWeek);
+            var dsTotalMerchD  = divRoll.Sum(d => d.MerchNeedDay);
+            var dsTotalLpmBox  = divRoll.Sum(d => (long)d.LPMBoxQty);
+        }
+
+        <MudGrid Spacing="2" Class="mb-2 align-center">
+            <MudItem xs="12" md="4">
+                <MudAutocomplete T="string" Label="Filter Division"
+                                 Value="_filterDivisionSummary"
+                                 ValueChanged="(string v) => { _filterDivisionSummary = v ?? string.Empty; StateHasChanged(); }"
+                                 SearchFunc="SearchDivisions"
+                                 Variant="Variant.Outlined"
+                                 CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                                 Placeholder="All divisions" />
+            </MudItem>
+            <MudItem xs="12" md="8" Class="d-flex justify-end align-center">
+                <MudText Typo="Typo.caption" Style="color:#64748b;">
+                    Aggregated across all stores for @_country @_year-@_month.ToString("D2"). Excel export above writes all three tabs.
+                </MudText>
+            </MudItem>
+        </MudGrid>
+
+        <MudTable T="DivisionSummaryEom" Items="divRoll" Hover="true" Striped="true" Dense="true"
+                  FixedHeader="true" Height="65vh" AllowUnsorted="false"
+                  Class="lpm-eom-preview">
+            <HeaderContent>
+                <MudTh Style="width:10%;">
+                    <div class="th-total">@dsCount.ToString("N0") rows</div>
+                    <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.DivCode" InitialDirection="SortDirection.Ascending">Div Code</MudTableSortLabel>
+                </MudTh>
+                <MudTh Style="width:30%;">
+                    <div class="th-total">&nbsp;</div>
+                    <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.DivisionName">Division</MudTableSortLabel>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalSoh.ToString("N0")</div>
+                    <span title="Sum of LPM_LocStock.SOH across all (Store × Division) rows for this division.">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.SOH">SOH</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalTgtEom.ToString("N0")</div>
+                    <span title="Sum of TargetEOM across stores for this division.">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.TargetEOM">Target EOM</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalTgtSale.ToString("N0")</div>
+                    <span title="Sum of TargetSales across stores for this division.">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.TargetSales">Target Sales</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalMerchM.ToString("N0")</div>
+                    <span title="Σ Merch Need (Month) for this division. = TargetEOM − SOH + TargetSales (per Store, summed).">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.MerchNeedMonth">Merch Need<br />(Month)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalMerchW.ToString("N0")</div>
+                    <span title="Σ Merch Need (Week) for this division. = Merch Need (Month) / 4.">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalMerchD.ToString("N0")</div>
+                    <span title="Σ Merch Need (Day) for this division. = Merch Need (Week) / 6 (fixed 6-day production week).">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:12%;">
+                    <div class="th-total">@dsTotalLpmBox.ToString("N0")</div>
+                    <span title="Σ qty of LPM-tagged eligible boxes (PalletCategory='ELIGIBLE' AND LPMDt IS NOT NULL). No ShopEligible filter.">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.LPMBoxQty">LPM Box<br />Qty</MudTableSortLabel>
+                    </span>
+                </MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd><code>@context.DivCode</code></MudTd>
+                <MudTd>@context.DivisionName</MudTd>
+                <MudTd>@context.SOH.ToString("N0")</MudTd>
+                <MudTd>@context.TargetEOM.ToString("N0")</MudTd>
+                <MudTd>@context.TargetSales.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedMonth.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
+                <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
+                <MudTd>@context.LPMBoxQty.ToString("N0")</MudTd>
+            </RowTemplate>
+            <PagerContent>
+                <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+            </PagerContent>
+        </MudTable>
+    </div>
+    </MudTabPanel>
+
+    </MudTabs>
 }
 
 @code {
@@ -507,30 +829,117 @@
     private List<EomRow> _preview = new();
     private bool _running;
 
-    private int _filterDiv;
-    private string _filterStore = "";
-    private string _previewLabel = "Preview";
+    private int    _filterDiv;
+    private string _filterDivisionText = "";   // raw autocomplete text for display
+    private string _filterStore        = "";
+    private string _filterGrade        = "";
+    private string _filterVolGrp       = "";
+    private string _filterStoreSummary    = "";   // Store filter on the Store-Summary tab
+    private string _filterDivisionSummary = "";   // Division filter on the Division-Summary tab
+    private string _previewLabel       = "Preview";
     private DateTime? _savedAt;
+
+    /// <summary>
+    /// Per-Store rollup of EOM output across divisions — drives the
+    /// "Store Summary" tab + the second Excel sheet.
+    /// </summary>
+    private class StoreSummaryEom
+    {
+        public string StoreID        { get; set; } = "";
+        public string StoreName      { get; set; } = "";
+        public long   SOH            { get; set; }
+        public long   TargetEOM      { get; set; }
+        public long   TargetSales    { get; set; }
+        public long   MerchNeedMonth { get; set; }
+        public long   MerchNeedWeek  { get; set; }
+        public long   MerchNeedDay   { get; set; }
+    }
+
+    /// <summary>
+    /// Per-Division rollup of EOM output across stores — drives the
+    /// "Division Summary" tab + the third Excel sheet.
+    /// </summary>
+    private class DivisionSummaryEom
+    {
+        public int    DivCode        { get; set; }
+        public string DivisionName   { get; set; } = "";
+        public long   SOH            { get; set; }
+        public long   TargetEOM      { get; set; }
+        public long   TargetSales    { get; set; }
+        public long   MerchNeedMonth { get; set; }
+        public long   MerchNeedWeek  { get; set; }
+        public long   MerchNeedDay   { get; set; }
+        /// <summary>Per-Division qty of LPM-tagged eligible boxes (no ShopEligible filter).</summary>
+        public int    LPMBoxQty      { get; set; }
+    }
 
     private IEnumerable<EomRow> FilteredPreview
     {
         get
         {
             IEnumerable<EomRow> q = _preview;
-            if (_filterDiv > 0) q = q.Where(r => r.DivCode == _filterDiv);
+            if (_filterDiv > 0)
+                q = q.Where(r => r.DivCode == _filterDiv);
             if (!string.IsNullOrWhiteSpace(_filterStore))
             {
-                // _filterStore is normalised by OnStoreFilterChanged to JUST the
-                // StoreID part (the em-dash is stripped at the moment the user
-                // picks a value from the autocomplete). So filtering is simply
-                // a Contains/Equals on StoreID or a Contains on StoreName.
                 var f = _filterStore.Trim();
                 q = q.Where(r =>
                     r.StoreID.Contains(f, StringComparison.OrdinalIgnoreCase) ||
                     r.StoreName.Contains(f, StringComparison.OrdinalIgnoreCase));
             }
+            if (!string.IsNullOrWhiteSpace(_filterGrade))
+                q = q.Where(r => string.Equals(r.Grade, _filterGrade, StringComparison.OrdinalIgnoreCase));
+            if (!string.IsNullOrWhiteSpace(_filterVolGrp))
+                q = q.Where(r => string.Equals(r.VolumeGroup, _filterVolGrp, StringComparison.OrdinalIgnoreCase));
             return q;
         }
+    }
+
+    /// <summary>
+    /// Search-as-you-type for the Division autocomplete. Suggestions are formatted
+    /// "Womenswear  (419)" — the trailing parenthesised DivCode is stripped on selection
+    /// and stored in <c>_filterDiv</c> so the predicate is a fast int comparison.
+    /// </summary>
+    private Task<IEnumerable<string>> SearchDivisions(string? value, CancellationToken ct)
+    {
+        var all = _preview
+            .Select(r => $"{r.DivisionName}  ({r.DivCode})")
+            .Distinct()
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<string>>(all.Take(50));
+        return Task.FromResult<IEnumerable<string>>(all
+            .Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase))
+            .Take(50));
+    }
+
+    private void OnDivisionFilterChanged(string? v)
+    {
+        _filterDivisionText = v ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(v))
+        {
+            _filterDiv = 0;
+        }
+        else
+        {
+            // Pull the trailing "(419)" out and parse to int.
+            var s = v.Trim();
+            var open  = s.LastIndexOf('(');
+            var close = s.LastIndexOf(')');
+            if (open >= 0 && close > open && close == s.Length - 1
+                && int.TryParse(s.Substring(open + 1, close - open - 1).Trim(), out var div))
+            {
+                _filterDiv = div;
+            }
+            else
+            {
+                // Free-typed text — try to match by name (first hit wins).
+                var match = _preview.FirstOrDefault(r =>
+                    r.DivisionName.Contains(s, StringComparison.OrdinalIgnoreCase));
+                _filterDiv = match?.DivCode ?? 0;
+            }
+        }
+        StateHasChanged();
     }
 
     /// <summary>
@@ -633,19 +1042,25 @@
         finally { _running = false; StateHasChanged(); }
     }
 
-    private async Task PreviewAsync()
+    /// <summary>
+    /// "Generate" button — runs the engine in memory and shows the preview
+    /// grid WITHOUT writing to LPM_EOM_Output. Approve persists those rows.
+    /// (Internally still calls Eom.PreviewAsync — that name in the service
+    /// layer reflects what it does: produce values without saving.)
+    /// </summary>
+    private async Task GenerateAsync()
     {
         _running = true; _preview.Clear(); StateHasChanged();
         try
         {
             _preview = await Eom.PreviewAsync(_country, _year, _month);
-            _previewLabel = "Live Preview";
+            _previewLabel = "Generated (not saved)";
             _savedAt = null;
-            Snackbar.Add($"Preview ready: {_preview.Count} rows (not yet saved).", Severity.Info);
+            Snackbar.Add($"Generated: {_preview.Count} rows. Click Approve to save.", Severity.Info);
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Preview failed: {ex.Message}", Severity.Error);
+            Snackbar.Add($"Generate failed: {ex.Message}", Severity.Error);
         }
         finally { _running = false; StateHasChanged(); }
     }
@@ -671,18 +1086,24 @@
         finally { _running = false; StateHasChanged(); }
     }
 
-    private async Task GenerateAsync()
+    /// <summary>
+    /// "Approve" button — runs the engine AND writes to LPM_EOM_Output,
+    /// replacing any existing rows for the same (Country, Year, Month).
+    /// SIM Generate consumes the saved output, so this is the action that
+    /// actually publishes EOM for downstream use.
+    /// </summary>
+    private async Task ApproveAsync()
     {
-        var ok = await DialogService.ShowMessageBox("Generate EOM",
+        var ok = await DialogService.ShowMessageBox("Approve EOM",
             $"This will REPLACE any existing LPM_EOM_Output rows for {_country} {_year}/{_month:D2}. Continue?",
-            yesText: "Generate", cancelText: "Cancel");
+            yesText: "Approve", cancelText: "Cancel");
         if (ok != true) return;
 
         _running = true; StateHasChanged();
         try
         {
             var count = await Eom.GenerateAsync(_country, _year, _month, CurrentUser.Name);
-            Snackbar.Add($"Generated {count} rows for {_country} {_year}/{_month:D2}.", Severity.Success);
+            Snackbar.Add($"Approved {count} rows for {_country} {_year}/{_month:D2}.", Severity.Success);
             var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
             _preview = rows;
             _savedAt = last;
@@ -690,8 +1111,193 @@
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Generate failed: {ex.Message}", Severity.Error);
+            Snackbar.Add($"Approve failed: {ex.Message}", Severity.Error);
         }
         finally { _running = false; StateHasChanged(); }
+    }
+
+    /// <summary>
+    /// Excel export of the FILTERED preview rows. Mirrors the columns
+    /// shown in the grid; numeric columns formatted as "#,##0".
+    /// </summary>
+    private async Task ExportExcelAsync()
+    {
+        var rows = FilteredPreview.ToList();
+        if (rows.Count == 0)
+        {
+            Snackbar.Add("Nothing to export.", Severity.Warning);
+            return;
+        }
+
+        try
+        {
+            using var wb = new XLWorkbook();
+
+            // ── Sheet 1: Store × Division (the existing detailed grid) ────
+            var ws = wb.Worksheets.Add("Store-Div EOM");
+
+            string[] headers = {
+                "StoreID", "StoreName", "Division",
+                "Wt Avg Sold", "Wt Avg Turn",
+                "Sold Qty Rank", "Turns Rank", "Pri Rank",
+                "Grade", "Tgt Turn",
+                "Tgt Sales", "Tgt EOM",
+                "SOH", "Merch Need (Month)", "Merch Need (Week)", "Merch Need (Day)",
+                "Vol Grp", "WH Summer", "WH Winter"
+            };
+            for (int c = 0; c < headers.Length; c++)
+                ws.Cell(1, c + 1).Value = headers[c];
+            ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+            ws.Range(1, 1, 1, headers.Length).Style.Fill.BackgroundColor = XLColor.LightGray;
+
+            int row = 2;
+            foreach (var r in rows)
+            {
+                ws.Cell(row, 1).Value  = r.StoreID;
+                ws.Cell(row, 2).Value  = r.StoreName;
+                ws.Cell(row, 3).Value  = r.DivisionName;
+                ws.Cell(row, 4).Value  = (double)r.WtAvgSoldQty;
+                ws.Cell(row, 5).Value  = (double)r.WtAvgTurn;
+                ws.Cell(row, 6).Value  = r.SoldQtyRank;
+                ws.Cell(row, 7).Value  = r.TurnsRank;
+                ws.Cell(row, 8).Value  = (double)r.PriorityRank;
+                ws.Cell(row, 9).Value  = r.Grade ?? "";
+                ws.Cell(row, 10).Value = (double)r.TargetTurn;
+                ws.Cell(row, 11).Value = (double)r.TargetSales;
+                ws.Cell(row, 12).Value = (double)r.TargetEOM;
+                ws.Cell(row, 13).Value = r.SOH;
+                ws.Cell(row, 14).Value = r.MerchNeedMonth;
+                ws.Cell(row, 15).Value = r.MerchNeedWeek;
+                ws.Cell(row, 16).Value = r.MerchNeedDay;
+                ws.Cell(row, 17).Value = r.VolumeGroup ?? "";
+                ws.Cell(row, 18).Value = r.WHStockSummer;
+                ws.Cell(row, 19).Value = r.WHStockWinter;
+                row++;
+            }
+
+            int last = row - 1;
+            foreach (var col in new[] { 4, 5, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19 })
+                ws.Range(2, col, last, col).Style.NumberFormat.Format = "#,##0.##";
+            ws.Columns().AdjustToContents();
+
+            // ── Sheet 2: Store Summary (rolled up across divisions) ───────
+            var storeRoll = _preview
+                .GroupBy(r2 => new { r2.StoreID, r2.StoreName })
+                .Select(g => new
+                {
+                    StoreID        = g.Key.StoreID,
+                    StoreName      = g.Key.StoreName ?? "",
+                    SOH            = g.Sum(r2 => (long)r2.SOH),
+                    // Sum decimals first, round once — see Store-Div tab note.
+                    TargetEOM      = (long)Math.Round(g.Sum(r2 => r2.TargetEOM),   MidpointRounding.AwayFromZero),
+                    TargetSales    = (long)Math.Round(g.Sum(r2 => r2.TargetSales), MidpointRounding.AwayFromZero),
+                    MerchNeedMonth = g.Sum(r2 => (long)r2.MerchNeedMonth),
+                    MerchNeedWeek  = g.Sum(r2 => (long)r2.MerchNeedWeek),
+                    MerchNeedDay   = g.Sum(r2 => (long)r2.MerchNeedDay),
+                })
+                .OrderBy(s => s.StoreID)
+                .ToList();
+
+            var ws2 = wb.Worksheets.Add("Store Summary");
+            string[] headers2 = {
+                "StoreID", "StoreName", "SOH",
+                "Target EOM", "Target Sales",
+                "Merch Need (Month)", "Merch Need (Week)", "Merch Need (Day)"
+            };
+            for (int c = 0; c < headers2.Length; c++)
+                ws2.Cell(1, c + 1).Value = headers2[c];
+            ws2.Range(1, 1, 1, headers2.Length).Style.Font.Bold = true;
+            ws2.Range(1, 1, 1, headers2.Length).Style.Fill.BackgroundColor = XLColor.LightGray;
+
+            int row2 = 2;
+            foreach (var s in storeRoll)
+            {
+                ws2.Cell(row2, 1).Value = s.StoreID;
+                ws2.Cell(row2, 2).Value = s.StoreName;
+                ws2.Cell(row2, 3).Value = s.SOH;
+                ws2.Cell(row2, 4).Value = s.TargetEOM;
+                ws2.Cell(row2, 5).Value = s.TargetSales;
+                ws2.Cell(row2, 6).Value = s.MerchNeedMonth;
+                ws2.Cell(row2, 7).Value = s.MerchNeedWeek;
+                ws2.Cell(row2, 8).Value = s.MerchNeedDay;
+                row2++;
+            }
+
+            int last2 = row2 - 1;
+            if (last2 >= 2)
+            {
+                foreach (var col in new[] { 3, 4, 5, 6, 7, 8 })
+                    ws2.Range(2, col, last2, col).Style.NumberFormat.Format = "#,##0";
+            }
+            ws2.Columns().AdjustToContents();
+
+            // ── Sheet 3: Division Summary (rolled up across stores) ───────
+            var divRoll = _preview
+                .GroupBy(r3 => new { r3.DivCode, r3.DivisionName })
+                .Select(g => new
+                {
+                    DivCode        = g.Key.DivCode,
+                    DivisionName   = g.Key.DivisionName ?? "",
+                    SOH            = g.Sum(r3 => (long)r3.SOH),
+                    // Sum decimals first, round once — same fix as the on-screen
+                    // projection so the Excel sheet matches the UI footer.
+                    TargetEOM      = (long)Math.Round(g.Sum(r3 => r3.TargetEOM),   MidpointRounding.AwayFromZero),
+                    TargetSales    = (long)Math.Round(g.Sum(r3 => r3.TargetSales), MidpointRounding.AwayFromZero),
+                    MerchNeedMonth = g.Sum(r3 => (long)r3.MerchNeedMonth),
+                    MerchNeedWeek  = g.Sum(r3 => (long)r3.MerchNeedWeek),
+                    MerchNeedDay   = g.Sum(r3 => (long)r3.MerchNeedDay),
+                    // LPMBoxQty is per-Division — repeats across store rows.
+                    LPMBoxQty      = g.First().LPMBoxQty,
+                })
+                .OrderBy(d => d.DivisionName)
+                .ToList();
+
+            var ws3 = wb.Worksheets.Add("Division Summary");
+            string[] headers3 = {
+                "DivCode", "Division", "SOH",
+                "Target EOM", "Target Sales",
+                "Merch Need (Month)", "Merch Need (Week)", "Merch Need (Day)",
+                "LPM Box Qty"
+            };
+            for (int c = 0; c < headers3.Length; c++)
+                ws3.Cell(1, c + 1).Value = headers3[c];
+            ws3.Range(1, 1, 1, headers3.Length).Style.Font.Bold = true;
+            ws3.Range(1, 1, 1, headers3.Length).Style.Fill.BackgroundColor = XLColor.LightGray;
+
+            int row3 = 2;
+            foreach (var d in divRoll)
+            {
+                ws3.Cell(row3, 1).Value = d.DivCode;
+                ws3.Cell(row3, 2).Value = d.DivisionName;
+                ws3.Cell(row3, 3).Value = d.SOH;
+                ws3.Cell(row3, 4).Value = d.TargetEOM;
+                ws3.Cell(row3, 5).Value = d.TargetSales;
+                ws3.Cell(row3, 6).Value = d.MerchNeedMonth;
+                ws3.Cell(row3, 7).Value = d.MerchNeedWeek;
+                ws3.Cell(row3, 8).Value = d.MerchNeedDay;
+                ws3.Cell(row3, 9).Value = d.LPMBoxQty;
+                row3++;
+            }
+
+            int last3 = row3 - 1;
+            if (last3 >= 2)
+            {
+                foreach (var col in new[] { 3, 4, 5, 6, 7, 8, 9 })
+                    ws3.Range(2, col, last3, col).Style.NumberFormat.Format = "#,##0";
+            }
+            ws3.Columns().AdjustToContents();
+
+            // ── Save + download ───────────────────────────────────────────
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            var b64 = Convert.ToBase64String(ms.ToArray());
+            var url = $"data:application/octet-stream;base64,{b64}";
+            var fileName = $"EOM_{_country}_{_year}-{_month:D2}.xlsx";
+            await JS.InvokeVoidAsync("lpmDownload", url, fileName);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Excel export failed: {ex.Message}", Severity.Error);
+        }
     }
 }

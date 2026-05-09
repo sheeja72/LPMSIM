@@ -17,4 +17,20 @@ public class LpmSimOutput
 
     /// <summary>True when the allocation came from a round-robin pass (may exceed SKUMax / TargetEOM).</summary>
     public bool IsRoundRobin { get; set; }
+
+    /// <summary>
+    /// True when this row was produced by Phase 1b / 2b OVERRIDE round-robin
+    /// (box usability ≥ Box % threshold, bypassing SKU Max and Merch Need
+    /// caps to fill the box toward 100%). Used by reports to surface
+    /// "Override Qty" separately from regular SIM Qty.
+    /// </summary>
+    public bool IsOverride { get; set; }
+
+    /// <summary>
+    /// Production day (1..N) assigned by Production Schedule. NULL when the
+    /// box hasn't been scheduled yet, or was deferred because it didn't fit
+    /// in the planning window. All rows for the same BoxNo always share the
+    /// same Day (a box is produced as a unit).
+    /// </summary>
+    public int? Day { get; set; }
 }

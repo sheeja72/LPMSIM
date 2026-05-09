@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authentication.Negotiate;
 using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Components.Server;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Identity.Web;
 using Microsoft.Identity.Web.UI;
@@ -29,8 +30,43 @@ public class Program
         // dotnet run picks up (some terminal sessions don't end up in Development).
         builder.Configuration.AddUserSecrets<Program>(optional: true, reloadOnChange: false);
 
+        // Blazor Server circuit + SignalR hub timeouts.
+        //
+        // Goal: one login lasts 24 hours, including overnight laptop sleeps,
+        // long meetings, and idle stretches. Every "session-ish" timer is
+        // set to 24h.
+        //
+        //   KeepAliveInterval = 15s — server pings client every 15s. Must
+        //   stay ≤ half the JS client's serverTimeout so the connection
+        //   doesn't time out waiting for pings.
+        //
+        //   ClientTimeoutInterval = 24h — server tolerates 24h of client
+        //   silence before declaring it dead. Pairs with the JS reconnect
+        //   policy in App.razor (very long retry window).
+        //
+        //   DisconnectedCircuitRetentionPeriod = 24h — when the underlying
+        //   WebSocket dies (laptop sleep, network drop), we hold the
+        //   in-memory circuit + auth state for 24h waiting for a reconnect.
+        //
+        //   JSInteropDefaultCallTimeout = 30 min — covers any reasonable
+        //   user operation, including big Excel exports.
+        //
+        //   HandshakeTimeout = 2 min — cold-start tolerance.
         builder.Services.AddRazorComponents()
-            .AddInteractiveServerComponents();
+            .AddInteractiveServerComponents()
+            .AddHubOptions(options =>
+            {
+                options.KeepAliveInterval     = TimeSpan.FromSeconds(15);
+                options.ClientTimeoutInterval = TimeSpan.FromHours(24);
+                options.HandshakeTimeout      = TimeSpan.FromMinutes(2);
+            });
+
+        builder.Services.Configure<CircuitOptions>(options =>
+        {
+            options.DisconnectedCircuitMaxRetained     = 200;
+            options.DisconnectedCircuitRetentionPeriod = TimeSpan.FromHours(24);
+            options.JSInteropDefaultCallTimeout        = TimeSpan.FromMinutes(30);
+        });
 
         builder.Services.AddMudServices(c =>
         {
@@ -59,7 +95,15 @@ public class Program
         builder.Services.AddScoped<LpmSimGenerator>();
         builder.Services.AddScoped<LpmSimReportService>();
         builder.Services.AddScoped<LpmSimInvestigator>();
+        builder.Services.AddScoped<ProductionScheduler>();
+        builder.Services.AddScoped<LpmAdmService>();
         builder.Services.AddScoped<WarehouseQueryService>();
+
+        // SKU Max background job manager — Singleton so a Build can survive
+        // the user navigating away from the SIM Generate page. Builds run on
+        // a manager-owned CancellationTokenSource (not the page's), so
+        // navigation no longer kills the build mid-way.
+        builder.Services.AddSingleton<SkuMaxBuildJobManager>();
 
         // ─── Authentication ──────────────────────────────────────────────
         // Two modes selected via configuration `Auth:Mode`:
@@ -91,7 +135,10 @@ public class Program
                 CookieAuthenticationDefaults.AuthenticationScheme,
                 opts =>
                 {
-                    opts.ExpireTimeSpan    = TimeSpan.FromMinutes(60);
+                    // 24-hour cookie with sliding expiration. Any activity
+                    // pushes the expiry forward; only a fully-idle 24h
+                    // stretch forces a re-login through Entra.
+                    opts.ExpireTimeSpan    = TimeSpan.FromHours(24);
                     opts.SlidingExpiration = true;
                 });
         }
@@ -123,7 +170,15 @@ public class Program
             app.UseHsts();
         }
 
-        app.UseHttpsRedirection();
+        // Only enforce HTTPS redirect in non-Development environments. Locally
+        // Kestrel is HTTP-only on port 5216, so the redirect middleware can't
+        // resolve an HTTPS port and silently swallows requests — which is
+        // what was throwing the dev-time "Failed to determine the https port
+        // for redirect" warning + producing intermittent failed requests.
+        if (!app.Environment.IsDevelopment())
+        {
+            app.UseHttpsRedirection();
+        }
         app.UseAntiforgery();
 
         app.UseAuthentication();

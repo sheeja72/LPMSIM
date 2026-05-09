@@ -143,6 +143,11 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
             WHStockWinter= e.WHStockWinter ?? 0,
             SKUMax       = e.SKUMax ?? 0,
             Grade        = e.Grade ?? "",
+            SOH            = e.SOH            ?? 0,
+            MerchNeedMonth = e.MerchNeedMonth ?? 0,
+            MerchNeedWeek  = e.MerchNeedWeek  ?? 0,
+            MerchNeedDay   = e.MerchNeedDay   ?? 0,
+            LPMBoxQty      = e.LPMBoxQty      ?? 0,
         }).ToList();
 
         var last = saved.Count > 0 ? saved.Max(e => e.CreateTS) : (DateTime?)null;
@@ -185,13 +190,18 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 TargetTurn    = r.TargetTurn,
                 TargetSales   = r.TargetSales,
                 TargetEOM     = r.TargetEOM,
-                VolumeGroup   = r.VolumeGroup,
-                WHStock       = r.WHStock,
-                WHStockSummer = r.WHStockSummer,
-                WHStockWinter = r.WHStockWinter,
-                SKUMax        = r.SKUMax,
-                Grade         = r.Grade,
-                CreateTS      = now,
+                VolumeGroup    = r.VolumeGroup,
+                WHStock        = r.WHStock,
+                WHStockSummer  = r.WHStockSummer,
+                WHStockWinter  = r.WHStockWinter,
+                SKUMax         = r.SKUMax,
+                Grade          = r.Grade,
+                SOH            = r.SOH,
+                MerchNeedMonth = r.MerchNeedMonth,
+                MerchNeedWeek  = r.MerchNeedWeek,
+                MerchNeedDay   = r.MerchNeedDay,
+                LPMBoxQty      = r.LPMBoxQty,
+                CreateTS       = now,
             });
         }
 
@@ -246,6 +256,10 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         // Returns one bucket per (DivCode, Season). The legacy LPM_WHStock
         // table is no longer consulted (still queryable from SSMS, but the
         // EOM engine ignores it as of this change).
+        // Warehouse stock totals per (Division, Season) — the SUM of eligible
+        // box quantities. Shown on the EOM grid as a Division-level summary;
+        // the per-item SKU Max calculation has moved to LPM_SimItemSkuMax,
+        // built fresh at SIM Generate time.
         var whStockBySeason = new Dictionary<int, (long Summer, long Winter)>();
         {
             var conn = db.Database.GetDbConnection();
@@ -286,10 +300,85 @@ SELECT id.DivCode,
                     : (cur.Summer + qty, cur.Winter);
             }
         }
-        // Backwards-compatible single value used by the SKU Max range lookup.
+        // Combined value kept on EomRow.WHStock purely for the historical
+        // column on LPM_EOM_Output; it no longer drives SKU Max (that lives
+        // in LPM_SimItemSkuMax now).
         var whStock = whStockBySeason.ToDictionary(
             kv => kv.Key,
             kv => (int)Math.Min(int.MaxValue, kv.Value.Summer + kv.Value.Winter));
+
+        // ── LPM Box Qty per Division ────────────────────────────────────
+        // Total qty of LPM-tagged eligible boxes from racks.dbo.whboxitems.
+        // Filter:
+        //   pt.PalletCategory = 'ELIGIBLE'
+        //   w.LPMDt IS NOT NULL          (any date — the box is LPM-flagged)
+        //   (NO ShopEligible filter — intentionally broader than WHStock)
+        // Surfaces on the EOM Division Summary tab; stored on LPM_EOM_Output
+        // alongside the WHStock columns.
+        var lpmBoxQtyByDiv = new Dictionary<int, long>();
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+                await db.Database.OpenConnectionAsync(ct);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+WITH ItemDiv AS (
+    SELECT u.itemcode, MIN(d.DivCode) AS DivCode
+      FROM Datareporting.dbo.upc_subclass    u
+      INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+      INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+     GROUP BY u.itemcode
+)
+SELECT id.DivCode,
+       Qty = SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
+  FROM racks.dbo.whboxitems w
+  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
+  INNER JOIN ItemDiv id               ON id.itemcode    = w.ItemCode
+ WHERE pt.PalletCategory = 'ELIGIBLE'
+   AND w.LPMDt IS NOT NULL
+ GROUP BY id.DivCode;";
+            cmd.CommandTimeout = 300;
+            using var rdr = await cmd.ExecuteReaderAsync(ct);
+            while (await rdr.ReadAsync(ct))
+            {
+                if (rdr.IsDBNull(0)) continue;
+                lpmBoxQtyByDiv[rdr.GetInt32(0)] = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
+            }
+        }
+
+        // Per-(Store, Div) SOH from racks.dbo.LPM_LocStock — sum across items
+        // for that combination. Same source SIM Generate uses internally;
+        // persisted on EOM Output so reports / Merch Need don't have to
+        // re-aggregate.
+        //
+        // Store country scope mirrors the existing EOM convention
+        // (DataSettings.Country == @country).
+        var sohByStoreDiv = new Dictionary<(string Store, int Div), int>();
+        {
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+                await db.Database.OpenConnectionAsync(ct);
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = @"
+                SELECT ls.StoreID, ls.DivCode, SUM(CAST(ISNULL(ls.SOH,0) AS bigint)) AS SOH
+                  FROM racks.dbo.LPM_LocStock ls
+                  INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+                 WHERE ds.Country = @country
+                   AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
+                   AND ls.DivCode IS NOT NULL
+                 GROUP BY ls.StoreID, ls.DivCode;";
+            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@country", country));
+            cmd.CommandTimeout = 300;
+            using var rdr = await cmd.ExecuteReaderAsync(ct);
+            while (await rdr.ReadAsync(ct))
+            {
+                if (rdr.IsDBNull(0) || rdr.IsDBNull(1)) continue;
+                var storeId = rdr.GetString(0);
+                var divCode = rdr.GetInt32(1);
+                var soh     = rdr.IsDBNull(2) ? 0L : rdr.GetInt64(2);
+                sohByStoreDiv[(storeId, divCode)] = (int)Math.Min(int.MaxValue, soh);
+            }
+        }
 
         var grades = (await db.LpmStoreGrades.AsNoTracking()
             .Where(g => g.IsActive && g.Country == country).OrderBy(g => g.SortOrder)
@@ -297,11 +386,9 @@ SELECT id.DivCode,
         var volumeGroups = (await db.LpmVolumeGroups.AsNoTracking()
             .Where(g => g.IsActive && g.Country == country).OrderBy(g => g.SortOrder)
             .ToListAsync(ct));
-        var skuRules = await db.LpmSKUMaxRules.AsNoTracking()
-            .Where(r => r.IsActive && r.Country == country)
-            .ToListAsync(ct);
-
-        var weeksInMonth = Math.Max(1, DateTime.DaysInMonth(year, month) / 7);
+        // skuRules no longer needed at EOM time — moved to SIM Generate's
+        // LPM_SimItemSkuMax build. (LpmSKUMaxRules still queried elsewhere
+        // when SIM rebuilds the per-item table.)
 
         // Number of periods with a positive weight — the divisor for the
         // weighted MONTHLY AVERAGE. We divide the weighted sum by this count
@@ -396,11 +483,21 @@ SELECT id.DivCode,
         }
 
         // TargetTurn per grade markup.
+        // If the store has no Grade (PriorityRank = 0 / unranked / Grade lookup
+        // miss) → TargetTurn = 0. SIM Generate will treat such stores as having
+        // zero stock turn target, which combined with TargetEOM = 0 (also a
+        // consequence of zero historical signal) means no allocation lands
+        // on them.
         var markupByGrade = grades.ToDictionary(g => g.GradeCode, g => g.MarkupPct);
         foreach (var r in rows)
         {
             if (!planned.TryGetValue(r.DivCode, out var p)) continue;
-            var markup = markupByGrade.GetValueOrDefault(r.Grade, 0m);
+            if (string.IsNullOrEmpty(r.Grade) || !markupByGrade.ContainsKey(r.Grade))
+            {
+                r.TargetTurn = 0m;
+                continue;
+            }
+            var markup = markupByGrade[r.Grade];
             r.TargetTurn = p.PlannedTurn * (1m - markup);
         }
 
@@ -414,16 +511,22 @@ SELECT id.DivCode,
                 r.TargetSales = (r.WtAvgSoldQty / totalWt) * p.PlannedSalesQty;
         }
 
-        // Step 4: Initial EOM per store, then distribute total Planned EOM by share.
+        // Step 4: TargetEOM apportioned to stores by their share of the
+        // division's total WtAvgSoldQty — same shape as Step 3 (TargetSales),
+        // just using PlannedEOM instead of PlannedSalesQty:
+        //
+        //     TargetEOM[store] = (WtAvgSold[store] / Σ WtAvgSold in Division) × PlannedEOM
+        //
+        // Σ TargetEOM(Division) reconciles to LPM_Planned.PlannedEOM. Tgt Turn
+        // / grade markup no longer feed back into Tgt EOM — that influence
+        // exists only on the turn target itself.
         foreach (var grp in rows.GroupBy(r => r.DivCode))
         {
             if (!planned.TryGetValue(grp.Key, out var p)) continue;
-            var list = grp.ToList();
-            var initials = list.Select(r => (r.TargetTurn * r.TargetSales) / weeksInMonth).ToList();
-            var totalInitial = initials.Sum();
-            if (totalInitial <= 0m) continue;
-            for (int i = 0; i < list.Count; i++)
-                list[i].TargetEOM = (initials[i] / totalInitial) * p.PlannedEOM;
+            var totalWt = grp.Sum(r => r.WtAvgSoldQty);
+            if (totalWt <= 0m) continue;
+            foreach (var r in grp)
+                r.TargetEOM = (r.WtAvgSoldQty / totalWt) * p.PlannedEOM;
         }
 
         // Step 5: Volume Group by TargetEOM desc, per division.
@@ -434,20 +537,17 @@ SELECT id.DivCode,
                           (r, code) => r.VolumeGroup = code);
         }
 
-        // Step 6: SKU Max = lookup by (Country, DivCode, VolumeGroup, WHStock range).
-        var ruleIdx = skuRules
-            .GroupBy(r => (r.DivCode, r.GroupCode))
-            .ToDictionary(g => g.Key, g => g.OrderBy(x => x.WHStockFrom).ToList());
-        // Per-(Country, Store, Div) deactivations from LPM_StoreDivAccess.
-        // A row here with IsActive = 0 forces SKUMax to 0 → SIM cannot allocate
-        // the division to that store. Default (no row) = active, full SKUMax.
-        var deactivated = await db.LpmStoreDivAccesses.AsNoTracking()
-            .Where(a => a.Country == country && !a.IsActive)
-            .Select(a => new { a.StoreID, a.DivCode })
-            .ToListAsync(ct);
-        var deactivatedSet = new HashSet<(string Store, int Div)>(
-            deactivated.Select(a => (a.StoreID, a.DivCode)));
-
+        // SKU Max is no longer computed at EOM time — it's per-item now and
+        // built into LPM_SimItemSkuMax at SIM Generate time. The legacy
+        // EomRow.SKUMax column is kept (set to 0) so old reports/exports that
+        // reference it still bind without errors.
+        //
+        // SOH (per Store × Div) and Merch Need (Month / Week) are computed
+        // here so they're stored on LPM_EOM_Output and visible everywhere
+        // downstream:
+        //   MerchNeedMonth = TargetEOM − SOH + TargetSales
+        //   MerchNeedWeek  = MerchNeedMonth / 4
+        // Rounded to int (qty) using AwayFromZero so 0.5 doesn't disappear.
         foreach (var r in rows)
         {
             r.WHStock = whStock.GetValueOrDefault(r.DivCode, 0);
@@ -456,17 +556,18 @@ SELECT id.DivCode,
                 : (0L, 0L);
             r.WHStockSummer = (int)Math.Min(int.MaxValue, seasonal.Summer);
             r.WHStockWinter = (int)Math.Min(int.MaxValue, seasonal.Winter);
-            if (ruleIdx.TryGetValue((r.DivCode, r.VolumeGroup), out var rules))
-            {
-                var match = rules.FirstOrDefault(x => r.WHStock >= x.WHStockFrom && r.WHStock <= x.WHStockTo);
-                r.SKUMax = match?.SKUMax ?? 0;
-            }
-            // Apply the deactivation override last so it wins regardless of
-            // any SKU Max rule match. SIM Generate's per-store skuBalance
-            // (SKUMax − SOH − cumItem) becomes ≤ 0 → store is skipped on
-            // every allocation cycle for this division.
-            if (deactivatedSet.Contains((r.StoreID, r.DivCode)))
-                r.SKUMax = 0;
+            r.SKUMax = 0;
+
+            r.SOH = sohByStoreDiv.GetValueOrDefault((r.StoreID, r.DivCode), 0);
+            var merchNeedMonth = r.TargetEOM - r.SOH + r.TargetSales;
+            r.MerchNeedMonth = (int)Math.Round(merchNeedMonth,            MidpointRounding.AwayFromZero);
+            r.MerchNeedWeek  = (int)Math.Round(merchNeedMonth / 4m,       MidpointRounding.AwayFromZero);
+            r.MerchNeedDay   = (int)Math.Round(merchNeedMonth / 4m / 6m,  MidpointRounding.AwayFromZero);
+
+            // Per-Division LPM Box Qty — same value repeated across stores
+            // of that division (matches how WHStock is propagated).
+            r.LPMBoxQty = (int)Math.Min(int.MaxValue,
+                lpmBoxQtyByDiv.GetValueOrDefault(r.DivCode, 0L));
         }
 
         return rows;

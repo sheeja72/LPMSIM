@@ -83,8 +83,9 @@ else
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.EOM ?? 0m">EOM</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.Balance ?? 0m">Balance</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.MerchNeedWeek ?? 0">Merch Need (Week)</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.LpmSimQty">LPM SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.OverrideQty">Override Qty</MudTableSortLabel></MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>#@context.LPMBatchNo</MudTd>
@@ -93,8 +94,9 @@ else
                         <MudTd>@context.DivisionName</MudTd>
                         <MudTd>@(context.EOM?.ToString("N0"))</MudTd>
                         <MudTd>@context.SOH.ToString("N0")</MudTd>
-                        <MudTd>@(context.Balance?.ToString("N0"))</MudTd>
+                        <MudTd>@(context.MerchNeedWeek?.ToString("N0") ?? "—")</MudTd>
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
+                        <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
                     </RowTemplate>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />

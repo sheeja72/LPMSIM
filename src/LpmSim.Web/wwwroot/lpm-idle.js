@@ -7,8 +7,12 @@
 //   • Negotiate → "/signed-out"                       (local lock screen)
 //   • OIDC      → "/MicrosoftIdentity/Account/SignOut" (true Entra sign-out)
 // We read that meta tag so the JS works in both modes without a rebuild.
+//
+// Idle threshold — bumped to 24 hours so a single login lasts a full day,
+// matching the server-side ClientTimeoutInterval / cookie ExpireTimeSpan.
+// Set to 0 to disable the watchdog entirely.
 (function () {
-    const IDLE_MS = 5 * 60 * 1000;   // 5 minutes
+    const IDLE_MS = 24 * 60 * 60 * 1000;   // 24 hours
     let timer = null;
 
     function signOutUrl() {
@@ -27,10 +31,13 @@
         timer = setTimeout(signOutNow, IDLE_MS);
     }
 
-    // Start the timer immediately, and reset on any sign of life.
-    reset();
-    ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'wheel']
-        .forEach(ev => window.addEventListener(ev, reset, { passive: true }));
+    // IDLE_MS = 0 disables the watchdog entirely (still keeps lpmSignOut
+    // available for the manual Sign Out button).
+    if (IDLE_MS > 0) {
+        reset();
+        ['mousemove', 'mousedown', 'keydown', 'scroll', 'touchstart', 'wheel']
+            .forEach(ev => window.addEventListener(ev, reset, { passive: true }));
+    }
 
     // Expose a manual trigger so the Sign Out button can call us directly
     // — same code path, same destination, immediate.

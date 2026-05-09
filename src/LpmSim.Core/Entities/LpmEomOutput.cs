@@ -34,5 +34,42 @@ public class LpmEomOutput
     public string? Country { get; set; }
     public string? Grade { get; set; }
 
+    /// <summary>
+    /// Store-level division stock-on-hand (sum of <c>LPM_LocStock.SOH</c> across
+    /// items for this Store × Division). Persisted at EOM time so reports and
+    /// downstream consumers don't need to re-aggregate LocStock.
+    /// </summary>
+    public int? SOH { get; set; }
+
+    /// <summary>
+    /// Open-to-receive for the month: <c>TargetEOM − SOH + TargetSales</c>.
+    /// What WH must ship this period so the store ends at <c>TargetEOM</c>
+    /// after selling <c>TargetSales</c>.
+    /// </summary>
+    public int? MerchNeedMonth { get; set; }
+
+    /// <summary>
+    /// Weekly view of <see cref="MerchNeedMonth"/> — divided by 4. Drives the
+    /// SIM allocation cap (replacing the older monthly EomBalance).
+    /// </summary>
+    public int? MerchNeedWeek { get; set; }
+
+    /// <summary>
+    /// Daily slice of <see cref="MerchNeedWeek"/> — divided by a fixed 6
+    /// (production days/week). Reference / planning metric; the actual
+    /// production scheduler picks its own days/week per run.
+    /// </summary>
+    public int? MerchNeedDay { get; set; }
+
+    /// <summary>
+    /// Per-Division total qty of LPM-tagged eligible boxes for the period.
+    /// Sourced from racks.dbo.whboxitems with
+    ///   pt.PalletCategory = 'ELIGIBLE'  AND  w.LPMDt IS NOT NULL
+    /// (no ShopEligible filter — intentionally broader than the WHStock cols
+    /// because the planner wants the full LPM-tagged inventory picture).
+    /// Same value repeated across every (Store × Division) row in the period.
+    /// </summary>
+    public int? LPMBoxQty { get; set; }
+
     public DateTime CreateTS { get; set; }
 }

@@ -1,0 +1,468 @@
+@page "/lpm/adm"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.LpmSim
+@using LpmSim.Core.Entities
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject LpmAdmService AdmSvc
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>ADM — Allocation Distribution Model</PageTitle>
+
+<div class="lpm-page-title">ADM — Allocation Distribution Model</div>
+<div class="lpm-page-subtitle">
+    Assigns each LPM Box of the run month to a specific week (1..N). Boxes are placed
+    most-under-filled-division-first, oldest-first within division, with a hard cap on
+    any one brand per week so a single supplier can't dominate. Status flow: Draft → Approved.
+</div>
+
+<MudExpansionPanels Elevation="0" Class="mb-3">
+    <MudExpansionPanel Text="ADM logic — how the engine picks Week 1 first" Icon="@Icons.Material.Filled.Info">
+        <div style="font-size:0.86rem;line-height:1.55;color:#1f2937;">
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Inputs</h4>
+            <table style="width:100%;border-collapse:collapse;margin-bottom:.9rem;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:24%;">Source</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">What it provides</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Eligible LPM Boxes</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>racks.dbo.whboxitems</code> with <code>LPMDt</code> in run month, pallet category ELIGIBLE, ShopEligible &lt;&gt; 'E'.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Merch Need (Week)</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>LPM_EOM_Output.MerchNeedWeek</code> aggregated per division.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Fill Rate / Fill Gap</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>SUM(SOH) / SUM(TargetEOM)</code> per division — drives ranking.</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Brand</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;"><code>whboxitems.LPM</code> — used for the per-week brand cap.</td></tr>
+                </tbody>
+            </table>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">Algorithm — need-driven (v2)</h4>
+            <ol style="margin:0 0 .9rem 1.2rem;">
+                <li><strong>Each week's target = SUM of MerchNeedWeek</strong> across all divisions
+                    (multiplied by the planner's <em>Week Target %</em> lever — default 100 %).</li>
+                <li><strong>Each division's weekly quota = its own MerchNeedWeek</strong>
+                    × the same multiplier. So Bags' weekly target is <code>Bags.MerchNeedWeek</code>, not a generic share.</li>
+                <li><strong>For each week, walk divisions DESC by Fill Gap</strong>
+                    (= 1 − SOH/TargetEOM). Most under-filled division goes first.</li>
+                <li><strong>Within each division, pull boxes oldest-first</strong>
+                    (LPMDt ASC). With the variety bonus on, boxes from brands not yet picked
+                    this week are preferred.</li>
+                <li><strong>Stop pulling from a division</strong> once its weekly quota is met,
+                    the week's overall target is hit, or the brand cap blocks further picks.</li>
+                <li><strong>Surplus boxes (supply > 4 × weekly need) defer</strong> with
+                    <code>Reason = OVER_NEED</code>. Cap-deferred boxes get
+                    <code>BRAND_CAP</code>, <code>DIV_QUOTA</code>, or <code>WEEK_FULL</code>.</li>
+            </ol>
+
+            <h4 style="margin:.25rem 0 .5rem;color:#0f172a;">3 levers the planner controls</h4>
+            <table style="width:100%;border-collapse:collapse;">
+                <thead>
+                    <tr style="background:#f1f5f9;">
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:28%;">Lever</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;width:18%;">Default</th>
+                        <th style="text-align:left;padding:6px 10px;border:1px solid #e2e8f0;">Effect</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Week Target % of MerchNeed</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">100 %</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">100 = ship exactly MerchNeedWeek per week. 80 = conservative; 120 = aggressive (push above need).</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Brand cap per week %</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">25 %</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Tighten variety (e.g., 15 %) or loosen (e.g., 35 %).</td></tr>
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;">Variety bonus</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">on</td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">Within a division, prefer boxes from brands not yet picked this week.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </MudExpansionPanel>
+</MudExpansionPanels>
+
+@if (!string.IsNullOrEmpty(_lastError))
+{
+    <MudAlert Severity="Severity.Error" Variant="Variant.Outlined" Class="mb-3"
+              ShowCloseIcon="true" CloseIconClicked="() => _lastError = string.Empty">
+        <pre style="white-space:pre-wrap; word-break:break-word; margin:0; font-family:inherit;">@_lastError</pre>
+    </MudAlert>
+}
+
+<div class="lpm-section lpm-filter-bar lpm-filter-compact">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" sm="6" md="2">
+            <MudSelect T="string" Label="Country" Value="_country" ValueChanged="OnCountryChanged"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Clearable="true">
+                @foreach (var c in _countries) { <MudSelectItem T="string" Value="c">@c</MudSelectItem> }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudDatePicker Label="Run Date" Date="_runDate" DateChanged="OnRunDateChanged"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="1">
+            <MudNumericField T="int" Label="Weeks" @bind-Value="_numWeeks"
+                             Min="1" Max="8" Variant="Variant.Outlined" Margin="Margin.Dense" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudNumericField T="decimal" Label="Brand Cap %/wk" @bind-Value="_brandCapPct"
+                             Min="1" Max="100" Step="1" Variant="Variant.Outlined" Margin="Margin.Dense" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="5" Class="d-flex justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                       Disabled="@(_busy || string.IsNullOrEmpty(_country) || _runDate is null)"
+                       StartIcon="@Icons.Material.Filled.Calculate"
+                       OnClick="GenerateAsync">Generate</MudButton>
+            <MudButton Color="Color.Success" Variant="Variant.Filled" DropShadow="false"
+                       Disabled="@(_busy || _run is null || _run.Status != "Draft")"
+                       StartIcon="@Icons.Material.Filled.CheckCircle"
+                       OnClick="ApproveAsync">Approve</MudButton>
+            <MudButton Color="Color.Error" Variant="Variant.Outlined" DropShadow="false"
+                       Disabled="@(_busy || _run is null)"
+                       StartIcon="@Icons.Material.Filled.Delete"
+                       OnClick="DeleteAsync">Delete</MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_busy)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-3" />
+}
+
+@if (_run is not null)
+{
+    <div class="lpm-section mb-3 d-flex flex-wrap gap-3 align-center"
+         style="padding:0.6rem 1rem;background:@(_run.Status == "Approved" ? "#ecfdf5" : "#fffbeb");border:1px solid @(_run.Status == "Approved" ? "#a7f3d0" : "#fcd34d");">
+        <span style="font-weight:700;color:#1f2937;">ADM Run #@_run.AdmRunNo</span>
+        <MudChip T="string" Size="Size.Small" Color="@(_run.Status == "Approved" ? Color.Success : Color.Warning)">@_run.Status</MudChip>
+        <span><strong>Period:</strong> @_run.Country @_run.RunYear-@_run.RunMonth.ToString("D2")</span>
+        <span><strong>Eligible:</strong> @_run.TotalEligibleBoxes.ToString("N0") boxes / @_run.TotalEligibleQty.ToString("N0") qty</span>
+        <span><strong>Scheduled:</strong> @_run.ScheduledBoxes.ToString("N0") boxes / @_run.ScheduledQty.ToString("N0") qty</span>
+        @if (_run.DeferredBoxes > 0)
+        {
+            <span style="color:#b45309;"><strong>Deferred:</strong> @_run.DeferredBoxes.ToString("N0") boxes / @_run.DeferredQty.ToString("N0") qty</span>
+        }
+        <span style="color:#64748b;">· Created @_run.CreateTS.ToString("dd-MMM HH:mm") by @_run.CreatedBy</span>
+    </div>
+
+    @* Week Target banner — shows what the engine pulled from EOM and the
+       supply-vs-demand binding. Helps the planner read "we shipped X per
+       week because that's the merch need". *@
+    @if (_lastResult is { WeekTargetQty: > 0 })
+    {
+        <div class="lpm-section mb-3 d-flex flex-wrap gap-3 align-center"
+             style="padding:0.45rem 1rem;background:#eff6ff;border:1px solid #bfdbfe;color:#1e3a8a;font-size:0.82rem;">
+            <span style="font-weight:600;">Week Target: <strong>@_lastResult.WeekTargetQty.ToString("N0")</strong> qty / week</span>
+            <span style="color:#475569;">· Total Merch Need (Week) across divisions: <strong>@_lastResult.TotalWeeklyNeed.ToString("N0")</strong></span>
+            @if (_lastResult.DemandBound)
+            {
+                <span style="color:#475569;">· bound by demand (supply ≥ need × @_run.NumWeeks weeks)</span>
+            }
+            else
+            {
+                <span style="color:#b45309;">· bound by supply (supply &lt; need × @_run.NumWeeks weeks → spreading evenly)</span>
+            }
+        </div>
+    }
+
+    <MudTabs Elevation="0" Rounded="false" PanelClass="pt-3">
+        <MudTabPanel Text="Week Summary" Icon="@Icons.Material.Filled.CalendarViewWeek">
+            <MudSimpleTable Dense="true" Hover="true" Bordered="true" Class="lpm-eom-preview">
+                <thead>
+                    <tr>
+                        <th>Week</th>
+                        <th class="text-right">Boxes</th>
+                        <th class="text-right">Qty</th>
+                        <th class="text-right">% of Total</th>
+                        <th class="text-right">Divisions</th>
+                        <th class="text-right">Brands</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var w in _weekSummary)
+                    {
+                        var pct = _run.TotalEligibleQty == 0 ? 0m : (decimal)w.Qty / _run.TotalEligibleQty * 100m;
+                        <tr>
+                            <td>@(w.Week == 0 ? "Deferred" : $"Week {w.Week}")</td>
+                            <td class="text-right">@w.Boxes.ToString("N0")</td>
+                            <td class="text-right">@w.Qty.ToString("N0")</td>
+                            <td class="text-right">@pct.ToString("N1")%</td>
+                            <td class="text-right">@w.Divisions</td>
+                            <td class="text-right">@w.Brands</td>
+                        </tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+        </MudTabPanel>
+
+        <MudTabPanel Text="Division × Week" Icon="@Icons.Material.Filled.GridView">
+            <MudSimpleTable Dense="true" Hover="true" Bordered="true" Class="lpm-eom-preview">
+                <thead>
+                    <tr>
+                        <th>Week</th>
+                        <th>Division</th>
+                        <th class="text-right">Fill Rate %</th>
+                        <th class="text-right">Fill Gap %</th>
+                        <th class="text-right">Boxes</th>
+                        <th class="text-right">Qty</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (var r in _weekDivSummary)
+                    {
+                        <tr>
+                            <td>@(r.Week == 0 ? "Deferred" : $"Week {r.Week}")</td>
+                            <td>@(r.Division ?? "(no division)")</td>
+                            <td class="text-right">@r.DivFillRatePct.ToString("N1")%</td>
+                            <td class="text-right">@r.DivFillGapPct.ToString("N1")%</td>
+                            <td class="text-right">@r.Boxes.ToString("N0")</td>
+                            <td class="text-right">@r.Qty.ToString("N0")</td>
+                        </tr>
+                    }
+                </tbody>
+            </MudSimpleTable>
+        </MudTabPanel>
+
+        <MudTabPanel Text="Box Detail" Icon="@Icons.Material.Filled.Inventory">
+            <div class="d-flex gap-2 mb-2">
+                <MudSelect T="int?" Label="Filter Week" Value="_filterWeek" ValueChanged="v => { _filterWeek = v; StateHasChanged(); }"
+                           Margin="Margin.Dense" Variant="Variant.Outlined" Clearable="true" Style="max-width:160px;">
+                    <MudSelectItem T="int?" Value="@((int?)null)">(All)</MudSelectItem>
+                    @for (int w = 1; w <= (_run?.NumWeeks ?? 4); w++)
+                    {
+                        var wk = w;
+                        <MudSelectItem T="int?" Value="@wk">Week @wk</MudSelectItem>
+                    }
+                    <MudSelectItem T="int?" Value="@((int?)0)">Deferred</MudSelectItem>
+                </MudSelect>
+                <MudSelect T="string?" Label="Filter Reason" Value="_filterReason" ValueChanged="v => { _filterReason = v; StateHasChanged(); }"
+                           Margin="Margin.Dense" Variant="Variant.Outlined" Clearable="true" Style="max-width:200px;">
+                    <MudSelectItem T="string?" Value="@((string?)null)">(All)</MudSelectItem>
+                    <MudSelectItem T="string?" Value="@("ALLOC")">ALLOC</MudSelectItem>
+                    <MudSelectItem T="string?" Value="@("BRAND_CAP")">BRAND_CAP</MudSelectItem>
+                    <MudSelectItem T="string?" Value="@("WEEK_FULL")">WEEK_FULL</MudSelectItem>
+                    <MudSelectItem T="string?" Value="@("NO_DIV")">NO_DIV</MudSelectItem>
+                </MudSelect>
+            </div>
+            <MudTable T="LpmSimAdmBoxAlloc" Items="FilteredBoxes" Dense="true" Hover="true"
+                      FixedHeader="true" Height="55vh" Striped="true">
+                <HeaderContent>
+                    <MudTh>Week</MudTh>
+                    <MudTh>Box No</MudTh>
+                    <MudTh>Brand</MudTh>
+                    <MudTh>Division</MudTh>
+                    <MudTh>Warehouse</MudTh>
+                    <MudTh class="text-right">Qty</MudTh>
+                    <MudTh class="text-right">Days in DC</MudTh>
+                    <MudTh class="text-right">Div Fill %</MudTh>
+                    <MudTh class="text-right">Div Gap %</MudTh>
+                    <MudTh>Reason</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd>@(context.Week.HasValue ? $"W{context.Week}" : "—")</MudTd>
+                    <MudTd><code>@context.BoxNo</code></MudTd>
+                    <MudTd>@context.LPMBrand</MudTd>
+                    <MudTd>@context.Division</MudTd>
+                    <MudTd>@context.Warehouse</MudTd>
+                    <MudTd class="text-right">@context.BoxQty.ToString("N0")</MudTd>
+                    <MudTd class="text-right">@context.DaysInDC</MudTd>
+                    <MudTd class="text-right">@context.DivFillRatePct.ToString("N1")%</MudTd>
+                    <MudTd class="text-right">@context.DivFillGapPct.ToString("N1")%</MudTd>
+                    <MudTd>
+                        @if (context.Reason == "ALLOC") { <MudChip T="string" Size="Size.Small" Color="Color.Success">ALLOC</MudChip> }
+                        else                            { <MudChip T="string" Size="Size.Small" Color="Color.Warning">@context.Reason</MudChip> }
+                    </MudTd>
+                </RowTemplate>
+                <PagerContent>
+                    <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                </PagerContent>
+            </MudTable>
+        </MudTabPanel>
+    </MudTabs>
+}
+else if (!_busy)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+        Pick a Country + Run Date and click <strong>Generate</strong> to create an ADM run.
+    </MudAlert>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string  _country = "";
+    private DateTime? _runDate = DateTime.Today;
+    private int      _numWeeks = 4;
+    // Multiplier on MerchNeedWeek for each week's target qty.
+    // 100 % = "ship exactly the weekly merch need" (the business spec default).
+    private decimal  _week1TargetPct = 100.00m;
+    private decimal  _brandCapPct    = 25.00m;
+    private bool     _applyVarietyBonus = true;
+
+    private LpmSimAdmRun? _run;
+    private LpmAdmService.GenerateResult? _lastResult;   // post-Generate diagnostics for the banner
+    private List<LpmSimAdmBoxAlloc>            _boxes          = new();
+    private List<LpmAdmService.WeekSummary>    _weekSummary    = new();
+    private List<LpmAdmService.WeekDivisionSummary> _weekDivSummary = new();
+
+    private int?    _filterWeek;
+    private string? _filterReason;
+
+    private bool   _busy;
+    private string _lastError = "";
+
+    private IEnumerable<LpmSimAdmBoxAlloc> FilteredBoxes
+        => _boxes.Where(b =>
+               (!_filterWeek.HasValue
+                    || (_filterWeek.Value == 0 ? !b.Week.HasValue : b.Week == _filterWeek.Value))
+            && (string.IsNullOrEmpty(_filterReason) || b.Reason == _filterReason));
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (_countries.Count > 0 && string.IsNullOrEmpty(_country)) _country = _countries[0];
+        await LoadExistingAsync();
+    }
+
+    private async Task OnCountryChanged(string? value)
+    {
+        _country = value ?? "";
+        await LoadExistingAsync();
+    }
+
+    private async Task OnRunDateChanged(DateTime? value)
+    {
+        _runDate = value;
+        await LoadExistingAsync();
+    }
+
+    private async Task LoadExistingAsync()
+    {
+        if (string.IsNullOrEmpty(_country) || _runDate is null)
+        {
+            _run = null; _lastResult = null;
+            _boxes.Clear(); _weekSummary.Clear(); _weekDivSummary.Clear();
+            StateHasChanged();
+            return;
+        }
+        try
+        {
+            _run = await AdmSvc.GetRunAsync(_country, _runDate.Value);
+            if (_run is not null)
+            {
+                _boxes          = await AdmSvc.GetBoxesAsync(_run.AdmRunNo);
+                _weekSummary    = await AdmSvc.GetWeekSummaryAsync(_run.AdmRunNo);
+                _weekDivSummary = await AdmSvc.GetWeekDivisionSummaryAsync(_run.AdmRunNo);
+                _numWeeks         = _run.NumWeeks;
+                _brandCapPct      = _run.BrandCapPct;
+                _applyVarietyBonus= _run.ApplyVarietyBonus;
+                // Reconstruct WeekTargetQty for the banner from the largest
+                // week's qty in the existing run (a pure read so we don't
+                // need to re-run the generator just to display the target).
+                if (_weekSummary.Count > 0)
+                {
+                    var maxWeekQty = _weekSummary.Where(w => w.Week > 0).Select(w => w.Qty).DefaultIfEmpty(0).Max();
+                    _lastResult = new LpmAdmService.GenerateResult
+                    {
+                        AdmRunNo = _run.AdmRunNo,
+                        WeekTargetQty   = maxWeekQty,
+                        TotalWeeklyNeed = _weekDivSummary.Sum(d => d.Qty),  // approximate; can be 0 for old runs
+                        DemandBound     = false,
+                    };
+                }
+                else _lastResult = null;
+            }
+            else
+            {
+                _lastResult = null;
+                _boxes.Clear(); _weekSummary.Clear(); _weekDivSummary.Clear();
+            }
+        }
+        catch (Exception ex)
+        {
+            _lastError = ex.InnerException?.Message ?? ex.Message;
+        }
+        StateHasChanged();
+    }
+
+    private async Task GenerateAsync()
+    {
+        if (string.IsNullOrEmpty(_country) || _runDate is null) return;
+        _lastError = ""; _busy = true; StateHasChanged();
+        try
+        {
+            var req = new LpmAdmService.GenerateRequest
+            {
+                Country = _country,
+                RunDate = _runDate.Value.Date,
+                NumWeeks = _numWeeks,
+                Week1TargetPct = _week1TargetPct,
+                BrandCapPct = _brandCapPct,
+                ApplyVarietyBonus = _applyVarietyBonus,
+            };
+            var res = await AdmSvc.GenerateAsync(req);
+            _lastResult = res;
+            Snackbar.Add(
+                $"ADM run #{res.AdmRunNo} — Week Target {res.WeekTargetQty:N0} qty/week · " +
+                $"{res.ScheduledBoxes:N0} boxes scheduled, {res.DeferredBoxes:N0} deferred, in {res.ElapsedMs} ms.",
+                Severity.Success, cfg => cfg.VisibleStateDuration = 8000);
+            await LoadExistingAsync();
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"Generate failed: {ex.InnerException?.Message ?? ex.Message}";
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task ApproveAsync()
+    {
+        if (_run is null) return;
+        var ok = await DialogService.ShowMessageBox(
+            "Approve ADM run?",
+            $"Approve ADM run #{_run.AdmRunNo}? Once approved you'll need to delete it before re-generating.",
+            yesText: "Approve", cancelText: "Cancel");
+        if (ok != true) return;
+        _busy = true; StateHasChanged();
+        try
+        {
+            await AdmSvc.ApproveAsync(_run.AdmRunNo);
+            await LoadExistingAsync();
+            Snackbar.Add("ADM run approved.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"Approve failed: {ex.InnerException?.Message ?? ex.Message}";
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (_run is null) return;
+        var ok = await DialogService.ShowMessageBox(
+            "Delete ADM run?",
+            $"Delete ADM run #{_run.AdmRunNo}? This removes all box assignments — cannot be undone.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+        _busy = true; StateHasChanged();
+        try
+        {
+            await AdmSvc.DeleteAsync(_run.AdmRunNo);
+            _run = null; _boxes.Clear(); _weekSummary.Clear(); _weekDivSummary.Clear();
+            Snackbar.Add("ADM run deleted.", Severity.Info);
+        }
+        catch (Exception ex)
+        {
+            _lastError = $"Delete failed: {ex.InnerException?.Message ?? ex.Message}";
+        }
+        finally { _busy = false; StateHasChanged(); }
+    }
+}

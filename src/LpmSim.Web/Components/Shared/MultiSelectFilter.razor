@@ -1,0 +1,136 @@
+@*
+    Reusable multi-select filter dropdown — combines free-text search with
+    per-item checkboxes. Designed for the report tabs' Division / Store
+    filters where MudBlazor v7's MudSelect (no built-in search) made
+    finding a specific entry tedious in long lists.
+
+    Usage:
+      <MultiSelectFilter Label="Filter Division"
+                         Items="@_allDivisions"
+                         Selected="_filterDivisionsMulti"
+                         SelectedChanged="@((HashSet<string> s) => { _filterDivisionsMulti = s; StateHasChanged(); })" />
+
+    Items are matched case-insensitively; selection set is keyed by the
+    same string. The trigger field shows "All" when empty, the value list
+    when ≤3 selected, and "N selected" otherwise.
+*@
+
+<div class="msf-wrapper" style="position:relative;">
+    @* Trigger: looks like a MudSelect but is just a read-only text field
+       that opens the popover on click. *@
+    <MudTextField T="string" Label="@Label"
+                  Value="@DisplayText" ReadOnly="true"
+                  Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                  Adornment="Adornment.End"
+                  AdornmentIcon="@(_open ? Icons.Material.Filled.ArrowDropUp : Icons.Material.Filled.ArrowDropDown)"
+                  OnAdornmentClick="@Toggle"
+                  @onclick="@Toggle"
+                  Style="cursor:pointer;" />
+
+    @* Popover with the search field + filtered checkbox list. The MudOverlay
+       behind it captures outside clicks so the popover closes naturally
+       when the planner clicks elsewhere. *@
+    <MudOverlay Visible="_open" OnClick="@Close" DarkBackground="false" ZIndex="9" />
+    <MudPopover Open="_open" AnchorOrigin="Origin.BottomLeft" TransformOrigin="Origin.TopLeft"
+                Style="z-index:10;min-width:280px;max-width:380px;">
+        <div style="padding:0.5rem 0.6rem;">
+            @* MudTextField doesn't honour Razor's @bind-Value:event="oninput"
+               (it uses its own event pipeline). The combination that works is
+               Value/ValueChanged with DebounceInterval="0" + Immediate="true",
+               which fires on every keystroke and re-renders this component
+               so FilteredItems re-evaluates. Pre-fix the search field's
+               value updated only on blur, which left the list unfiltered. *@
+            <MudTextField T="string" Value="_search"
+                          ValueChanged="@((string v) => { _search = v ?? string.Empty; StateHasChanged(); })"
+                          Placeholder="Search…"
+                          Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                          Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
+                          Clearable="true" Immediate="true" DebounceInterval="0" />
+            <div style="margin-top:0.4rem;font-size:0.75rem;color:#64748b;">
+                @FilteredItems.Count() of @Items.Count() shown · @Selected.Count selected
+            </div>
+            <div style="max-height:300px;overflow-y:auto;margin-top:0.25rem;border:1px solid #e2e8f0;border-radius:4px;">
+                @if (FilteredItems.Any())
+                {
+                    @foreach (var item in FilteredItems)
+                    {
+                        var key = item;
+                        var isSel = Selected.Contains(key);
+                        <div @onclick="@(() => ToggleItem(key))"
+                             style="@($"cursor:pointer;padding:0.2rem 0.5rem;display:flex;align-items:center;gap:0.4rem;{(isSel ? "background:#eff6ff;" : "")}")">
+                            <MudCheckBox T="bool" Value="@isSel" Dense="true" Size="Size.Small"
+                                         Color="Color.Primary"
+                                         ValueChanged="@((bool _) => ToggleItem(key))" />
+                            <span style="@(isSel ? "color:#1e3a8a;font-weight:500;" : "")">@LabelOf(item)</span>
+                        </div>
+                    }
+                }
+                else
+                {
+                    <div style="padding:0.5rem;color:#94a3b8;font-size:0.78rem;">No matches.</div>
+                }
+            </div>
+            <div style="display:flex;justify-content:space-between;padding-top:0.5rem;gap:0.4rem;">
+                <MudButton OnClick="@SelectAllFiltered" Size="Size.Small" Variant="Variant.Text">
+                    Select all (@FilteredItems.Count())
+                </MudButton>
+                <div style="display:flex;gap:0.3rem;">
+                    <MudButton OnClick="@ClearAll" Size="Size.Small" Variant="Variant.Text" Color="Color.Default">
+                        Clear
+                    </MudButton>
+                    <MudButton OnClick="@Close" Size="Size.Small" Variant="Variant.Filled" Color="Color.Primary">
+                        Done
+                    </MudButton>
+                </div>
+            </div>
+        </div>
+    </MudPopover>
+</div>
+
+@code {
+    [Parameter] public string Label { get; set; } = "";
+    [Parameter] public string Placeholder { get; set; } = "All";
+    [Parameter] public IReadOnlyList<string> Items { get; set; } = Array.Empty<string>();
+    [Parameter] public HashSet<string> Selected { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    [Parameter] public EventCallback<HashSet<string>> SelectedChanged { get; set; }
+    /// <summary>Optional display formatter — defaults to identity.</summary>
+    [Parameter] public Func<string, string> LabelOf { get; set; } = s => s;
+
+    private bool   _open;
+    private string _search = "";
+
+    private IEnumerable<string> FilteredItems
+        => string.IsNullOrEmpty(_search)
+            ? Items
+            : Items.Where(i => LabelOf(i).Contains(_search, StringComparison.OrdinalIgnoreCase));
+
+    private string DisplayText
+        => Selected is null || Selected.Count == 0
+            ? Placeholder
+            : Selected.Count <= 3
+                ? string.Join(", ", Selected.OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
+                : $"{Selected.Count} selected";
+
+    private void Toggle() => _open = !_open;
+    private void Close()  { _open = false; _search = ""; }
+
+    private async Task ToggleItem(string key)
+    {
+        var newSet = new HashSet<string>(Selected, StringComparer.OrdinalIgnoreCase);
+        if (newSet.Contains(key)) newSet.Remove(key);
+        else                       newSet.Add(key);
+        await SelectedChanged.InvokeAsync(newSet);
+    }
+
+    private async Task SelectAllFiltered()
+    {
+        var newSet = new HashSet<string>(Selected, StringComparer.OrdinalIgnoreCase);
+        foreach (var item in FilteredItems) newSet.Add(item);
+        await SelectedChanged.InvokeAsync(newSet);
+    }
+
+    private async Task ClearAll()
+    {
+        await SelectedChanged.InvokeAsync(new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+    }
+}
