@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.8.2</Version>
-    <AssemblyVersion>1.8.2.0</AssemblyVersion>
-    <FileVersion>1.8.2.0</FileVersion>
-    <InformationalVersion>1.8.2 (Planning Hub rebrand + WH Boxes ContNo/LPM filters)</InformationalVersion>
+    <Version>1.9.0</Version>
+    <AssemblyVersion>1.9.0.0</AssemblyVersion>
+    <FileVersion>1.9.0.0</FileVersion>
+    <InformationalVersion>1.9.0 (Weekly Sales Target Split + per-week Merch Need)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

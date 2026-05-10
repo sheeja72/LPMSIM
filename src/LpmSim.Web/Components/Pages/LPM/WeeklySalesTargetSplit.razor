@@ -1,0 +1,291 @@
+@page "/lpm/weekly-sales-target-split"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@using LpmSim.Data.Eom
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject WeeklySalesTargetSplitService Splits
+@inject ISnackbar Snackbar
+
+<PageTitle>Weekly Sales Target Split</PageTitle>
+
+<div class="lpm-page-title">Weekly Sales Target Split</div>
+<div class="lpm-page-subtitle">
+    Per-(Country / Year / Month / Division) split of monthly Target Sales across 4 logical
+    weeks (Wk1 = days 1–7, Wk2 = 8–14, Wk3 = 15–21, Wk4 = 22–end). Drives the per-week
+    Merch Need formula in EOM Generate. Splits must sum to <strong>100%</strong> per row;
+    when no row is saved the engine falls back to the default
+    <strong>20 / 20 / 25 / 35</strong>.
+</div>
+
+<div class="lpm-section lpm-filter-bar" style="max-width:1100px;">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="4" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="OnContextChangedAsync"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="6" sm="3" md="1">
+            <MudNumericField T="int" Label="Year" Value="_year"
+                             ValueChanged="async (int v) => { _year = v; await LoadAsync(); }"
+                             Min="2020" Max="2100" Variant="Variant.Outlined" Margin="Margin.Dense" HideSpinButtons="true" />
+        </MudItem>
+        <MudItem xs="6" sm="3" md="2">
+            <MudSelect T="int" Label="Month" Value="_month"
+                       ValueChanged="async (int v) => { _month = v; await LoadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @for (int m = 1; m <= 12; m++)
+                {
+                    var mv = m;
+                    <MudSelectItem Value="mv">@(new DateTime(2000, mv, 1).ToString("MMM"))</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="12" md="7" Class="d-flex align-center gap-2 justify-end">
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       Disabled="@(string.IsNullOrEmpty(_country))"
+                       StartIcon="@Icons.Material.Filled.ContentCopy" OnClick="CopyFromPrevAsync">
+                Copy prev month
+            </MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Save"
+                       Disabled="!CanSave" OnClick="SaveAsync">
+                Save dirty (@DirtyCount)
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_rows.Count > 0)
+{
+    <div style="max-width:1100px;">
+        <MudTable T="EditableRow" Items="_rows" Hover="true" Dense="true" Striped="true"
+                  Class="lpm-weights-table-xs" Style="max-width:1100px;" AllowUnsorted="false">
+            <HeaderContent>
+                <MudTh Style="width:70px;">Code</MudTh>
+                <MudTh>Division</MudTh>
+                <MudTh Style="width:120px;">Wk1 %</MudTh>
+                <MudTh Style="width:120px;">Wk2 %</MudTh>
+                <MudTh Style="width:120px;">Wk3 %</MudTh>
+                <MudTh Style="width:120px;">Wk4 %</MudTh>
+                <MudTh Style="width:90px;">Total</MudTh>
+                <MudTh Style="width:120px;">Status</MudTh>
+                <MudTh Style="width:60px;"></MudTh>
+            </HeaderContent>
+            <RowTemplate>
+                <MudTd>@context.DivCode</MudTd>
+                <MudTd>@context.Division</MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="decimal" Value="context.Wk1"
+                                     ValueChanged="(decimal v) => MarkDirty(context, () => context.Wk1 = v)"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="0.5m" Format="F2" Culture="System.Globalization.CultureInfo.InvariantCulture" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="decimal" Value="context.Wk2"
+                                     ValueChanged="(decimal v) => MarkDirty(context, () => context.Wk2 = v)"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="0.5m" Format="F2" Culture="System.Globalization.CultureInfo.InvariantCulture" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="decimal" Value="context.Wk3"
+                                     ValueChanged="(decimal v) => MarkDirty(context, () => context.Wk3 = v)"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="0.5m" Format="F2" Culture="System.Globalization.CultureInfo.InvariantCulture" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd Class="py-0">
+                    <MudNumericField T="decimal" Value="context.Wk4"
+                                     ValueChanged="(decimal v) => MarkDirty(context, () => context.Wk4 = v)"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0m" Max="100m" Step="0.5m" Format="F2" Culture="System.Globalization.CultureInfo.InvariantCulture" HideSpinButtons="true" />
+                </MudTd>
+                <MudTd Style="@(IsBalanced(context) ? "color:#16a34a;font-weight:600;" : "color:#dc2626;font-weight:600;")">
+                    @((context.Wk1 + context.Wk2 + context.Wk3 + context.Wk4).ToString("0.##"))
+                </MudTd>
+                <MudTd>
+                    @if (context.IsDirty)
+                    {
+                        <span class="lpm-status lpm-status-warn">Unsaved</span>
+                    }
+                    else if (context.IsCustom)
+                    {
+                        <span class="lpm-status lpm-status-ok">Saved</span>
+                    }
+                    else
+                    {
+                        <span class="lpm-status">Default</span>
+                    }
+                </MudTd>
+                <MudTd>
+                    @if (context.IsCustom)
+                    {
+                        <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Restore"
+                                       Title="Reset to default 20/20/25/35"
+                                       OnClick="() => ResetToDefaultAsync(context)" />
+                    }
+                </MudTd>
+            </RowTemplate>
+        </MudTable>
+    </div>
+}
+else if (!string.IsNullOrEmpty(_country))
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:900px;">
+        Loading divisions for @_country @_year/@_month.ToString("D2")…
+    </MudAlert>
+}
+
+@code {
+    private List<string>      _countries = new();
+    private string            _country   = "UAE";
+    private int               _year      = DateTime.Today.Year;
+    private int               _month     = DateTime.Today.Month;
+    private List<EditableRow> _rows      = new();
+
+    private int  DirtyCount => _rows.Count(r => r.IsDirty);
+    private bool CanSave    => _rows.Any(r => r.IsDirty && IsBalanced(r));
+
+    private static bool IsBalanced(EditableRow r)
+        => Math.Abs(r.Wk1 + r.Wk2 + r.Wk3 + r.Wk4 - 100m) <= 0.01m;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        await LoadAsync();
+    }
+
+    private async Task OnContextChangedAsync(string? v)
+    {
+        _country = v ?? "";
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _rows.Clear(); return; }
+        var data = await Splits.ListAsync(_country, _year, _month);
+        _rows = data.Select(d => new EditableRow
+        {
+            Country  = d.Country,
+            Year     = d.Year,
+            Month    = d.Month,
+            DivCode  = d.DivCode,
+            Division = d.Division,
+            Wk1      = d.Wk1,
+            Wk2      = d.Wk2,
+            Wk3      = d.Wk3,
+            Wk4      = d.Wk4,
+            IsCustom = d.IsCustom,
+            IsDirty  = false,
+        }).ToList();
+    }
+
+    private void MarkDirty(EditableRow r, Action mutate)
+    {
+        mutate();
+        r.IsDirty = true;
+    }
+
+    private async Task SaveAsync()
+    {
+        var dirty = _rows.Where(r => r.IsDirty).ToList();
+        if (dirty.Count == 0) return;
+
+        // Re-validate every dirty row before persisting; UI already disables Save when
+        // any dirty row is unbalanced, but a defensive check stops a stale toggle from
+        // slipping a bad row into the table.
+        var bad = dirty.FirstOrDefault(r => !IsBalanced(r));
+        if (bad is not null)
+        {
+            Snackbar.Add($"Div {bad.DivCode} ({bad.Division}) — splits must sum to 100 (got {(bad.Wk1+bad.Wk2+bad.Wk3+bad.Wk4):0.##}).",
+                         Severity.Error);
+            return;
+        }
+
+        int saved = 0;
+        foreach (var r in dirty)
+        {
+            try
+            {
+                await Splits.SaveAsync(new WeeklySplitRow(
+                    Country: r.Country, Year: r.Year, Month: r.Month, DivCode: r.DivCode,
+                    Division: r.Division,
+                    Wk1: r.Wk1, Wk2: r.Wk2, Wk3: r.Wk3, Wk4: r.Wk4,
+                    IsCustom: true));
+                r.IsDirty  = false;
+                r.IsCustom = true;
+                saved++;
+            }
+            catch (Exception ex)
+            {
+                Snackbar.Add($"Div {r.DivCode}: {ex.Message}", Severity.Error);
+            }
+        }
+        if (saved > 0)
+            Snackbar.Add($"Saved {saved} weekly split row(s).", Severity.Success);
+    }
+
+    private async Task ResetToDefaultAsync(EditableRow r)
+    {
+        try
+        {
+            await Splits.DeleteAsync(r.Country, r.Year, r.Month, r.DivCode);
+            r.Wk1 = WeeklySalesTargetSplitService.DefaultSplit[0];
+            r.Wk2 = WeeklySalesTargetSplitService.DefaultSplit[1];
+            r.Wk3 = WeeklySalesTargetSplitService.DefaultSplit[2];
+            r.Wk4 = WeeklySalesTargetSplitService.DefaultSplit[3];
+            r.IsCustom = false;
+            r.IsDirty  = false;
+            Snackbar.Add($"Div {r.DivCode}: reset to default split.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Reset failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private async Task CopyFromPrevAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) return;
+        var prevDate = new DateTime(_year, _month, 1).AddMonths(-1);
+        var prev = await Splits.ListAsync(_country, prevDate.Year, prevDate.Month);
+
+        // Only carry forward rows that were CUSTOM in the previous month (i.e.
+        // somebody actually saved them). Default-split rows would be a no-op.
+        var customByDiv = prev.Where(p => p.IsCustom).ToDictionary(p => p.DivCode);
+        int touched = 0;
+        foreach (var r in _rows)
+        {
+            if (customByDiv.TryGetValue(r.DivCode, out var src))
+            {
+                r.Wk1 = src.Wk1; r.Wk2 = src.Wk2; r.Wk3 = src.Wk3; r.Wk4 = src.Wk4;
+                r.IsDirty = true;
+                touched++;
+            }
+        }
+        if (touched == 0)
+            Snackbar.Add($"No custom splits to copy from {prevDate:yyyy-MM}.", Severity.Info);
+        else
+            Snackbar.Add($"Copied {touched} division split(s) from {prevDate:yyyy-MM}. Click Save to persist.", Severity.Success);
+    }
+
+    private class EditableRow
+    {
+        public string  Country  { get; set; } = "";
+        public int     Year     { get; set; }
+        public int     Month    { get; set; }
+        public int     DivCode  { get; set; }
+        public string  Division { get; set; } = "";
+        public decimal Wk1      { get; set; }
+        public decimal Wk2      { get; set; }
+        public decimal Wk3      { get; set; }
+        public decimal Wk4      { get; set; }
+        public bool    IsCustom { get; set; }
+        public bool    IsDirty  { get; set; }
+    }
+}

@@ -22,10 +22,12 @@
     <MudNavLink Href="lpm/uploads"          Icon="@Icons.Material.Filled.CloudUpload">Data Uploads</MudNavLink>
     <AuthorizeView Roles="Admin,PlanningManager">
         <Authorized>
+            <MudNavLink Href="lpm/weekly-sales-target-split" Icon="@Icons.Material.Filled.PieChart">Weekly Sales Target Split</MudNavLink>
             <MudNavLink Href="admin/grades"            Icon="@Icons.Material.Filled.WorkspacePremium">Store Grades</MudNavLink>
             <MudNavLink Href="admin/volume-groups"     Icon="@Icons.Material.Filled.DonutSmall">Volume Groups</MudNavLink>
             <MudNavLink Href="admin/skumax-rules"      Icon="@Icons.Material.Filled.Rule">SKU Max Rules</MudNavLink>
             <MudNavLink Href="admin/store-div-access"  Icon="@Icons.Material.Filled.Block">Store / Division Access</MudNavLink>
+            <MudNavLink Href="admin/store-dept-access" Icon="@Icons.Material.Filled.SubdirectoryArrowRight">Store / Department Access</MudNavLink>
             <MudNavLink Href="admin/warehouse-priorities" Icon="@Icons.Material.Filled.Sort">Warehouse Priorities</MudNavLink>
         </Authorized>
     </AuthorizeView>

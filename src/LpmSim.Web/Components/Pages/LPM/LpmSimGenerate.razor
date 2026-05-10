@@ -313,6 +313,20 @@
                            DateChanged="OnRunDateChanged"
                            Variant="Variant.Outlined" Margin="Margin.Dense" />
         </MudItem>
+        @* Week dropdown — drives the per-Store × Div weekly cap. The
+           allocator reads MerchNeedWeek{N} from LPM_EOM_Output based on
+           this value, so the same EOM run can be re-allocated for
+           different weeks without re-running EOM. *@
+        <MudItem xs="6" sm="4" md="1">
+            <MudSelect T="int" Label="Week" Value="_runWeek"
+                       ValueChanged="(int v) => { _runWeek = v; }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                <MudSelectItem T="int" Value="1">Wk 1</MudSelectItem>
+                <MudSelectItem T="int" Value="2">Wk 2</MudSelectItem>
+                <MudSelectItem T="int" Value="3">Wk 3</MudSelectItem>
+                <MudSelectItem T="int" Value="4">Wk 4</MudSelectItem>
+            </MudSelect>
+        </MudItem>
         <MudItem xs="6" sm="4" md="2">
             <MudSelect T="string" Label="Box Source"
                        SelectedValues="_selectedSources"
@@ -2005,6 +2019,15 @@
     private List<string> _countries = new();
     private string _country = "UAE";
     private DateTime? _runDate = DateTime.Today;
+    /// <summary>
+    /// Logical run-week (1..4). Drives the per-Store × Div weekly cap —
+    /// the allocator reads <c>MerchNeedWeek{N}</c> from LPM_EOM_Output
+    /// based on this value (split rows live in LPM_WeeklySalesTargetSplit;
+    /// when missing, EOM Generate falls back to 20/20/25/35). Stamped onto
+    /// the new <c>LPM_SimBatch.WeekNo</c> when the run is persisted.
+    /// Default = 1 (first week of the month — typical SIM cadence).
+    /// </summary>
+    private int _runWeek = 1;
     private bool _srcLpm    = true;
     private bool _srcNonLpm = false;
     /// <summary>
@@ -3157,6 +3180,7 @@
                 IncludePurchasedBoxes = _includePurchasedBoxes,
                 PalletCategories     = _selectedPalletCategories.ToList(),
                 LpmMonths            = _selectedLpmMonths.ToList(),
+                WeekNo               = (byte)_runWeek,
             });
             sw.Stop();
             _lastRunDuration = sw.Elapsed;

@@ -49,10 +49,33 @@ public class LpmEomOutput
     public int? MerchNeedMonth { get; set; }
 
     /// <summary>
-    /// Weekly view of <see cref="MerchNeedMonth"/> — divided by 4. Drives the
-    /// SIM allocation cap (replacing the older monthly EomBalance).
+    /// Weekly view of <see cref="MerchNeedMonth"/>. Now mirrors
+    /// <see cref="MerchNeedWeek1"/> — kept in place so existing readers
+    /// (ADM, ProductionScheduler, the Reports queries, the Custom Report
+    /// engine) continue to work without a bigger refactor. New code should
+    /// pick the appropriate <c>MerchNeedWeekN</c> based on the SIM batch's
+    /// <see cref="LpmSim.Core.Entities.LpmSimBatch.WeekNo"/>.
     /// </summary>
     public int? MerchNeedWeek { get; set; }
+
+    /// <summary>
+    /// Per-week Merch Need (Open-to-Receive) for week 1 of the run month.
+    /// Computed as <c>(TargetEOM − SOH) / 4 + (TargetSales × SplitPct[1] / 100)</c>
+    /// where SplitPct comes from <c>LPM_WeeklySalesTargetSplit</c> for
+    /// <c>(Country, Year, Month, DivCode, WeekNo = 1)</c>. When no row is
+    /// configured, the EomCalculator falls back to the default split
+    /// 20% / 20% / 25% / 35% so EOM never blocks.
+    /// </summary>
+    public int? MerchNeedWeek1 { get; set; }
+
+    /// <summary>Per-week Merch Need for week 2 (default split 20%).</summary>
+    public int? MerchNeedWeek2 { get; set; }
+
+    /// <summary>Per-week Merch Need for week 3 (default split 25%).</summary>
+    public int? MerchNeedWeek3 { get; set; }
+
+    /// <summary>Per-week Merch Need for week 4 (default split 35%).</summary>
+    public int? MerchNeedWeek4 { get; set; }
 
     /// <summary>
     /// Daily slice of <see cref="MerchNeedWeek"/> — divided by a fixed 6

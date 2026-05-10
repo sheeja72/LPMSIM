@@ -1,0 +1,317 @@
+@page "/admin/store-dept-access"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IDialogService DialogService
+
+<PageTitle>Store / Department Access</PageTitle>
+
+<div class="lpm-page-title">Store / Department Access</div>
+<div class="lpm-page-subtitle">
+    Per-Country, per-Store, per-Division, per-Department activation. Deactivating a Department
+    for a Store forces SKU Max = 0 for every item in that Department × Division at that Store
+    on the next SKU Max build (Rule 7). Default (no row) = ACTIVE.
+    <br />
+    The <strong>Dept %</strong> column is reserved for a future EOM / SIM Generate scaling
+    rule and is currently NOT applied by SKU Max. Default 100 (no scaling) when added.
+    <br />
+    <strong>After changes here, re-run Build SKU Max</strong> for the country to apply them.
+</div>
+
+<div class="lpm-section lpm-filter-bar mb-3">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="3">
+            <MudSelect T="string" Label="Show" Value="_filterMode"
+                       ValueChanged="(string v) => { _filterMode = string.IsNullOrEmpty(v) ? InactiveMode : v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                <MudSelectItem T="string" Value="@InactiveMode">Deactivated only</MudSelectItem>
+                <MudSelectItem T="string" Value="@AllMode">All entries</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" md="6" Class="d-flex justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddAsync"
+                       Disabled="@string.IsNullOrEmpty(_country)">
+                Add Store × Department
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+<MudTable T="LpmStoreDeptAccess" Items="_visible" Hover="true" Dense="true" Striped="true"
+          Loading="_loading" AllowUnsorted="false" Class="lpm-narrow-table" Style="max-width:1300px;">
+    <HeaderContent>
+        <MudTh><MudTableSortLabel T="LpmStoreDeptAccess" SortBy="x => x.StoreID" InitialDirection="SortDirection.Ascending">Store ID</MudTableSortLabel></MudTh>
+        <MudTh>Store Name</MudTh>
+        <MudTh><MudTableSortLabel T="LpmStoreDeptAccess" SortBy="x => x.DivCode">Division</MudTableSortLabel></MudTh>
+        <MudTh><MudTableSortLabel T="LpmStoreDeptAccess" SortBy="x => x.Department">Department</MudTableSortLabel></MudTh>
+        <MudTh Style="width:120px;">Dept %</MudTh>
+        <MudTh Style="width:120px;">Active</MudTh>
+        <MudTh>Remarks</MudTh>
+        <MudTh>Updated</MudTh>
+        <MudTh Style="width:200px;">Actions</MudTh>
+    </HeaderContent>
+    <RowTemplate>
+        <MudTd><code>@context.StoreID</code></MudTd>
+        <MudTd>@(_storeNames.GetValueOrDefault(context.StoreID, ""))</MudTd>
+        <MudTd>
+            @{
+                var divName = _divisionNames.GetValueOrDefault(context.DivCode, context.DivCode.ToString());
+            }
+            @divName <span style="color:#94a3b8;">(@context.DivCode)</span>
+        </MudTd>
+        <MudTd>@context.Department</MudTd>
+        <MudTd>@context.DeptPct.ToString("0.##")</MudTd>
+        <MudTd>
+            @if (context.IsActive)
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Success" Variant="Variant.Filled">Active</MudChip>
+            }
+            else
+            {
+                <MudChip T="string" Size="Size.Small" Color="Color.Error" Variant="Variant.Filled">Deactivated</MudChip>
+            }
+        </MudTd>
+        <MudTd>
+            <span style="font-size:.78rem;color:#475569;">@context.Remarks</span>
+        </MudTd>
+        <MudTd>
+            <span style="font-size:.78rem;color:#64748b;">
+                @((context.UpdatedTS ?? context.CreateTS).ToString("yyyy-MM-dd HH:mm"))
+                @if (!string.IsNullOrEmpty(context.UpdatedBy ?? context.CreatedBy))
+                {
+                    <span> · @(context.UpdatedBy ?? context.CreatedBy)</span>
+                }
+            </span>
+        </MudTd>
+        <MudTd>
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" DropShadow="false"
+                       StartIcon="@(context.IsActive ? Icons.Material.Filled.Block : Icons.Material.Filled.CheckCircle)"
+                       Color="@(context.IsActive ? Color.Error : Color.Success)"
+                       OnClick="@(() => ToggleAsync(context))">
+                @(context.IsActive ? "Deactivate" : "Re-activate")
+            </MudButton>
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Edit"
+                           Color="Color.Default" OnClick="@(() => OpenEditAsync(context))" />
+            <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete"
+                           Color="Color.Default" OnClick="@(() => DeleteAsync(context))" />
+        </MudTd>
+    </RowTemplate>
+    <NoRecordsContent>
+        @if (string.IsNullOrEmpty(_country))
+        {
+            <span>Select a country to start.</span>
+        }
+        else
+        {
+            <span>No (Store × Department) overrides for @_country. Every Department is ACTIVE for every Store.</span>
+        }
+    </NoRecordsContent>
+</MudTable>
+
+@code {
+    private const string InactiveMode = "Inactive";
+    private const string AllMode      = "All";
+
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private string _filterMode = InactiveMode;
+
+    private List<LpmStoreDeptAccess> _all = new();
+    private IEnumerable<LpmStoreDeptAccess> _visible
+        => _filterMode == AllMode ? _all : _all.Where(x => !x.IsActive);
+
+    private Dictionary<string, string> _storeNames    = new();
+    private Dictionary<int, string>    _divisionNames = new();
+    /// <summary>
+    /// Distinct (DivCode → Department) pairs from <c>Datareporting.dbo.subclassmaster</c>
+    /// joined to <c>dbo.Division</c>. Used by the Add / Edit dialog to populate the
+    /// Department dropdown for a given Division.
+    /// </summary>
+    private List<(int DivCode, string Department)> _divDepts = new();
+    private bool _loading;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => !string.IsNullOrEmpty(s.SIMCountry))
+            .Select(s => s.SIMCountry!)
+            .Distinct().OrderBy(c => c).ToListAsync();
+        if (_countries.Count > 0 && !_countries.Contains(_country))
+            _country = _countries[0];
+        _divisionNames = await db.Divisions.AsNoTracking()
+            .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? d.DivCode.ToString());
+
+        // Pull (Division → Department) pairs from subclassmaster so the Add
+        // dialog can offer a real Department list (instead of free-typing).
+        // Subclassmaster is keyed by MH4ID; the same Department name appears
+        // many times (one per subclass) so we DISTINCT it. Joined to dbo.Division
+        // to resolve to DivCode for the per-Division grouping in the dialog.
+        var raw = await db.Database.SqlQueryRaw<DivDeptRow>(@"
+            SELECT DISTINCT d.DivCode, sm.Department
+              FROM Datareporting.dbo.subclassmaster sm
+              INNER JOIN dbo.Division d ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+             WHERE sm.Department IS NOT NULL AND LTRIM(RTRIM(sm.Department)) <> ''
+             ORDER BY d.DivCode, sm.Department;").ToListAsync();
+        _divDepts = raw.Select(r => (r.DivCode, r.Department)).ToList();
+
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) { _all = new(); return; }
+        _loading = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            _all = await db.LpmStoreDeptAccesses.AsNoTracking()
+                .Where(a => a.Country == _country)
+                .OrderBy(a => a.StoreID).ThenBy(a => a.DivCode).ThenBy(a => a.Department)
+                .ToListAsync();
+            _storeNames = await db.DataSettings
+                .Where(s => s.SIMCountry == _country && s.StoreID != null && s.PBFullname != null)
+                .Select(s => new { s.StoreID, s.PBFullname })
+                .Distinct()
+                .ToDictionaryAsync(x => x.StoreID!, x => x.PBFullname!);
+        }
+        finally { _loading = false; StateHasChanged(); }
+    }
+
+    private async Task ToggleAsync(LpmStoreDeptAccess row)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmStoreDeptAccesses.FirstOrDefaultAsync(a => a.Id == row.Id);
+        if (entity is null) return;
+        entity.IsActive  = !entity.IsActive;
+        entity.UpdatedTS = DateTime.Now;
+        entity.UpdatedBy = CurrentUser.Name;
+        await db.SaveChangesAsync();
+        Snackbar.Add($"{(entity.IsActive ? "Re-activated" : "Deactivated")} {entity.StoreID} · Div {entity.DivCode} · {entity.Department}",
+            entity.IsActive ? Severity.Success : Severity.Warning);
+        await ReloadAsync();
+    }
+
+    private async Task DeleteAsync(LpmStoreDeptAccess row)
+    {
+        var ok = await DialogService.ShowMessageBox("Remove access override?",
+            $"Delete the access row for {row.StoreID} × Div {row.DivCode} × {row.Department}? The combination reverts to ACTIVE.",
+            yesText: "Delete", cancelText: "Cancel");
+        if (ok != true) return;
+        await using var db = await DbFactory.CreateDbContextAsync();
+        var entity = await db.LpmStoreDeptAccesses.FirstOrDefaultAsync(a => a.Id == row.Id);
+        if (entity is null) return;
+        db.LpmStoreDeptAccesses.Remove(entity);
+        await db.SaveChangesAsync();
+        Snackbar.Add($"Removed override for {row.StoreID} · Div {row.DivCode} · {row.Department}", Severity.Success);
+        await ReloadAsync();
+    }
+
+    private async Task OpenAddAsync()
+    {
+        if (string.IsNullOrEmpty(_country)) return;
+        var parameters = new DialogParameters
+        {
+            ["Country"]      = _country,
+            ["Stores"]       = _storeNames.Select(kv => (kv.Key, kv.Value)).ToList(),
+            ["Divisions"]    = _divisionNames.Select(kv => (kv.Key, kv.Value)).ToList(),
+            ["DivDepts"]     = _divDepts,
+            ["Existing"]     = _all.Select(a => (a.StoreID, a.DivCode, a.Department)).ToHashSet(),
+            ["Editing"]      = (LpmStoreDeptAccess?)null,
+        };
+        var dlg = await DialogService.ShowAsync<StoreDeptAccessAddDialog>("Add (Store × Department) override", parameters,
+            new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Medium, FullWidth = true });
+        var result = await dlg.Result;
+        if (result is null || result.Canceled) return;
+        if (result.Data is List<LpmStoreDeptAccess> picks && picks.Count > 0)
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now = DateTime.Now;
+            foreach (var p in picks)
+            {
+                var existing = await db.LpmStoreDeptAccesses.FirstOrDefaultAsync(a =>
+                    a.Country == _country && a.StoreID == p.StoreID
+                    && a.DivCode == p.DivCode && a.Department == p.Department);
+                if (existing is null)
+                {
+                    db.LpmStoreDeptAccesses.Add(new LpmStoreDeptAccess
+                    {
+                        Country     = _country,
+                        StoreID     = p.StoreID,
+                        DivCode     = p.DivCode,
+                        Department  = p.Department,
+                        DeptPct     = p.DeptPct,
+                        IsActive    = p.IsActive,
+                        Remarks     = p.Remarks,
+                        CreateTS    = now,
+                        CreatedBy   = CurrentUser.Name,
+                    });
+                }
+                else
+                {
+                    existing.DeptPct   = p.DeptPct;
+                    existing.IsActive  = p.IsActive;
+                    existing.Remarks   = p.Remarks;
+                    existing.UpdatedTS = now;
+                    existing.UpdatedBy = CurrentUser.Name;
+                }
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Saved {picks.Count} (Store × Department) override(s) for {_country}.", Severity.Success);
+            await ReloadAsync();
+        }
+    }
+
+    private async Task OpenEditAsync(LpmStoreDeptAccess row)
+    {
+        var parameters = new DialogParameters
+        {
+            ["Country"]      = _country,
+            ["Stores"]       = _storeNames.Select(kv => (kv.Key, kv.Value)).ToList(),
+            ["Divisions"]    = _divisionNames.Select(kv => (kv.Key, kv.Value)).ToList(),
+            ["DivDepts"]     = _divDepts,
+            ["Existing"]     = _all.Where(a => a.Id != row.Id)
+                                   .Select(a => (a.StoreID, a.DivCode, a.Department)).ToHashSet(),
+            ["Editing"]      = row,
+        };
+        var dlg = await DialogService.ShowAsync<StoreDeptAccessAddDialog>("Edit (Store × Department) override", parameters,
+            new DialogOptions { CloseOnEscapeKey = true, MaxWidth = MaxWidth.Medium, FullWidth = true });
+        var result = await dlg.Result;
+        if (result is null || result.Canceled) return;
+        if (result.Data is List<LpmStoreDeptAccess> picks && picks.Count == 1)
+        {
+            var p = picks[0];
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var entity = await db.LpmStoreDeptAccesses.FirstOrDefaultAsync(a => a.Id == row.Id);
+            if (entity is null) { Snackbar.Add("Row not found.", Severity.Error); return; }
+            entity.DeptPct   = p.DeptPct;
+            entity.IsActive  = p.IsActive;
+            entity.Remarks   = p.Remarks;
+            entity.UpdatedTS = DateTime.Now;
+            entity.UpdatedBy = CurrentUser.Name;
+            await db.SaveChangesAsync();
+            Snackbar.Add("Saved.", Severity.Success);
+            await ReloadAsync();
+        }
+    }
+
+    /// <summary>Row shape for the (DivCode, Department) raw SQL — EF Core's <c>SqlQueryRaw</c> needs a public type.</summary>
+    public class DivDeptRow
+    {
+        public int DivCode { get; set; }
+        public string Department { get; set; } = "";
+    }
+}

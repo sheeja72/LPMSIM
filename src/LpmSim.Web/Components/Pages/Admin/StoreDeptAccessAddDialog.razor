@@ -1,0 +1,201 @@
+@using System.Linq
+
+<MudDialog>
+    <DialogContent>
+        @if (Editing is null)
+        {
+            <MudText Typo="Typo.body2" Class="mb-3">
+                Pick one or more <strong>stores</strong> and one or more
+                <strong>(Division × Department)</strong> pairs to add to <strong>@Country</strong>. Each
+                resulting <code>(Store, Div, Department)</code> row will be saved with the chosen
+                <strong>Active</strong>, <strong>Dept %</strong>, and <strong>Remarks</strong>. Existing
+                rows for the same key are updated in place.
+            </MudText>
+
+            <MudGrid Spacing="2">
+                <MudItem xs="12" md="6">
+                    <MudText Typo="Typo.subtitle2" Class="mb-1">Stores</MudText>
+                    <MudTextField T="string" Placeholder="Filter store id or name…"
+                                  ValueChanged="(string v) => { _storeFilter = v ?? string.Empty; }"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                                  Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                    <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
+                        @foreach (var s in FilteredStores)
+                        {
+                            <div>
+                                <MudCheckBox T="bool" Value="@_pickedStores.Contains(s.StoreID)"
+                                             ValueChanged="(bool v) => ToggleStore(s.StoreID, v)"
+                                             Color="Color.Primary" Dense="true" Size="Size.Small">
+                                    <code>@s.StoreID</code> · <span style="color:#475569;">@s.Name</span>
+                                </MudCheckBox>
+                            </div>
+                        }
+                    </div>
+                    <MudText Typo="Typo.caption" Class="mt-1" Style="color:#64748b;">
+                        @_pickedStores.Count selected
+                    </MudText>
+                </MudItem>
+
+                <MudItem xs="12" md="6">
+                    <MudText Typo="Typo.subtitle2" Class="mb-1">Division × Department</MudText>
+                    <MudTextField T="string" Placeholder="Filter division or department…"
+                                  ValueChanged="(string v) => { _ddFilter = v ?? string.Empty; }"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                                  Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                    <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
+                        @foreach (var dd in FilteredDivDepts)
+                        {
+                            <div>
+                                <MudCheckBox T="bool" Value="@_pickedDD.Contains((dd.DivCode, dd.Department))"
+                                             ValueChanged="(bool v) => ToggleDD(dd.DivCode, dd.Department, v)"
+                                             Color="Color.Primary" Dense="true" Size="Size.Small">
+                                    <span style="color:#94a3b8;">(Div @dd.DivCode)</span>
+                                    <span>@_divisionNamesByCode.GetValueOrDefault(dd.DivCode, dd.DivCode.ToString())</span>
+                                    · <strong>@dd.Department</strong>
+                                </MudCheckBox>
+                            </div>
+                        }
+                    </div>
+                    <MudText Typo="Typo.caption" Class="mt-1" Style="color:#64748b;">
+                        @_pickedDD.Count selected
+                    </MudText>
+                </MudItem>
+            </MudGrid>
+        }
+        else
+        {
+            <MudText Typo="Typo.body2" Class="mb-3">
+                Editing <strong>@Editing.StoreID · Div @Editing.DivCode · @Editing.Department</strong>.
+                Country / Store / Division / Department keys are immutable here — delete and re-add
+                if you need to change them.
+            </MudText>
+        }
+
+        <MudGrid Spacing="2" Class="mt-3">
+            <MudItem xs="12" md="4">
+                <MudNumericField T="decimal" Label="Dept % (future use)"
+                                 Value="_deptPct"
+                                 ValueChanged="(decimal v) => { _deptPct = v; }"
+                                 Min="0m" Max="100m" Step="0.5m" Format="F2"
+                                 Culture="System.Globalization.CultureInfo.InvariantCulture"
+                                 Variant="Variant.Outlined" Margin="Margin.Dense" HideSpinButtons="true" />
+            </MudItem>
+            <MudItem xs="12" md="3" Class="d-flex align-center">
+                <MudCheckBox T="bool" Value="_active"
+                             ValueChanged="(bool v) => { _active = v; }"
+                             Color="Color.Primary" Dense="true">
+                    Active
+                </MudCheckBox>
+            </MudItem>
+            <MudItem xs="12" md="5">
+                <MudTextField T="string" Label="Remarks" Value="_remarks"
+                              ValueChanged="(string v) => { _remarks = v; }"
+                              Variant="Variant.Outlined" Margin="Margin.Dense" />
+            </MudItem>
+        </MudGrid>
+
+        @if (Editing is null && _pickedStores.Count > 0 && _pickedDD.Count > 0)
+        {
+            var pairCount = _pickedStores.Count * _pickedDD.Count;
+            <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Dense="true" Class="mt-3">
+                Will save <strong>@pairCount</strong> (Store × Div × Department) combination(s).
+                After saving, re-run Build SKU Max to apply.
+            </MudAlert>
+        }
+    </DialogContent>
+    <DialogActions>
+        <MudButton OnClick="Cancel">Cancel</MudButton>
+        <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                   Disabled="@SaveDisabled"
+                   OnClick="Save">
+            Save
+        </MudButton>
+    </DialogActions>
+</MudDialog>
+
+@code {
+    [CascadingParameter] private MudDialogInstance Dialog { get; set; } = default!;
+    [Parameter] public string Country { get; set; } = "";
+    [Parameter] public List<(string StoreID, string Name)> Stores { get; set; } = new();
+    [Parameter] public List<(int DivCode, string Name)>    Divisions { get; set; } = new();
+    [Parameter] public List<(int DivCode, string Department)> DivDepts { get; set; } = new();
+    [Parameter] public HashSet<(string StoreID, int DivCode, string Department)> Existing { get; set; } = new();
+    /// <summary>When non-null the dialog is in edit mode — store/div/dept fields are read-only.</summary>
+    [Parameter] public LpmStoreDeptAccess? Editing { get; set; }
+
+    private HashSet<string> _pickedStores = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<(int, string)> _pickedDD = new();
+    private string _storeFilter = "";
+    private string _ddFilter = "";
+
+    private decimal _deptPct = 100m;
+    private bool    _active  = true;     // default: Active. Admins typically come here to deactivate, so they'll uncheck.
+    private string  _remarks = "";
+    private Dictionary<int, string> _divisionNamesByCode = new();
+
+    protected override void OnInitialized()
+    {
+        _divisionNamesByCode = Divisions.ToDictionary(d => d.DivCode, d => d.Name);
+        if (Editing is not null)
+        {
+            _deptPct = Editing.DeptPct;
+            _active  = Editing.IsActive;
+            _remarks = Editing.Remarks ?? "";
+            _pickedStores = new(StringComparer.OrdinalIgnoreCase) { Editing.StoreID };
+            _pickedDD     = new() { (Editing.DivCode, Editing.Department) };
+        }
+    }
+
+    private bool SaveDisabled
+        => Editing is null && (_pickedStores.Count == 0 || _pickedDD.Count == 0);
+
+    private IEnumerable<(string StoreID, string Name)> FilteredStores
+        => string.IsNullOrWhiteSpace(_storeFilter)
+            ? Stores.OrderBy(s => s.StoreID)
+            : Stores.Where(s =>
+                    s.StoreID.Contains(_storeFilter, StringComparison.OrdinalIgnoreCase) ||
+                    (s.Name ?? "").Contains(_storeFilter, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(s => s.StoreID);
+
+    private IEnumerable<(int DivCode, string Department)> FilteredDivDepts
+        => string.IsNullOrWhiteSpace(_ddFilter)
+            ? DivDepts.OrderBy(x => x.DivCode).ThenBy(x => x.Department)
+            : DivDepts.Where(x =>
+                    x.DivCode.ToString().Contains(_ddFilter) ||
+                    x.Department.Contains(_ddFilter, StringComparison.OrdinalIgnoreCase) ||
+                    (_divisionNamesByCode.GetValueOrDefault(x.DivCode, "").Contains(_ddFilter, StringComparison.OrdinalIgnoreCase)))
+                .OrderBy(x => x.DivCode).ThenBy(x => x.Department);
+
+    private void ToggleStore(string storeId, bool on)
+    {
+        if (on) _pickedStores.Add(storeId);
+        else    _pickedStores.Remove(storeId);
+    }
+    private void ToggleDD(int divCode, string dept, bool on)
+    {
+        if (on) _pickedDD.Add((divCode, dept));
+        else    _pickedDD.Remove((divCode, dept));
+    }
+
+    private void Save()
+    {
+        var rows = new List<LpmStoreDeptAccess>();
+        foreach (var sid in _pickedStores)
+        foreach (var (dc, dept) in _pickedDD)
+        {
+            rows.Add(new LpmStoreDeptAccess
+            {
+                Id         = Editing?.Id ?? 0,
+                Country    = Country,
+                StoreID    = sid,
+                DivCode    = dc,
+                Department = dept,
+                DeptPct    = _deptPct,
+                IsActive   = _active,
+                Remarks    = string.IsNullOrWhiteSpace(_remarks) ? null : _remarks,
+            });
+        }
+        Dialog.Close(DialogResult.Ok(rows));
+    }
+    private void Cancel() => Dialog.Cancel();
+}

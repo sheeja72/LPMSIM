@@ -146,6 +146,10 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
             SOH            = e.SOH            ?? 0,
             MerchNeedMonth = e.MerchNeedMonth ?? 0,
             MerchNeedWeek  = e.MerchNeedWeek  ?? 0,
+            MerchNeedWeek1 = e.MerchNeedWeek1 ?? 0,
+            MerchNeedWeek2 = e.MerchNeedWeek2 ?? 0,
+            MerchNeedWeek3 = e.MerchNeedWeek3 ?? 0,
+            MerchNeedWeek4 = e.MerchNeedWeek4 ?? 0,
             MerchNeedDay   = e.MerchNeedDay   ?? 0,
             LPMBoxQty      = e.LPMBoxQty      ?? 0,
         }).ToList();
@@ -199,6 +203,10 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 SOH            = r.SOH,
                 MerchNeedMonth = r.MerchNeedMonth,
                 MerchNeedWeek  = r.MerchNeedWeek,
+                MerchNeedWeek1 = r.MerchNeedWeek1,
+                MerchNeedWeek2 = r.MerchNeedWeek2,
+                MerchNeedWeek3 = r.MerchNeedWeek3,
+                MerchNeedWeek4 = r.MerchNeedWeek4,
                 MerchNeedDay   = r.MerchNeedDay,
                 LPMBoxQty      = r.LPMBoxQty,
                 CreateTS       = now,
@@ -243,6 +251,16 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         var planned = await db.LpmPlanneds.AsNoTracking()
             .Where(p => p.Country == country && p.Year1 == year && p.Month1 == month)
             .ToDictionaryAsync(p => p.DivCode, ct);
+
+        // Weekly Sales Target Splits — keyed by (DivCode, WeekNo). Empty when
+        // no rows have been configured for the period; the per-row loop below
+        // falls back to the hard-coded default 20/20/25/35 in that case so
+        // EOM never blocks. Only IsActive rows are considered (deactivated
+        // splits are ignored, equivalent to "no row").
+        var splitsByDivWeek = (await db.LpmWeeklySalesTargetSplits.AsNoTracking()
+            .Where(s => s.Country == country && s.Year1 == year && s.Month1 == month && s.IsActive)
+            .ToListAsync(ct))
+            .ToDictionary(s => (s.DivCode, (int)s.WeekNo), s => s.SplitPct);
 
         // WH stock per Division comes LIVE from racks.dbo.whboxitems (the same
         // table SIM Generate consumes), split by pallettype.Season:
@@ -542,12 +560,30 @@ SELECT id.DivCode,
         // EomRow.SKUMax column is kept (set to 0) so old reports/exports that
         // reference it still bind without errors.
         //
-        // SOH (per Store × Div) and Merch Need (Month / Week) are computed
-        // here so they're stored on LPM_EOM_Output and visible everywhere
-        // downstream:
-        //   MerchNeedMonth = TargetEOM − SOH + TargetSales
-        //   MerchNeedWeek  = MerchNeedMonth / 4
+        // SOH (per Store × Div) and Merch Need (Month / Week / Week 1..4) are
+        // computed here so they're stored on LPM_EOM_Output and visible
+        // everywhere downstream.
+        //
+        //   MerchNeedMonth   = TargetEOM − SOH + TargetSales
+        //   MerchNeedWeekN   = (TargetEOM − SOH) / 4
+        //                    + (TargetSales × SplitPct[N] / 100)        for N = 1..4
+        //   MerchNeedWeek    = MerchNeedWeek1   ← legacy column, mirrors Wk1
+        //                                          so ADM/Reports/Scheduler
+        //                                          keep working untouched.
+        //   MerchNeedDay     = MerchNeedMonth / 4 / 6   (unchanged)
+        //
+        // Splits source: dbo.LPM_WeeklySalesTargetSplit, keyed by
+        // (Country, Year, Month, DivCode, WeekNo). When no row exists for
+        // (Div, Week) the default fallback 20/20/25/35 is used so EOM never
+        // blocks. The Weekly Sales Target Split admin page enforces
+        // sum(splits) = 100 across the 4 weeks before allowing a save, so
+        // the splits we read here either come from defaults (always sum
+        // to 100) or from an admin who saved a balanced row.
         // Rounded to int (qty) using AwayFromZero so 0.5 doesn't disappear.
+        // Default split — also used by the Weekly Sales Target Split admin
+        // page to pre-fill new rows. Sums to 100.
+        decimal[] defaultSplit = { 20m, 20m, 25m, 35m };
+
         foreach (var r in rows)
         {
             r.WHStock = whStock.GetValueOrDefault(r.DivCode, 0);
@@ -560,9 +596,28 @@ SELECT id.DivCode,
 
             r.SOH = sohByStoreDiv.GetValueOrDefault((r.StoreID, r.DivCode), 0);
             var merchNeedMonth = r.TargetEOM - r.SOH + r.TargetSales;
-            r.MerchNeedMonth = (int)Math.Round(merchNeedMonth,            MidpointRounding.AwayFromZero);
-            r.MerchNeedWeek  = (int)Math.Round(merchNeedMonth / 4m,       MidpointRounding.AwayFromZero);
-            r.MerchNeedDay   = (int)Math.Round(merchNeedMonth / 4m / 6m,  MidpointRounding.AwayFromZero);
+            r.MerchNeedMonth = (int)Math.Round(merchNeedMonth,           MidpointRounding.AwayFromZero);
+            r.MerchNeedDay   = (int)Math.Round(merchNeedMonth / 4m / 6m, MidpointRounding.AwayFromZero);
+
+            // Per-week need: half of formula (TargetEOM − SOH)/4 is constant
+            // across weeks; the per-week split only modulates the TargetSales
+            // portion. Pre-compute the constant half once.
+            var stockHalf = (r.TargetEOM - r.SOH) / 4m;
+            int ComputeWeek(int weekNo)
+            {
+                var pct = splitsByDivWeek.TryGetValue((r.DivCode, weekNo), out var p)
+                    ? p
+                    : defaultSplit[weekNo - 1];
+                var v = stockHalf + (r.TargetSales * pct / 100m);
+                return (int)Math.Round(v, MidpointRounding.AwayFromZero);
+            }
+            r.MerchNeedWeek1 = ComputeWeek(1);
+            r.MerchNeedWeek2 = ComputeWeek(2);
+            r.MerchNeedWeek3 = ComputeWeek(3);
+            r.MerchNeedWeek4 = ComputeWeek(4);
+            // Legacy column mirrors Wk1 — see SIM Generate's WeekNo dropdown
+            // for the full per-week pickup.
+            r.MerchNeedWeek = r.MerchNeedWeek1;
 
             // Per-Division LPM Box Qty — same value repeated across stores
             // of that division (matches how WHStock is propagated).

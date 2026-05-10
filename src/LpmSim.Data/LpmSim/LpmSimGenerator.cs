@@ -459,7 +459,44 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         long deactivationsSynced = 0;
         using (var sync = conn.CreateCommand())
         {
+            // Two-step: first audit every (Store × Item) row that's about to
+            // be zeroed (capturing PriorSKUMax > 0), then run the UPDATE.
+            // The audit INSERT is idempotent — it skips rows that already
+            // have a deactivation audit row for this period (avoids dupes
+            // when the sync re-runs without any data change). The WHERE
+            // m.SKUMax > 0 also ensures we only audit + zero rows that
+            // ACTUALLY change — re-running is a no-op once everything is
+            // already zero.
             sync.CommandText = @"
+                INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
+                       (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
+                        PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                SELECT m.Country, m.Year1, m.Month1, m.StoreID, m.ItemCode, m.Season, m.DivCode,
+                       m.SKUMax,
+                       'dbo.LPM_StoreDivAccess',
+                       'Store-Div deactivated post-build (Pre-Generate sync)',
+                       CONCAT('Div=', m.DivCode),
+                       SYSDATETIME()
+                  FROM dbo.LPM_SimItemSkuMax m
+                  INNER JOIN dbo.LPM_StoreDivAccess sda
+                          ON sda.Country = m.Country
+                         AND sda.StoreID = m.StoreID
+                         AND sda.DivCode = m.DivCode
+                 WHERE m.Country = @country
+                   AND m.Year1   = @y
+                   AND m.Month1  = @m
+                   AND sda.IsActive = 0
+                   AND m.SKUMax > 0
+                   AND NOT EXISTS (
+                       SELECT 1 FROM dbo.LPM_SimItemSkuMaxExcluded ex
+                        WHERE ex.Country  = m.Country
+                          AND ex.Year1    = m.Year1
+                          AND ex.Month1   = m.Month1
+                          AND ex.StoreID  = m.StoreID
+                          AND ex.ItemCode = m.ItemCode
+                          AND ex.SourceTable = 'dbo.LPM_StoreDivAccess'
+                   );
+
                 UPDATE m
                    SET m.SKUMax = 0
                   FROM dbo.LPM_SimItemSkuMax m
@@ -630,13 +667,27 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         var eomByDiv = new Dictionary<int, List<EomStore>>();
         using (var cmd = conn.CreateCommand())
         {
+            // The cap column we read depends on req.WeekNo (1..4) — the
+            // planner picks a week on SIM Generate and we drive the
+            // allocator's weekly cap from that week's per-week column.
+            // CASE on a parameter lets SQL Server still parameterise the
+            // plan (no string concatenation into the FROM/SELECT). Fall
+            // back to the legacy MerchNeedWeek column when WeekNo is
+            // outside 1..4 (defensive — req validation should keep it in
+            // range, but a NULL or 0 must not fail open).
             cmd.CommandText = @"
                 SELECT eo.StoreID, eo.DivCode, ISNULL(eo.SKUMax, 0) AS SKUMax,
                        ISNULL(eo.TargetEOM, 0)      AS TargetEOM,
                        ISNULL(eo.PriorityRank, 0)   AS PriorityRank,
                        ISNULL(eo.WtAvgSoldQty, 0)   AS WtAvgSoldQty,
                        ISNULL(eo.VolumeGroup, '')   AS VolumeGroup,
-                       ISNULL(eo.MerchNeedWeek, 0)  AS MerchNeedWeek
+                       ISNULL(CASE @weekNo
+                                  WHEN 1 THEN eo.MerchNeedWeek1
+                                  WHEN 2 THEN eo.MerchNeedWeek2
+                                  WHEN 3 THEN eo.MerchNeedWeek3
+                                  WHEN 4 THEN eo.MerchNeedWeek4
+                                  ELSE        eo.MerchNeedWeek
+                              END, 0) AS MerchNeedWeek
                   FROM dbo.LPM_EOM_Output eo
                   INNER JOIN dbo.DataSettings ds
                           ON ds.StoreID = eo.StoreID
@@ -647,6 +698,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             cmd.Parameters.Add(new SqlParameter("@country", req.Country));
             cmd.Parameters.Add(new SqlParameter("@y", req.RunYear));
             cmd.Parameters.Add(new SqlParameter("@m", req.RunMonth));
+            cmd.Parameters.Add(new SqlParameter("@weekNo", (int)req.WeekNo));
             using var rdr = await cmd.ExecuteReaderAsync(ct);
             while (await rdr.ReadAsync(ct))
             {
@@ -724,6 +776,10 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             FillStrategy         = req.IgnoreMerchNeed
                 ? $"{req.FillStrategy} (SM)"
                 : req.FillStrategy.ToString(),
+            // Stamp the chosen run-week (1..4) onto the batch so downstream
+            // (ADM, Reports, Production Schedule) can tell which week's
+            // Merch Need cap drove the allocation.
+            WeekNo               = req.WeekNo,
         };
         db.LpmSimBatches.Add(batch);
         await db.SaveChangesAsync(ct);   // get LPMBatchNo
@@ -2354,28 +2410,55 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         progress?.Report("Replacing LPM_SimItemSkuMax (delete + insert + exclusions in one transaction)…");
         long inserted = 0;
         long excluded = 0;
-        int  msRule1 = 0, msRule2 = 0, msRule3 = 0, msRule4 = 0;
+        long priceCapped = 0;
+        long deactivated = 0;
+        long deptDeactivated = 0;
+        int  msRule1 = 0, msRule2 = 0, msRule3 = 0, msRule4 = 0, msRule5 = 0, msRule6 = 0, msRule7 = 0;
         using (var ins = conn.CreateCommand())
         {
-            // Single batch — DELETE + INSERT + 4 exclusion rules — all wrapped
-            // in BEGIN TRY/TRAN/COMMIT so failures roll back atomically. The
-            // SKUMax-snapshot tempdb table at the top means each rule's audit
-            // row records the ORIGINAL pre-zero SKUMax even when multiple
-            // rules match the same item.
+            // Single batch — DELETE + INSERT + 4 zero-out exclusion rules + 1
+            // price-band cap rule — all wrapped in BEGIN TRY/TRAN/COMMIT so
+            // failures roll back atomically. The SKUMax-snapshot tempdb table
+            // at the top means each rule's audit row records the ORIGINAL
+            // pre-override SKUMax even when multiple rules match the same item.
             //
-            // Column-name assumptions (correct if your tables differ):
-            //   • usa.dbo.ExcludeExport_Planning   (Shopname, ItemCode)
-            //   • usa.dbo.ExcludeSubclass          (Shopname, MH4ID, Inactive)
-            //   • bfldata.dbo.RemoveItemsFromTransfer (ItemCode, ShopName, TrnDate)
-            //   • usa.dbo.ExcludeItemsMFCS         (Shopname, HSCode)
-            //   • usa.dbo.upcbarcodes              (ItemCode, HSCode)
-            //   • Datareporting.dbo.upc_subclass   (itemcode, MH4ID)
+            // The 7 rules that can override SKUMax in this build:
+            //   1) usa.dbo.ExcludeExport_Planning           → SKUMax = 0
+            //   2) usa.dbo.ExcludeSubclass                  → SKUMax = 0
+            //   3) bfldata.dbo.RemoveItemsFromTransfer      → SKUMax = 0
+            //   4) usa.dbo.ExcludeItemsMFCS                 → SKUMax = 0
+            //   5) usa.dbo.DeptPriceMaxQty_MH4 (price band) → SKUMax = maxqty (replace)
+            //   6) dbo.LPM_StoreDivAccess (IsActive=0)      → SKUMax = 0
+            //   7) dbo.LPM_StoreDeptAccess (IsActive=0)     → SKUMax = 0
+            //
+            // All 7 rules write audit rows to dbo.LPM_SimItemSkuMaxExcluded
+            // with a distinct SourceTable so admins can audit every override.
+            // Rule 6 also re-runs at SIM Generate (Pre-Generate deactivation
+            // sync) to catch deactivations made between the build and the run.
+            //
+            // Order of UPDATEs matters: the price-band CAP runs FIRST (sets
+            // SKUMax = maxqty), then the 4 zero-out rules run AFTER (set
+            // SKUMax = 0). When an item matches both, the zero wins —
+            // exclusions are absolute and trump price caps.
+            //
+            // Column-name reference (verified against the live schema):
+            //   • usa.dbo.ExcludeExport_Planning      (ShopName, ItemCode, …)
+            //   • usa.dbo.ExcludeSubclass             (Shop,     MH4ID, Inactive, …)   ← uses Shop, not Shopname
+            //   • bfldata.dbo.RemoveItemsFromTransfer (ShopName, Itemcode, Trndate, …)
+            //   • usa.dbo.ExcludeItemsMFCS            (Shopname, HScode, …)
+            //   • usa.dbo.DeptPriceMaxQty_MH4         (shopname, DivCode, DEPARTMENT, PriceF, PriceT, maxqty, …)
+            //   • Hodata.dbo.SalesPrice               (CostCode, ItemCode, SalesRate, TrnDate, …)
+            //   • Datareporting.dbo.subclassmaster    (MH4ID, Division, Department, …)
+            //   • usa.dbo.upcbarcodes                 (itemcode, HSCode)
+            //   • Datareporting.dbo.upc_subclass      (itemcode, MH4ID)
             //
             // SQL Server uses case-insensitive column names by default, so
-            // "Shopname" / "shopname" / "SHOPNAME" all match the same column.
-            // The earlier `Shop` references threw "Invalid column name 'Shop'"
-            // — the actual column on these usa.dbo tables matches the
-            // ExcludeItemsMFCS naming convention (Shopname).
+            // "Shopname" / "shopname" / "ShopName" / "SHOPNAME" all match the
+            // same column. ExcludeSubclass is the odd one out — its store
+            // column is literally named "Shop" (no "name" suffix), so the
+            // join on Rule 2 below explicitly references es.Shop. Mismatch
+            // confirmed by the build's exclusions-SKIPPED message:
+            //   "exclusions SKIPPED (Invalid column name 'Shopname'.)".
             // DELETE shape depends on scope:
             //   • All        → full wipe of every row for the period (no
             //                  leftovers; clean rebuild).
@@ -2412,6 +2495,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
                     {deleteSql}
 
+                    -- The main INSERT lays down the rule-computed SKUMax for
+                    -- every (Store × Item × Season). Deactivations from
+                    -- LPM_StoreDivAccess (#Deact) are NOT applied here — they
+                    -- run as Rule 6 in the exclusions transaction below so
+                    -- audit rows can be written to LPM_SimItemSkuMaxExcluded
+                    -- like the other 5 override rules. The would-have-been
+                    -- SKUMax we record as PriorSKUMax in the audit row is
+                    -- exactly what this INSERT produces.
                     INSERT INTO dbo.LPM_SimItemSkuMax WITH (TABLOCK)
                         (Country, Year1, Month1, StoreID, ItemCode, Season,
                          DivCode, WHBoxQty, VolumeGroup, SKUMax, CreateTS, CreatedBy)
@@ -2419,18 +2510,12 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                         @country, @y, @m,
                         s.StoreID, iw.ItemCode, iw.Season,
                         iw.DivCode, iw.WHBoxQty, s.VolumeGroup,
-                        CASE
-                            WHEN d.StoreID IS NOT NULL THEN 0
-                            ELSE ISNULL(r.SKUMax, 0)
-                        END,
+                        ISNULL(r.SKUMax, 0),
                         @now,
                         @user
                       FROM #ItemWh iw
                       INNER JOIN #Stores s
                               ON s.DivCode = iw.DivCode
-                      LEFT  JOIN #Deact d
-                              ON d.StoreID = s.StoreID
-                             AND d.DivCode = iw.DivCode
                       OUTER APPLY (
                           SELECT TOP 1 r2.SKUMax
                             FROM #Rules r2
@@ -2477,15 +2562,22 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             {
                 excl.CommandText = @"
                     SET XACT_ABORT ON;
-                    DECLARE @excluded bigint = 0;
+                    DECLARE @excluded        bigint = 0;
+                    DECLARE @priceCapped     bigint = 0;
+                    DECLARE @deactivated     bigint = 0;
+                    DECLARE @deptDeactivated bigint = 0;
                     DECLARE @t0 datetime2(3);
-                    DECLARE @ms1 int = 0, @ms2 int = 0, @ms3 int = 0, @ms4 int = 0;
+                    DECLARE @ms1 int = 0, @ms2 int = 0, @ms3 int = 0, @ms4 int = 0,
+                            @ms5 int = 0, @ms6 int = 0, @ms7 int = 0;
 
                     BEGIN TRY
                         BEGIN TRAN;
 
-                        IF OBJECT_ID('tempdb..#SkuSnap') IS NOT NULL DROP TABLE #SkuSnap;
-                        IF OBJECT_ID('tempdb..#ExcludeMatches') IS NOT NULL DROP TABLE #ExcludeMatches;
+                        IF OBJECT_ID('tempdb..#SkuSnap')          IS NOT NULL DROP TABLE #SkuSnap;
+                        IF OBJECT_ID('tempdb..#ExcludeMatches')   IS NOT NULL DROP TABLE #ExcludeMatches;
+                        IF OBJECT_ID('tempdb..#PriceCapMatches')  IS NOT NULL DROP TABLE #PriceCapMatches;
+                        IF OBJECT_ID('tempdb..#DeactMatches')     IS NOT NULL DROP TABLE #DeactMatches;
+                        IF OBJECT_ID('tempdb..#DeptDeactMatches') IS NOT NULL DROP TABLE #DeptDeactMatches;
 
                         SELECT StoreID, ItemCode, Season, DivCode, SKUMax AS OrigSku
                           INTO #SkuSnap
@@ -2503,6 +2595,48 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                             SourceTable varchar(120) NOT NULL,
                             Reason      varchar(160) NOT NULL,
                             MatchedKey  varchar(120) NULL
+                        );
+
+                        -- Rule 5 (price-band cap) writes here. Kept in a separate
+                        -- temp table from #ExcludeMatches because the action is
+                        -- different — exclusions zero out, price caps replace
+                        -- with maxqty. NewSku carries the per-row replacement
+                        -- value so the UPDATE below can pick it from the row.
+                        CREATE TABLE #PriceCapMatches (
+                            StoreID     varchar(25)  NOT NULL,
+                            ItemCode    varchar(30)  NOT NULL,
+                            Season      char(1)      NULL,
+                            DivCode     int          NULL,
+                            OrigSku     int          NOT NULL,
+                            NewSku      int          NOT NULL,
+                            MatchedKey  varchar(160) NULL
+                        );
+
+                        -- Rule 6 (deactivation) writes here. Same shape as
+                        -- #ExcludeMatches (action = SKUMax = 0) — but kept in
+                        -- a separate table so the audit can distinguish
+                        -- 'deactivated by LPM_StoreDivAccess' from the 4
+                        -- external-table exclusions.
+                        CREATE TABLE #DeactMatches (
+                            StoreID     varchar(25)  NOT NULL,
+                            ItemCode    varchar(30)  NOT NULL,
+                            Season      char(1)      NULL,
+                            DivCode     int          NULL,
+                            OrigSku     int          NOT NULL,
+                            MatchedKey  varchar(120) NULL
+                        );
+
+                        -- Rule 7 (Store × Department deactivation). Same shape as
+                        -- #DeactMatches but keyed at (Store, Div, Department) —
+                        -- captures ItemCode→Department from subclassmaster so
+                        -- the audit row records the matching Department.
+                        CREATE TABLE #DeptDeactMatches (
+                            StoreID     varchar(25)  NOT NULL,
+                            ItemCode    varchar(30)  NOT NULL,
+                            Season      char(1)      NULL,
+                            DivCode     int          NULL,
+                            OrigSku     int          NOT NULL,
+                            MatchedKey  varchar(160) NULL
                         );
 
                         DELETE FROM dbo.LPM_SimItemSkuMaxExcluded
@@ -2524,18 +2658,24 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                         SET @ms1 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
                         SET @t0 = SYSDATETIME();
+                        -- ExcludeSubclass uses the legacy column name Shop (NOT Shopname
+                        -- like the other 3 exclusion tables). Column-name divergence
+                        -- confirmed against the live schema:
+                        --   USA.dbo.ExcludeSubclass(Subclass, Shop, Trndate, Remarks, UserId, Inactive, MH4ID).
+                        -- Joining on Shop here keeps the Shopname literal out of this rule
+                        -- so a fix on the other tables does not require touching this one.
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
                                'usa.dbo.ExcludeSubclass',
-                               'Shopname x MH4ID active in ExcludeSubclass (Inactive=N)',
+                               'Shop x MH4ID active in ExcludeSubclass (Inactive=N)',
                                CONCAT('MH4ID=', us.MH4ID)
                           FROM #SkuSnap snap
                           INNER JOIN Datareporting.dbo.upc_subclass us
                                   ON us.itemcode = snap.ItemCode
                           INNER JOIN usa.dbo.ExcludeSubclass es
-                                  ON es.Shopname = snap.StoreID
-                                 AND es.mh4id    = us.MH4ID
+                                  ON es.Shop  = snap.StoreID
+                                 AND es.mh4id = us.MH4ID
                          WHERE es.Inactive = 'N';
                         SET @ms2 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
@@ -2570,6 +2710,147 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                            );
                         SET @ms4 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
+                        SET @t0 = SYSDATETIME();
+                        -- Rule 5 — usa.dbo.DeptPriceMaxQty_MH4 (price-band cap)
+                        --
+                        -- Action: REPLACE SKUMax with maxqty (per the planner spec —
+                        -- not LEAST(); even if current SKUMax is higher, force it
+                        -- to maxqty). Doesn't override deactivations because
+                        -- #SkuSnap was filtered to SKUMax > 0 above; deactivated
+                        -- (Store, Div) rows never enter this path.
+                        --
+                        -- Lookup pipeline:
+                        --   1) ItemAttr  — DivCode + Department per item from
+                        --                  upc_subclass × subclassmaster ×
+                        --                  Division. MIN(DivCode)/MAX(Department)
+                        --                  for the rare item that maps to multiple
+                        --                  subclasses (deterministic + stable).
+                        --   2) ItemPrice — latest SalesRate per item for
+                        --                  CostCode='001'. MAX(TrnDate) defines
+                        --                  the active price; older rows are stale.
+                        --   3) Band match — TOP 1 row in DeptPriceMaxQty_MH4 by
+                        --                   (shopname, DivCode, Department, PriceF
+                        --                    <= Price <= PriceT) ordered by
+                        --                   PriceF (smallest band wins on overlap).
+                        --
+                        -- No band match → no row inserted → SKUMax unchanged for
+                        -- that item (matches the No-match-skip policy).
+                        WITH ItemAttr AS (
+                            SELECT u.itemcode,
+                                   MIN(d.DivCode) AS DivCode,
+                                   MAX(sm.Department) AS Department
+                              FROM Datareporting.dbo.upc_subclass    u
+                              INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                              INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                             GROUP BY u.itemcode
+                        ),
+                        LatestPriceDt AS (
+                            SELECT sp.ItemCode, MAX(sp.TrnDate) AS LatestDt
+                              FROM Hodata.dbo.SalesPrice sp
+                             WHERE sp.CostCode = '001'
+                             GROUP BY sp.ItemCode
+                        ),
+                        ItemPrice AS (
+                            SELECT sp.ItemCode,
+                                   CAST(sp.SalesRate AS int) AS Price
+                              FROM Hodata.dbo.SalesPrice sp
+                              INNER JOIN LatestPriceDt lp
+                                      ON lp.ItemCode = sp.ItemCode
+                                     AND lp.LatestDt = sp.TrnDate
+                             WHERE sp.CostCode = '001'
+                        )
+                        INSERT INTO #PriceCapMatches
+                               (StoreID, ItemCode, Season, DivCode, OrigSku, NewSku, MatchedKey)
+                        SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
+                               bnd.maxqty,
+                               CONCAT('Div=', ia.DivCode,
+                                      ' / Dept=', ia.Department,
+                                      ' / Price=', ip.Price,
+                                      ' (band ', bnd.PriceF, '-', bnd.PriceT, ')',
+                                      ' / maxqty=', bnd.maxqty)
+                          FROM #SkuSnap snap
+                          INNER JOIN ItemAttr  ia ON ia.itemcode = snap.ItemCode
+                          INNER JOIN ItemPrice ip ON ip.ItemCode = snap.ItemCode
+                          CROSS APPLY (
+                              SELECT TOP 1 dp.maxqty, dp.PriceF, dp.PriceT
+                                FROM usa.dbo.DeptPriceMaxQty_MH4 dp
+                               WHERE dp.shopname   = snap.StoreID
+                                 AND dp.DivCode    = ia.DivCode
+                                 AND dp.DEPARTMENT = ia.Department
+                                 AND ip.Price BETWEEN dp.PriceF AND dp.PriceT
+                               ORDER BY dp.PriceF
+                          ) bnd;
+                        SET @ms5 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+
+                        SET @t0 = SYSDATETIME();
+                        -- Rule 6 — dbo.LPM_StoreDivAccess (deactivation)
+                        --
+                        -- Action: zero out every (Store × Item) row whose
+                        -- (Store, Div) is flagged IsActive=0 in
+                        -- LPM_StoreDivAccess. This used to be applied at the
+                        -- main INSERT via a CASE on #Deact — moved here so
+                        -- the deactivation produces an audit row in
+                        -- LPM_SimItemSkuMaxExcluded like the other 5 rules.
+                        --
+                        -- We only audit rows with OrigSku > 0 (which is
+                        -- already enforced by the #SkuSnap WHERE clause).
+                        -- A row that was rule-zero AND deactivated wouldn't
+                        -- be visible to the planner anyway and would just be
+                        -- audit noise.
+                        INSERT INTO #DeactMatches
+                               (StoreID, ItemCode, Season, DivCode, OrigSku, MatchedKey)
+                        SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
+                               CONCAT('Div=', snap.DivCode)
+                          FROM #SkuSnap snap
+                          INNER JOIN #Deact d
+                                  ON d.StoreID = snap.StoreID
+                                 AND d.DivCode = snap.DivCode;
+                        SET @ms6 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+
+                        SET @t0 = SYSDATETIME();
+                        -- Rule 7 — dbo.LPM_StoreDeptAccess (Store × Department deactivation)
+                        --
+                        -- Action: zero out every (Store × Item) row whose
+                        -- (Country, Store, Div, Department) tuple is flagged
+                        -- IsActive=0 in LPM_StoreDeptAccess. Department comes
+                        -- from subclassmaster.Department (the name) — same
+                        -- convention as DeptPriceMaxQty_MH4 (Rule 5). Items
+                        -- with no Department mapping in subclassmaster are
+                        -- silently skipped (no row → no zero-out).
+                        --
+                        -- The DeptPct column on LPM_StoreDeptAccess is RESERVED
+                        -- for a future EOM / SIM Generate scaling rule and is
+                        -- intentionally NOT applied here — only the binary
+                        -- IsActive flag drives Rule 7.
+                        WITH ItemDept AS (
+                            SELECT u.itemcode,
+                                   MAX(sm.Department) AS Department
+                              FROM Datareporting.dbo.upc_subclass    u
+                              INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                             WHERE sm.Department IS NOT NULL
+                               AND LTRIM(RTRIM(sm.Department)) <> ''
+                             GROUP BY u.itemcode
+                        )
+                        INSERT INTO #DeptDeactMatches
+                               (StoreID, ItemCode, Season, DivCode, OrigSku, MatchedKey)
+                        SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
+                               CONCAT('Div=', snap.DivCode, ' / Dept=', id.Department)
+                          FROM #SkuSnap snap
+                          INNER JOIN ItemDept id ON id.itemcode = snap.ItemCode
+                          INNER JOIN dbo.LPM_StoreDeptAccess sda
+                                  ON sda.Country    = @country
+                                 AND sda.StoreID    = snap.StoreID
+                                 AND sda.DivCode    = snap.DivCode
+                                 AND sda.Department = id.Department
+                                 AND sda.IsActive   = 0;
+                        SET @ms7 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+
+                        -- Audit: write zero-out matches, price-cap matches, AND
+                        -- deactivation matches to the same audit table. Reason
+                        -- + MatchedKey + SourceTable distinguish them;
+                        -- PriorSKUMax = OrigSku in all cases. The price-cap
+                        -- rows have the new (post-cap) value embedded in
+                        -- MatchedKey; the deact rows just record the (Div) key.
                         INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                                (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
                                 PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
@@ -2578,29 +2859,91 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           FROM #ExcludeMatches em;
                         SET @excluded = @@ROWCOUNT;
 
-                        CREATE NONCLUSTERED INDEX IX_ExcludeMatches_SI ON #ExcludeMatches (StoreID, ItemCode);
+                        INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
+                               (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                        SELECT @country, @y, @m, pc.StoreID, pc.ItemCode, pc.Season, pc.DivCode,
+                               pc.OrigSku,
+                               'usa.dbo.DeptPriceMaxQty_MH4',
+                               'Price-band cap from DeptPriceMaxQty_MH4 (REPLACE)',
+                               pc.MatchedKey, SYSDATETIME()
+                          FROM #PriceCapMatches pc;
+                        SET @priceCapped = @@ROWCOUNT;
+
+                        INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
+                               (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                        SELECT @country, @y, @m, dm.StoreID, dm.ItemCode, dm.Season, dm.DivCode,
+                               dm.OrigSku,
+                               'dbo.LPM_StoreDivAccess',
+                               'Store-Div deactivated in LPM_StoreDivAccess (IsActive=0)',
+                               dm.MatchedKey, SYSDATETIME()
+                          FROM #DeactMatches dm;
+                        SET @deactivated = @@ROWCOUNT;
+
+                        INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
+                               (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                        SELECT @country, @y, @m, dd.StoreID, dd.ItemCode, dd.Season, dd.DivCode,
+                               dd.OrigSku,
+                               'dbo.LPM_StoreDeptAccess',
+                               'Store-Dept deactivated in LPM_StoreDeptAccess (IsActive=0)',
+                               dd.MatchedKey, SYSDATETIME()
+                          FROM #DeptDeactMatches dd;
+                        SET @deptDeactivated = @@ROWCOUNT;
+
+                        CREATE NONCLUSTERED INDEX IX_ExcludeMatches_SI    ON #ExcludeMatches    (StoreID, ItemCode);
+                        CREATE NONCLUSTERED INDEX IX_PriceCapMatches_SI   ON #PriceCapMatches   (StoreID, ItemCode);
+                        CREATE NONCLUSTERED INDEX IX_DeactMatches_SI      ON #DeactMatches      (StoreID, ItemCode);
+                        CREATE NONCLUSTERED INDEX IX_DeptDeactMatches_SI  ON #DeptDeactMatches  (StoreID, ItemCode);
+
+                        -- Apply the price-band cap FIRST (set SKUMax = maxqty),
+                        -- then the zero-out rules (1–4, 6, 7). When an item
+                        -- matches both, the zero wins — exclusions and
+                        -- deactivations are absolute and trump price caps.
+                        UPDATE m
+                           SET m.SKUMax = pc.NewSku
+                          FROM dbo.LPM_SimItemSkuMax m
+                          INNER JOIN #PriceCapMatches pc
+                                  ON pc.StoreID  = m.StoreID
+                                 AND pc.ItemCode = m.ItemCode
+                         WHERE m.Country = @country AND m.Year1 = @y AND m.Month1 = @m;
 
                         UPDATE m
                            SET m.SKUMax = 0
                           FROM dbo.LPM_SimItemSkuMax m
                          WHERE m.Country = @country AND m.Year1 = @y AND m.Month1 = @m
-                           AND EXISTS (
-                               SELECT 1 FROM #ExcludeMatches em
-                                WHERE em.StoreID = m.StoreID
-                                  AND em.ItemCode = m.ItemCode
+                           AND (
+                               EXISTS (SELECT 1 FROM #ExcludeMatches em
+                                        WHERE em.StoreID  = m.StoreID
+                                          AND em.ItemCode = m.ItemCode)
+                            OR EXISTS (SELECT 1 FROM #DeactMatches dm
+                                        WHERE dm.StoreID  = m.StoreID
+                                          AND dm.ItemCode = m.ItemCode)
+                            OR EXISTS (SELECT 1 FROM #DeptDeactMatches dd
+                                        WHERE dd.StoreID  = m.StoreID
+                                          AND dd.ItemCode = m.ItemCode)
                            );
 
                         DROP TABLE IF EXISTS #SkuSnap;
                         DROP TABLE IF EXISTS #ExcludeMatches;
+                        DROP TABLE IF EXISTS #PriceCapMatches;
+                        DROP TABLE IF EXISTS #DeactMatches;
+                        DROP TABLE IF EXISTS #DeptDeactMatches;
                         COMMIT;
                     END TRY
                     BEGIN CATCH
                         IF @@TRANCOUNT > 0 ROLLBACK;
                         THROW;
                     END CATCH;
-                    SELECT @excluded AS Excluded,
+                    SELECT @excluded        AS Excluded,
+                           @priceCapped     AS PriceCapped,
+                           @deactivated     AS Deactivated,
+                           @deptDeactivated AS DeptDeactivated,
                            ISNULL(@ms1, 0) AS Ms1, ISNULL(@ms2, 0) AS Ms2,
-                           ISNULL(@ms3, 0) AS Ms3, ISNULL(@ms4, 0) AS Ms4;";
+                           ISNULL(@ms3, 0) AS Ms3, ISNULL(@ms4, 0) AS Ms4,
+                           ISNULL(@ms5, 0) AS Ms5, ISNULL(@ms6, 0) AS Ms6,
+                           ISNULL(@ms7, 0) AS Ms7;";
                 excl.Parameters.Add(new SqlParameter("@country", country));
                 excl.Parameters.Add(new SqlParameter("@y", year));
                 excl.Parameters.Add(new SqlParameter("@m", month));
@@ -2608,11 +2951,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 using var rdr2 = await excl.ExecuteReaderAsync(ct);
                 if (await rdr2.ReadAsync(ct))
                 {
-                    excluded = rdr2.IsDBNull(0) ? 0L : Convert.ToInt64(rdr2.GetValue(0));
-                    msRule1  = rdr2.IsDBNull(1) ? 0  : Convert.ToInt32(rdr2.GetValue(1));
-                    msRule2  = rdr2.IsDBNull(2) ? 0  : Convert.ToInt32(rdr2.GetValue(2));
-                    msRule3  = rdr2.IsDBNull(3) ? 0  : Convert.ToInt32(rdr2.GetValue(3));
-                    msRule4  = rdr2.IsDBNull(4) ? 0  : Convert.ToInt32(rdr2.GetValue(4));
+                    excluded         = rdr2.IsDBNull(0)  ? 0L : Convert.ToInt64(rdr2.GetValue(0));
+                    priceCapped      = rdr2.IsDBNull(1)  ? 0L : Convert.ToInt64(rdr2.GetValue(1));
+                    deactivated      = rdr2.IsDBNull(2)  ? 0L : Convert.ToInt64(rdr2.GetValue(2));
+                    deptDeactivated  = rdr2.IsDBNull(3)  ? 0L : Convert.ToInt64(rdr2.GetValue(3));
+                    msRule1          = rdr2.IsDBNull(4)  ? 0  : Convert.ToInt32(rdr2.GetValue(4));
+                    msRule2          = rdr2.IsDBNull(5)  ? 0  : Convert.ToInt32(rdr2.GetValue(5));
+                    msRule3          = rdr2.IsDBNull(6)  ? 0  : Convert.ToInt32(rdr2.GetValue(6));
+                    msRule4          = rdr2.IsDBNull(7)  ? 0  : Convert.ToInt32(rdr2.GetValue(7));
+                    msRule5          = rdr2.IsDBNull(8)  ? 0  : Convert.ToInt32(rdr2.GetValue(8));
+                    msRule6          = rdr2.IsDBNull(9)  ? 0  : Convert.ToInt32(rdr2.GetValue(9));
+                    msRule7          = rdr2.IsDBNull(10) ? 0  : Convert.ToInt32(rdr2.GetValue(10));
                 }
             }
         }
@@ -2652,15 +3001,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         // to show "Built in 3m 42s" in the SKU Max status row even after a
         // server restart wipes SkuMaxBuildJobManager's in-memory state.
         var totalMs = msDelete + msItemWh + msInputs + msInsert;
-        // Per-rule timings (ms) appear when exclusions actually ran. Helps the
-        // planner spot which exclusion source is the bottleneck (typically
-        // Rule 4 — upcbarcodes is the largest external table joined).
-        var ruleBreakdown = excluded > 0
-            ? $" [R1 {msRule1}ms · R2 {msRule2}ms · R3 {msRule3}ms · R4 {msRule4}ms]"
+        // Per-rule timings (ms) appear when overrides actually ran. Helps the
+        // planner spot which override source is the bottleneck (typically
+        // Rule 4 — upcbarcodes is the largest external table joined; or
+        // Rule 5 when DeptPriceMaxQty_MH4 has many bands per shop).
+        var ruleBreakdown = (excluded > 0 || priceCapped > 0 || deactivated > 0 || deptDeactivated > 0)
+            ? $" [R1 {msRule1}ms · R2 {msRule2}ms · R3 {msRule3}ms · R4 {msRule4}ms · R5 {msRule5}ms · R6 {msRule6}ms · R7 {msRule7}ms]"
             : "";
         var exclusionTag = exclusionWarning is null
-            ? $"{excluded:N0} excluded{ruleBreakdown}"
-            : $"exclusions SKIPPED ({exclusionWarning})";
+            ? $"{excluded:N0} excluded · {priceCapped:N0} price-capped · {deactivated:N0} div-deact · {deptDeactivated:N0} dept-deact{ruleBreakdown}"
+            : $"overrides SKIPPED ({exclusionWarning})";
         var stageDetail =
             $"Done · {itemsInScope:N0} items in scope ({droppedNoMaster:N0} no-master) · " +
             $"Delete {msDelete}ms · ItemWh {msItemWh}ms · Inputs {msInputs}ms · " +

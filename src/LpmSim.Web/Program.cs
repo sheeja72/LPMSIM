@@ -92,6 +92,7 @@ public class Program
         }, ServiceLifetime.Scoped);
 
         builder.Services.AddScoped<EomCalculator>();
+        builder.Services.AddScoped<WeeklySalesTargetSplitService>();
         builder.Services.AddScoped<LpmSimGenerator>();
         builder.Services.AddScoped<LpmSimReportService>();
         builder.Services.AddScoped<LpmSimInvestigator>();

@@ -49,8 +49,22 @@ public class EomRow
     /// <summary>Open-to-receive for the month: TargetEOM − SOH + TargetSales.</summary>
     public int MerchNeedMonth { get; set; }
 
-    /// <summary>Weekly view of <see cref="MerchNeedMonth"/> — divided by 4.</summary>
+    /// <summary>
+    /// Weekly view of <see cref="MerchNeedMonth"/>. Now mirrors
+    /// <see cref="MerchNeedWeek1"/> so legacy readers keep working.
+    /// New code should use the <c>MerchNeedWeek1..4</c> properties + the
+    /// SIM batch's <c>WeekNo</c> to pick the right week.
+    /// </summary>
     public int MerchNeedWeek { get; set; }
+
+    /// <summary>Per-week Merch Need — <c>(TargetEOM − SOH) / 4 + (TargetSales × SplitPct[N]/100)</c>.</summary>
+    public int MerchNeedWeek1 { get; set; }
+    /// <summary>Per-week Merch Need for week 2 (default split 20%).</summary>
+    public int MerchNeedWeek2 { get; set; }
+    /// <summary>Per-week Merch Need for week 3 (default split 25%).</summary>
+    public int MerchNeedWeek3 { get; set; }
+    /// <summary>Per-week Merch Need for week 4 (default split 35%).</summary>
+    public int MerchNeedWeek4 { get; set; }
 
     /// <summary>Daily slice — <see cref="MerchNeedWeek"/> divided by a fixed 6.</summary>
     public int MerchNeedDay { get; set; }

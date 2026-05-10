@@ -32,4 +32,13 @@ public class LpmSimBatch
     /// enum name so SSMS / query layers can read it without a join.
     /// </summary>
     public string? FillStrategy { get; set; }
+
+    /// <summary>
+    /// Logical week of the run month this batch was generated for (1..4).
+    /// Drives the allocator's per-Store × Div weekly cap — the SQL that
+    /// loads <c>LPM_EOM_Output</c> picks <c>MerchNeedWeek{N}</c> based on
+    /// this value. NULL on pre-migration batches; the UI treats NULL as
+    /// Week 1 for display purposes (no re-allocation).
+    /// </summary>
+    public byte? WeekNo { get; set; }
 }

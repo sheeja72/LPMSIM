@@ -195,6 +195,16 @@ public class LpmSimGenerateRequest
     /// ("all months with LPMDt &lt; first of next month after RunDate").
     /// </summary>
     public List<DateTime> LpmMonths { get; set; } = new();
+
+    /// <summary>
+    /// Logical week of the run month (1..4) the planner is generating SIM
+    /// for. Drives the per-Store × Div weekly cap — the SQL that loads
+    /// <c>LPM_EOM_Output</c> picks <c>MerchNeedWeek{N}</c> based on this
+    /// value (not the legacy <c>MerchNeedWeek</c> column). Stamped onto
+    /// the resulting <c>LPM_SimBatch.WeekNo</c> so downstream knows which
+    /// week the batch was generated for. Default = 1.
+    /// </summary>
+    public byte WeekNo { get; set; } = 1;
 }
 
 public class LpmSimGenerateResult

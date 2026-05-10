@@ -30,6 +30,8 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
     public DbSet<LpmSKUMaxRule> LpmSKUMaxRules => Set<LpmSKUMaxRule>();
     public DbSet<LpmStoreDivAccess> LpmStoreDivAccesses => Set<LpmStoreDivAccess>();
     public DbSet<LpmWarehousePriority> LpmWarehousePriorities => Set<LpmWarehousePriority>();
+    public DbSet<LpmWeeklySalesTargetSplit> LpmWeeklySalesTargetSplits => Set<LpmWeeklySalesTargetSplit>();
+    public DbSet<LpmStoreDeptAccess> LpmStoreDeptAccesses => Set<LpmStoreDeptAccess>();
     public DbSet<LpmSimItemSkuMax> LpmSimItemSkuMaxes => Set<LpmSimItemSkuMax>();
     public DbSet<LpmSimProductionSchedule> LpmSimProductionSchedules => Set<LpmSimProductionSchedule>();
     public DbSet<LpmSimAdmRun>     LpmSimAdmRuns      => Set<LpmSimAdmRun>();
@@ -229,6 +231,37 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.HasKey(x => new { x.Country, x.Warehouse });
             e.Property(x => x.Country).HasMaxLength(20);
             e.Property(x => x.Warehouse).HasMaxLength(50);
+            e.Property(x => x.CreatedBy).HasMaxLength(100);
+            e.Property(x => x.UpdatedBy).HasMaxLength(100);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.Property(x => x.UpdatedTS).HasColumnType("datetime2(0)");
+        });
+
+        mb.Entity<LpmWeeklySalesTargetSplit>(e =>
+        {
+            e.ToTable("LPM_WeeklySalesTargetSplit");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.Country, x.Year1, x.Month1, x.DivCode, x.WeekNo })
+             .IsUnique();
+            e.Property(x => x.Country).HasMaxLength(20);
+            e.Property(x => x.SplitPct).HasPrecision(7, 4);
+            e.Property(x => x.CreateBy).HasMaxLength(100);
+            e.Property(x => x.UpdatedBy).HasMaxLength(100);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.Property(x => x.UpdatedTS).HasColumnType("datetime2(0)");
+        });
+
+        mb.Entity<LpmStoreDeptAccess>(e =>
+        {
+            e.ToTable("LPM_StoreDeptAccess");
+            e.HasKey(x => x.Id);
+            e.HasIndex(x => new { x.Country, x.StoreID, x.DivCode, x.Department })
+             .IsUnique();
+            e.Property(x => x.Country).HasMaxLength(20);
+            e.Property(x => x.StoreID).HasMaxLength(25);
+            e.Property(x => x.Department).HasMaxLength(60);
+            e.Property(x => x.DeptPct).HasPrecision(7, 4);
+            e.Property(x => x.Remarks).HasMaxLength(500);
             e.Property(x => x.CreatedBy).HasMaxLength(100);
             e.Property(x => x.UpdatedBy).HasMaxLength(100);
             e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
