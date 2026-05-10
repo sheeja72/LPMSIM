@@ -28,17 +28,20 @@ BEGIN
         StoreID     varchar(25)   NOT NULL,
         DivCode     int           NOT NULL,
         Department  nvarchar(60)  NOT NULL,
-        DeptPct     decimal(7,4)  NOT NULL CONSTRAINT DF_LSDA_DeptPct  DEFAULT (100),
-        IsActive    bit           NOT NULL CONSTRAINT DF_LSDA_IsActive DEFAULT (1),
+        DeptPct     decimal(7,4)  NOT NULL CONSTRAINT DF_LSDeptA_DeptPct  DEFAULT (100),
+        IsActive    bit           NOT NULL CONSTRAINT DF_LSDeptA_IsActive DEFAULT (1),
         Remarks     nvarchar(500) NULL,
-        CreateTS    datetime2(0)  NOT NULL CONSTRAINT DF_LSDA_CreateTS DEFAULT SYSDATETIME(),
+        CreateTS    datetime2(0)  NOT NULL CONSTRAINT DF_LSDeptA_CreateTS DEFAULT SYSDATETIME(),
         CreatedBy   varchar(100)  NULL,
         UpdatedTS   datetime2(0)  NULL,
         UpdatedBy   varchar(100)  NULL,
 
         CONSTRAINT PK_LPM_StoreDeptAccess PRIMARY KEY (Id),
         CONSTRAINT UQ_LPM_StoreDeptAccess UNIQUE (Country, StoreID, DivCode, Department),
-        CONSTRAINT CK_LSDA_DeptPct CHECK (DeptPct >= 0 AND DeptPct <= 100)
+        -- Constraint names use LSDeptA prefix (NOT LSDA) — LSDA is already
+        -- taken by LPM_StoreDivAccess (migration 022) and SQL Server keeps
+        -- constraint names unique per schema.
+        CONSTRAINT CK_LSDeptA_DeptPct CHECK (DeptPct >= 0 AND DeptPct <= 100)
     );
     PRINT 'Created dbo.LPM_StoreDeptAccess';
 END
