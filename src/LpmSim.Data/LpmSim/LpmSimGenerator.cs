@@ -268,6 +268,14 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         return string.Join(" + ", parts);
     }
 
+    /// <summary>
+    /// Truncate a long error message to a sensible length for the build
+    /// banner / StageDetail column. Adds an ellipsis when truncated so
+    /// readers know the full error is in the SQL log, not lost.
+    /// </summary>
+    private static string Truncate(string s, int max)
+        => s.Length <= max ? s : s.Substring(0, max - 1) + "…";
+
     private static string SeasonLabel(LpmSimSeasonFlags f)
     {
         if (f == LpmSimSeasonFlags.None || f == LpmSimSeasonFlags.Both) return "All seasons";
@@ -2414,6 +2422,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         long deactivated = 0;
         long deptDeactivated = 0;
         int  msRule1 = 0, msRule2 = 0, msRule3 = 0, msRule4 = 0, msRule5 = 0, msRule6 = 0, msRule7 = 0;
+        // Per-rule error capture from the SQL TRY/CATCH blocks. Key = rule
+        // number (1..7); value = ERROR_MESSAGE() text or null when the rule
+        // succeeded. Surfaces in the build banner so e.g. a Hodata access
+        // failure on Rule 5 doesn't kill rules 1-4, 6, 7.
+        var ruleErrors = new Dictionary<int, string?>
+        {
+            { 1, null }, { 2, null }, { 3, null }, { 4, null },
+            { 5, null }, { 6, null }, { 7, null },
+        };
         using (var ins = conn.CreateCommand())
         {
             // Single batch — DELETE + INSERT + 4 zero-out exclusion rules + 1
@@ -2561,7 +2578,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             using (var excl = conn.CreateCommand())
             {
                 excl.CommandText = @"
-                    SET XACT_ABORT ON;
+                    -- XACT_ABORT must be OFF so per-rule TRY/CATCH can swallow
+                    -- a single rule's failure (column-name drift, linked-server
+                    -- timeout, missing source table, etc.) without taking the
+                    -- other 6 rules down with it. With XACT_ABORT ON, severe
+                    -- errors auto-terminate the batch despite TRY/CATCH.
+                    -- The apply phase (audit + UPDATE) flips XACT_ABORT back ON
+                    -- so the audit/UPDATE pair stays atomic.
+                    SET XACT_ABORT OFF;
                     DECLARE @excluded        bigint = 0;
                     DECLARE @priceCapped     bigint = 0;
                     DECLARE @deactivated     bigint = 0;
@@ -2569,82 +2593,88 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     DECLARE @t0 datetime2(3);
                     DECLARE @ms1 int = 0, @ms2 int = 0, @ms3 int = 0, @ms4 int = 0,
                             @ms5 int = 0, @ms6 int = 0, @ms7 int = 0;
+                    -- Per-rule error capture — TRY/CATCH inside each rule writes
+                    -- ERROR_MESSAGE() here. Returned to C# alongside the counts
+                    -- so the build banner can show e.g. 'R5 SKIPPED (Hodata
+                    -- access denied)' while still applying rules 1-4, 6, 7.
+                    DECLARE @r1Error nvarchar(2000) = NULL,
+                            @r2Error nvarchar(2000) = NULL,
+                            @r3Error nvarchar(2000) = NULL,
+                            @r4Error nvarchar(2000) = NULL,
+                            @r5Error nvarchar(2000) = NULL,
+                            @r6Error nvarchar(2000) = NULL,
+                            @r7Error nvarchar(2000) = NULL;
 
+                    -- ---------- PHASE 1: Setup (no transaction) ----------
+                    -- Snapshot + temp tables. Errors here are fatal — the whole
+                    -- exclusions phase is meaningless without #SkuSnap.
+                    IF OBJECT_ID('tempdb..#SkuSnap')          IS NOT NULL DROP TABLE #SkuSnap;
+                    IF OBJECT_ID('tempdb..#ExcludeMatches')   IS NOT NULL DROP TABLE #ExcludeMatches;
+                    IF OBJECT_ID('tempdb..#PriceCapMatches')  IS NOT NULL DROP TABLE #PriceCapMatches;
+                    IF OBJECT_ID('tempdb..#DeactMatches')     IS NOT NULL DROP TABLE #DeactMatches;
+                    IF OBJECT_ID('tempdb..#DeptDeactMatches') IS NOT NULL DROP TABLE #DeptDeactMatches;
+
+                    SELECT StoreID, ItemCode, Season, DivCode, SKUMax AS OrigSku
+                      INTO #SkuSnap
+                      FROM dbo.LPM_SimItemSkuMax
+                     WHERE Country = @country AND Year1 = @y AND Month1 = @m
+                       AND SKUMax > 0;
+                    CREATE CLUSTERED INDEX IX_SkuSnap ON #SkuSnap (StoreID, ItemCode);
+
+                    CREATE TABLE #ExcludeMatches (
+                        StoreID     varchar(25)  NOT NULL,
+                        ItemCode    varchar(30)  NOT NULL,
+                        Season      char(1)      NULL,
+                        DivCode     int          NULL,
+                        OrigSku     int          NOT NULL,
+                        SourceTable varchar(120) NOT NULL,
+                        Reason      varchar(160) NOT NULL,
+                        MatchedKey  varchar(120) NULL
+                    );
+
+                    CREATE TABLE #PriceCapMatches (
+                        StoreID     varchar(25)  NOT NULL,
+                        ItemCode    varchar(30)  NOT NULL,
+                        Season      char(1)      NULL,
+                        DivCode     int          NULL,
+                        OrigSku     int          NOT NULL,
+                        NewSku      int          NOT NULL,
+                        MatchedKey  varchar(160) NULL
+                    );
+
+                    CREATE TABLE #DeactMatches (
+                        StoreID     varchar(25)  NOT NULL,
+                        ItemCode    varchar(30)  NOT NULL,
+                        Season      char(1)      NULL,
+                        DivCode     int          NULL,
+                        OrigSku     int          NOT NULL,
+                        MatchedKey  varchar(120) NULL
+                    );
+
+                    CREATE TABLE #DeptDeactMatches (
+                        StoreID     varchar(25)  NOT NULL,
+                        ItemCode    varchar(30)  NOT NULL,
+                        Season      char(1)      NULL,
+                        DivCode     int          NULL,
+                        OrigSku     int          NOT NULL,
+                        MatchedKey  varchar(160) NULL
+                    );
+
+                    -- ---------- PHASE 2: Rules (per-rule TRY/CATCH) ----------
+                    -- Each rule's INSERT runs in its own TRY block. A failure
+                    -- (column-name drift, missing linked server, schema change
+                    -- in an external DB) sets the rule's @rNError and leaves
+                    -- the rule's match table empty. The other 6 rules still
+                    -- run on the same #SkuSnap.
+                    --
+                    -- INSERT is atomic per statement in SQL Server — a rule that
+                    -- fails leaves zero rows in its match table (not partial),
+                    -- so there's no risk of half-applied rules in the apply
+                    -- phase below.
+
+                    -- Rule 1 — usa.dbo.ExcludeExport_Planning (ShopName x ItemCode)
+                    SET @t0 = SYSDATETIME();
                     BEGIN TRY
-                        BEGIN TRAN;
-
-                        IF OBJECT_ID('tempdb..#SkuSnap')          IS NOT NULL DROP TABLE #SkuSnap;
-                        IF OBJECT_ID('tempdb..#ExcludeMatches')   IS NOT NULL DROP TABLE #ExcludeMatches;
-                        IF OBJECT_ID('tempdb..#PriceCapMatches')  IS NOT NULL DROP TABLE #PriceCapMatches;
-                        IF OBJECT_ID('tempdb..#DeactMatches')     IS NOT NULL DROP TABLE #DeactMatches;
-                        IF OBJECT_ID('tempdb..#DeptDeactMatches') IS NOT NULL DROP TABLE #DeptDeactMatches;
-
-                        SELECT StoreID, ItemCode, Season, DivCode, SKUMax AS OrigSku
-                          INTO #SkuSnap
-                          FROM dbo.LPM_SimItemSkuMax
-                         WHERE Country = @country AND Year1 = @y AND Month1 = @m
-                           AND SKUMax > 0;
-                        CREATE CLUSTERED INDEX IX_SkuSnap ON #SkuSnap (StoreID, ItemCode);
-
-                        CREATE TABLE #ExcludeMatches (
-                            StoreID     varchar(25)  NOT NULL,
-                            ItemCode    varchar(30)  NOT NULL,
-                            Season      char(1)      NULL,
-                            DivCode     int          NULL,
-                            OrigSku     int          NOT NULL,
-                            SourceTable varchar(120) NOT NULL,
-                            Reason      varchar(160) NOT NULL,
-                            MatchedKey  varchar(120) NULL
-                        );
-
-                        -- Rule 5 (price-band cap) writes here. Kept in a separate
-                        -- temp table from #ExcludeMatches because the action is
-                        -- different — exclusions zero out, price caps replace
-                        -- with maxqty. NewSku carries the per-row replacement
-                        -- value so the UPDATE below can pick it from the row.
-                        CREATE TABLE #PriceCapMatches (
-                            StoreID     varchar(25)  NOT NULL,
-                            ItemCode    varchar(30)  NOT NULL,
-                            Season      char(1)      NULL,
-                            DivCode     int          NULL,
-                            OrigSku     int          NOT NULL,
-                            NewSku      int          NOT NULL,
-                            MatchedKey  varchar(160) NULL
-                        );
-
-                        -- Rule 6 (deactivation) writes here. Same shape as
-                        -- #ExcludeMatches (action = SKUMax = 0) — but kept in
-                        -- a separate table so the audit can distinguish
-                        -- 'deactivated by LPM_StoreDivAccess' from the 4
-                        -- external-table exclusions.
-                        CREATE TABLE #DeactMatches (
-                            StoreID     varchar(25)  NOT NULL,
-                            ItemCode    varchar(30)  NOT NULL,
-                            Season      char(1)      NULL,
-                            DivCode     int          NULL,
-                            OrigSku     int          NOT NULL,
-                            MatchedKey  varchar(120) NULL
-                        );
-
-                        -- Rule 7 (Store × Department deactivation). Same shape as
-                        -- #DeactMatches but keyed at (Store, Div, Department) —
-                        -- captures ItemCode→Department from subclassmaster so
-                        -- the audit row records the matching Department.
-                        CREATE TABLE #DeptDeactMatches (
-                            StoreID     varchar(25)  NOT NULL,
-                            ItemCode    varchar(30)  NOT NULL,
-                            Season      char(1)      NULL,
-                            DivCode     int          NULL,
-                            OrigSku     int          NOT NULL,
-                            MatchedKey  varchar(160) NULL
-                        );
-
-                        DELETE FROM dbo.LPM_SimItemSkuMaxExcluded
-                         WHERE Country = @country AND Year1 = @y AND Month1 = @m;
-
-                        SET @t0 = SYSDATETIME();
-
-                        -- Rule 1 — usa.dbo.ExcludeExport_Planning (Shopname x ItemCode)
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
@@ -2655,15 +2685,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           INNER JOIN usa.dbo.ExcludeExport_Planning ep
                                   ON ep.Shopname = snap.StoreID
                                  AND ep.ItemCode = snap.ItemCode;
-                        SET @ms1 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r1Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms1 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        SET @t0 = SYSDATETIME();
-                        -- ExcludeSubclass uses the legacy column name Shop (NOT Shopname
-                        -- like the other 3 exclusion tables). Column-name divergence
-                        -- confirmed against the live schema:
-                        --   USA.dbo.ExcludeSubclass(Subclass, Shop, Trndate, Remarks, UserId, Inactive, MH4ID).
-                        -- Joining on Shop here keeps the Shopname literal out of this rule
-                        -- so a fix on the other tables does not require touching this one.
+                    -- Rule 2 — usa.dbo.ExcludeSubclass (Shop x MH4ID; Inactive='N')
+                    -- ExcludeSubclass uses the legacy column name Shop (NOT
+                    -- Shopname like the other 3 exclusion tables). Verified
+                    -- live schema: USA.dbo.ExcludeSubclass(Subclass, Shop,
+                    -- Trndate, Remarks, UserId, Inactive, MH4ID).
+                    SET @t0 = SYSDATETIME();
+                    BEGIN TRY
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
@@ -2677,9 +2709,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                   ON es.Shop  = snap.StoreID
                                  AND es.mh4id = us.MH4ID
                          WHERE es.Inactive = 'N';
-                        SET @ms2 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r2Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms2 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        SET @t0 = SYSDATETIME();
+                    -- Rule 3 — bfldata.dbo.RemoveItemsFromTransfer (Itemcode x ShopName; trndate >= 2025-09-01)
+                    SET @t0 = SYSDATETIME();
+                    BEGIN TRY
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
@@ -2691,9 +2727,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                   ON rt.itemcode = snap.ItemCode
                                  AND rt.shopname = snap.StoreID
                          WHERE rt.trndate >= '2025-09-01';
-                        SET @ms3 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r3Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms3 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        SET @t0 = SYSDATETIME();
+                    -- Rule 4 — usa.dbo.ExcludeItemsMFCS (HSCode x Shopname via upcbarcodes)
+                    SET @t0 = SYSDATETIME();
+                    BEGIN TRY
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
@@ -2708,33 +2748,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                WHERE e.Shopname = snap.StoreID
                                  AND e.hscode   = b.HSCode
                            );
-                        SET @ms4 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r4Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms4 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        SET @t0 = SYSDATETIME();
-                        -- Rule 5 — usa.dbo.DeptPriceMaxQty_MH4 (price-band cap)
-                        --
-                        -- Action: REPLACE SKUMax with maxqty (per the planner spec —
-                        -- not LEAST(); even if current SKUMax is higher, force it
-                        -- to maxqty). Doesn't override deactivations because
-                        -- #SkuSnap was filtered to SKUMax > 0 above; deactivated
-                        -- (Store, Div) rows never enter this path.
-                        --
-                        -- Lookup pipeline:
-                        --   1) ItemAttr  — DivCode + Department per item from
-                        --                  upc_subclass × subclassmaster ×
-                        --                  Division. MIN(DivCode)/MAX(Department)
-                        --                  for the rare item that maps to multiple
-                        --                  subclasses (deterministic + stable).
-                        --   2) ItemPrice — latest SalesRate per item for
-                        --                  CostCode='001'. MAX(TrnDate) defines
-                        --                  the active price; older rows are stale.
-                        --   3) Band match — TOP 1 row in DeptPriceMaxQty_MH4 by
-                        --                   (shopname, DivCode, Department, PriceF
-                        --                    <= Price <= PriceT) ordered by
-                        --                   PriceF (smallest band wins on overlap).
-                        --
-                        -- No band match → no row inserted → SKUMax unchanged for
-                        -- that item (matches the No-match-skip policy).
+                    -- Rule 5 — usa.dbo.DeptPriceMaxQty_MH4 (price-band cap → REPLACE)
+                    -- Joins Hodata.dbo.SalesPrice (latest SalesRate per item for
+                    -- CostCode='001') + subclassmaster (Department) + Division.
+                    -- Most external joins of any rule, so the most likely to
+                    -- fail when a downstream DB is unavailable.
+                    SET @t0 = SYSDATETIME();
+                    BEGIN TRY
                         WITH ItemAttr AS (
                             SELECT u.itemcode,
                                    MIN(d.DivCode) AS DivCode,
@@ -2780,23 +2804,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                  AND ip.Price BETWEEN dp.PriceF AND dp.PriceT
                                ORDER BY dp.PriceF
                           ) bnd;
-                        SET @ms5 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r5Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms5 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        SET @t0 = SYSDATETIME();
-                        -- Rule 6 — dbo.LPM_StoreDivAccess (deactivation)
-                        --
-                        -- Action: zero out every (Store × Item) row whose
-                        -- (Store, Div) is flagged IsActive=0 in
-                        -- LPM_StoreDivAccess. This used to be applied at the
-                        -- main INSERT via a CASE on #Deact — moved here so
-                        -- the deactivation produces an audit row in
-                        -- LPM_SimItemSkuMaxExcluded like the other 5 rules.
-                        --
-                        -- We only audit rows with OrigSku > 0 (which is
-                        -- already enforced by the #SkuSnap WHERE clause).
-                        -- A row that was rule-zero AND deactivated wouldn't
-                        -- be visible to the planner anyway and would just be
-                        -- audit noise.
+                    -- Rule 6 — dbo.LPM_StoreDivAccess (deactivation; #Deact already prebuilt)
+                    SET @t0 = SYSDATETIME();
+                    BEGIN TRY
                         INSERT INTO #DeactMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
@@ -2805,23 +2819,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           INNER JOIN #Deact d
                                   ON d.StoreID = snap.StoreID
                                  AND d.DivCode = snap.DivCode;
-                        SET @ms6 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r6Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms6 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        SET @t0 = SYSDATETIME();
-                        -- Rule 7 — dbo.LPM_StoreDeptAccess (Store × Department deactivation)
-                        --
-                        -- Action: zero out every (Store × Item) row whose
-                        -- (Country, Store, Div, Department) tuple is flagged
-                        -- IsActive=0 in LPM_StoreDeptAccess. Department comes
-                        -- from subclassmaster.Department (the name) — same
-                        -- convention as DeptPriceMaxQty_MH4 (Rule 5). Items
-                        -- with no Department mapping in subclassmaster are
-                        -- silently skipped (no row → no zero-out).
-                        --
-                        -- The DeptPct column on LPM_StoreDeptAccess is RESERVED
-                        -- for a future EOM / SIM Generate scaling rule and is
-                        -- intentionally NOT applied here — only the binary
-                        -- IsActive flag drives Rule 7.
+                    -- Rule 7 — dbo.LPM_StoreDeptAccess (Store × Department deactivation)
+                    SET @t0 = SYSDATETIME();
+                    BEGIN TRY
                         WITH ItemDept AS (
                             SELECT u.itemcode,
                                    MAX(sm.Department) AS Department
@@ -2843,14 +2847,23 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                  AND sda.DivCode    = snap.DivCode
                                  AND sda.Department = id.Department
                                  AND sda.IsActive   = 0;
-                        SET @ms7 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    END TRY
+                    BEGIN CATCH SET @r7Error = ERROR_MESSAGE(); END CATCH;
+                    SET @ms7 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                        -- Audit: write zero-out matches, price-cap matches, AND
-                        -- deactivation matches to the same audit table. Reason
-                        -- + MatchedKey + SourceTable distinguish them;
-                        -- PriorSKUMax = OrigSku in all cases. The price-cap
-                        -- rows have the new (post-cap) value embedded in
-                        -- MatchedKey; the deact rows just record the (Div) key.
+                    -- ---------- PHASE 3: Apply (atomic) ----------
+                    -- Audit + UPDATE wrapped in a single transaction. If this
+                    -- fails, ROLLBACK preserves the prior audit + LPM_SimItemSkuMax
+                    -- state (the prior build's overrides survive). The DELETE
+                    -- of the period's audit rows is INSIDE the transaction so
+                    -- a failed apply doesn't leave the table empty.
+                    SET XACT_ABORT ON;
+                    BEGIN TRY
+                        BEGIN TRAN;
+
+                        DELETE FROM dbo.LPM_SimItemSkuMaxExcluded
+                         WHERE Country = @country AND Year1 = @y AND Month1 = @m;
+
                         INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                                (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
                                 PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
@@ -2897,10 +2910,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                         CREATE NONCLUSTERED INDEX IX_DeactMatches_SI      ON #DeactMatches      (StoreID, ItemCode);
                         CREATE NONCLUSTERED INDEX IX_DeptDeactMatches_SI  ON #DeptDeactMatches  (StoreID, ItemCode);
 
-                        -- Apply the price-band cap FIRST (set SKUMax = maxqty),
-                        -- then the zero-out rules (1–4, 6, 7). When an item
-                        -- matches both, the zero wins — exclusions and
-                        -- deactivations are absolute and trump price caps.
+                        -- Apply price cap FIRST, zero-outs SECOND. When an item
+                        -- matches both, zero wins — exclusions/deactivations
+                        -- are absolute and trump price caps.
                         UPDATE m
                            SET m.SKUMax = pc.NewSku
                           FROM dbo.LPM_SimItemSkuMax m
@@ -2925,17 +2937,19 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                           AND dd.ItemCode = m.ItemCode)
                            );
 
-                        DROP TABLE IF EXISTS #SkuSnap;
-                        DROP TABLE IF EXISTS #ExcludeMatches;
-                        DROP TABLE IF EXISTS #PriceCapMatches;
-                        DROP TABLE IF EXISTS #DeactMatches;
-                        DROP TABLE IF EXISTS #DeptDeactMatches;
                         COMMIT;
                     END TRY
                     BEGIN CATCH
                         IF @@TRANCOUNT > 0 ROLLBACK;
                         THROW;
                     END CATCH;
+
+                    DROP TABLE IF EXISTS #SkuSnap;
+                    DROP TABLE IF EXISTS #ExcludeMatches;
+                    DROP TABLE IF EXISTS #PriceCapMatches;
+                    DROP TABLE IF EXISTS #DeactMatches;
+                    DROP TABLE IF EXISTS #DeptDeactMatches;
+
                     SELECT @excluded        AS Excluded,
                            @priceCapped     AS PriceCapped,
                            @deactivated     AS Deactivated,
@@ -2943,7 +2957,11 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                            ISNULL(@ms1, 0) AS Ms1, ISNULL(@ms2, 0) AS Ms2,
                            ISNULL(@ms3, 0) AS Ms3, ISNULL(@ms4, 0) AS Ms4,
                            ISNULL(@ms5, 0) AS Ms5, ISNULL(@ms6, 0) AS Ms6,
-                           ISNULL(@ms7, 0) AS Ms7;";
+                           ISNULL(@ms7, 0) AS Ms7,
+                           @r1Error AS R1Error, @r2Error AS R2Error,
+                           @r3Error AS R3Error, @r4Error AS R4Error,
+                           @r5Error AS R5Error, @r6Error AS R6Error,
+                           @r7Error AS R7Error;";
                 excl.Parameters.Add(new SqlParameter("@country", country));
                 excl.Parameters.Add(new SqlParameter("@y", year));
                 excl.Parameters.Add(new SqlParameter("@m", month));
@@ -2962,6 +2980,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     msRule5          = rdr2.IsDBNull(8)  ? 0  : Convert.ToInt32(rdr2.GetValue(8));
                     msRule6          = rdr2.IsDBNull(9)  ? 0  : Convert.ToInt32(rdr2.GetValue(9));
                     msRule7          = rdr2.IsDBNull(10) ? 0  : Convert.ToInt32(rdr2.GetValue(10));
+                    ruleErrors[1]    = rdr2.IsDBNull(11) ? null : rdr2.GetString(11);
+                    ruleErrors[2]    = rdr2.IsDBNull(12) ? null : rdr2.GetString(12);
+                    ruleErrors[3]    = rdr2.IsDBNull(13) ? null : rdr2.GetString(13);
+                    ruleErrors[4]    = rdr2.IsDBNull(14) ? null : rdr2.GetString(14);
+                    ruleErrors[5]    = rdr2.IsDBNull(15) ? null : rdr2.GetString(15);
+                    ruleErrors[6]    = rdr2.IsDBNull(16) ? null : rdr2.GetString(16);
+                    ruleErrors[7]    = rdr2.IsDBNull(17) ? null : rdr2.GetString(17);
                 }
             }
         }
@@ -3008,8 +3033,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         var ruleBreakdown = (excluded > 0 || priceCapped > 0 || deactivated > 0 || deptDeactivated > 0)
             ? $" [R1 {msRule1}ms · R2 {msRule2}ms · R3 {msRule3}ms · R4 {msRule4}ms · R5 {msRule5}ms · R6 {msRule6}ms · R7 {msRule7}ms]"
             : "";
+        // Per-rule failures (e.g. Hodata access denied on Rule 5) are now
+        // surfaced rule-by-rule rather than killing the whole batch — only
+        // the rules that threw lose their effects; the rest still apply.
+        var failedRules = ruleErrors.Where(kv => kv.Value is not null).ToList();
+        var ruleFailureTag = failedRules.Count == 0
+            ? ""
+            : " · " + string.Join(" | ",
+                failedRules.Select(kv => $"R{kv.Key} SKIPPED ({Truncate(kv.Value!, 80)})"));
         var exclusionTag = exclusionWarning is null
-            ? $"{excluded:N0} excluded · {priceCapped:N0} price-capped · {deactivated:N0} div-deact · {deptDeactivated:N0} dept-deact{ruleBreakdown}"
+            ? $"{excluded:N0} excluded · {priceCapped:N0} price-capped · {deactivated:N0} div-deact · {deptDeactivated:N0} dept-deact{ruleBreakdown}{ruleFailureTag}"
             : $"overrides SKIPPED ({exclusionWarning})";
         var stageDetail =
             $"Done · {itemsInScope:N0} items in scope ({droppedNoMaster:N0} no-master) · " +
