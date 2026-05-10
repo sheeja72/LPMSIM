@@ -4,9 +4,6 @@
     <div class="lpm-nav-section">LPM Variables</div>
     @* Division Max Entry hidden — superseded by SKU Max Rules + EOM Output. *@
     @* <MudNavLink Href="lpm/div-max" Icon="@Icons.Material.Filled.GridOn">Division Max Entry</MudNavLink> *@
-    <MudNavLink Href="lpm/monthly-weights"  Icon="@Icons.Material.Filled.EventNote">Monthly Weights</MudNavLink>
-    <MudNavLink Href="lpm/planned"          Icon="@Icons.Material.Filled.RequestQuote">Planned Inputs</MudNavLink>
-    <MudNavLink Href="lpm/uploads"          Icon="@Icons.Material.Filled.CloudUpload">Data Uploads</MudNavLink>
     <MudNavLink Href="lpm/eom/generate"     Icon="@Icons.Material.Filled.PlayCircle">EOM Generate</MudNavLink>
     <MudNavLink Href="lpm/lpm-sim/generate"             Icon="@Icons.Material.Filled.AutoFixHigh">LPM SIM Generate</MudNavLink>
     <MudNavLink Href="lpm/lpm-sim/production-schedule"  Icon="@Icons.Material.Filled.CalendarMonth">Production Schedule</MudNavLink>
@@ -14,9 +11,17 @@
     <MudNavLink Href="lpm/lpm-sim/reports"              Icon="@Icons.Material.Filled.Assessment">LPM SIM Reports</MudNavLink>
     <MudNavLink Href="lpm/warehouse-boxes"  Icon="@Icons.Material.Filled.Warehouse">Warehouse Boxes</MudNavLink>
 
+    @* Planning Config — operational config (Monthly Weights / Planned Inputs /
+       Data Uploads) is visible to all signed-in users; the master-data pages
+       below remain gated behind Admin / PlanningManager roles. The section
+       header sits OUTSIDE the AuthorizeView so the section name is visible
+       even when only the 3 unrestricted items are shown. *@
+    <div class="lpm-nav-section">Planning Config</div>
+    <MudNavLink Href="lpm/monthly-weights"  Icon="@Icons.Material.Filled.EventNote">Monthly Weights</MudNavLink>
+    <MudNavLink Href="lpm/planned"          Icon="@Icons.Material.Filled.RequestQuote">Planned Inputs</MudNavLink>
+    <MudNavLink Href="lpm/uploads"          Icon="@Icons.Material.Filled.CloudUpload">Data Uploads</MudNavLink>
     <AuthorizeView Roles="Admin,PlanningManager">
         <Authorized>
-            <div class="lpm-nav-section">Planning Config</div>
             <MudNavLink Href="admin/grades"            Icon="@Icons.Material.Filled.WorkspacePremium">Store Grades</MudNavLink>
             <MudNavLink Href="admin/volume-groups"     Icon="@Icons.Material.Filled.DonutSmall">Volume Groups</MudNavLink>
             <MudNavLink Href="admin/skumax-rules"      Icon="@Icons.Material.Filled.Rule">SKU Max Rules</MudNavLink>

@@ -32,7 +32,8 @@ public record WhBoxFilter(
     // (the business term for ShopEligible='E') are also included.
     // Renamed from `NonPurchasedOnly` (which had inverted semantics — was
     // TRUE meaning "apply the filter") to match the SIM Generate flag.
-    bool IncludeNonPurchased = false);
+    bool IncludeNonPurchased = false,
+    string? ContNo = null);                            // racks.dbo.whboxitems.ContNo — container number filter
 
 public record WhBoxRow(
     string Country,
@@ -48,7 +49,8 @@ public record WhBoxRow(
     string? Department,
     string? Brand,                                     // alias for LPM under business naming
     string? Rack,
-    string? Purchased);                                // "N" when ShopEligible='E', else NULL
+    string? Purchased,                                 // "N" when ShopEligible='E', else NULL
+    string? ContNo);                                   // racks.dbo.whboxitems.ContNo — container number
 
 /// <summary>Division-level summary row: one per Division.</summary>
 public record WhDivisionRow(
@@ -97,6 +99,16 @@ public class WarehouseQueryService(IConfiguration cfg)
               FROM racks.dbo.whboxitems
              WHERE LPM IS NOT NULL AND LPM <> ''
              ORDER BY LPM;";
+        return await ReadStringsAsync(sql, ct);
+    }
+
+    public async Task<List<string>> GetContNosAsync(CancellationToken ct = default)
+    {
+        const string sql = @"
+            SELECT DISTINCT ContNo
+              FROM racks.dbo.whboxitems
+             WHERE ContNo IS NOT NULL AND ContNo <> ''
+             ORDER BY ContNo;";
         return await ReadStringsAsync(sql, ct);
     }
 
@@ -181,7 +193,8 @@ public class WarehouseQueryService(IConfiguration cfg)
                    MAX(scm.Department)                                                     AS Department,
                    MAX(w.Brand)                                                            AS Brand,
                    MAX(w.Rack)                                                             AS Rack,
-                   MAX(CASE WHEN w.ShopEligible = 'E' THEN 'N' ELSE NULL END)              AS Purchased
+                   MAX(CASE WHEN w.ShopEligible = 'E' THEN 'N' ELSE NULL END)              AS Purchased,
+                   MAX(w.ContNo)                                                           AS ContNo
               FROM racks.dbo.whboxitems w
               LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               OUTER APPLY (
@@ -196,6 +209,7 @@ public class WarehouseQueryService(IConfiguration cfg)
                AND (@palletCategory IS NULL OR pt.PalletCategory = @palletCategory)
                AND (@lpm IS NULL OR w.LPM = @lpm)
                AND (@brand IS NULL OR w.Brand = @brand)
+               AND (@contNo IS NULL OR w.ContNo = @contNo)
                AND (@lpmStatus = 0
                     OR (@lpmStatus = 1 AND w.LPMDt IS NOT NULL)
                     OR (@lpmStatus = 2 AND w.LPMDt IS NULL))
@@ -238,7 +252,8 @@ public class WarehouseQueryService(IConfiguration cfg)
                 Department:     reader.IsDBNull(10) ? null : reader.GetString(10),
                 Brand:          reader.IsDBNull(11) ? null : reader.GetString(11),
                 Rack:           reader.IsDBNull(12) ? null : reader.GetString(12),
-                Purchased:      reader.IsDBNull(13) ? null : reader.GetString(13)));
+                Purchased:      reader.IsDBNull(13) ? null : reader.GetString(13),
+                ContNo:         reader.IsDBNull(14) ? null : reader.GetString(14)));
         }
         return rows;
     }
@@ -360,6 +375,7 @@ public class WarehouseQueryService(IConfiguration cfg)
                AND (@palletCategory IS NULL OR pt.PalletCategory = @palletCategory)
                AND (@lpm IS NULL OR w.LPM = @lpm)
                AND (@brand IS NULL OR w.Brand = @brand)
+               AND (@contNo IS NULL OR w.ContNo = @contNo)
                AND (@lpmStatus = 0
                     OR (@lpmStatus = 1 AND w.LPMDt IS NOT NULL)
                     OR (@lpmStatus = 2 AND w.LPMDt IS NULL))
@@ -393,6 +409,7 @@ public class WarehouseQueryService(IConfiguration cfg)
         cmd.Parameters.Add(new SqlParameter("@department",     (object?)filter.Department     ?? DBNull.Value));
         cmd.Parameters.Add(new SqlParameter("@brand",          (object?)filter.Brand          ?? DBNull.Value));
         cmd.Parameters.Add(new SqlParameter("@includeNonPurchased", filter.IncludeNonPurchased ? 1 : 0));
+        cmd.Parameters.Add(new SqlParameter("@contNo",         (object?)filter.ContNo         ?? DBNull.Value));
     }
 
     private async Task<List<string>> ReadStringsAsync(string sql, CancellationToken ct)

@@ -1,9 +1,9 @@
 @page "/"
 
-<PageTitle>LPM SIM</PageTitle>
+<PageTitle>Planning Hub</PageTitle>
 
-<MudText Typo="Typo.h3" Class="mb-2">LPM SIM</MudText>
-<MudText Typo="Typo.subtitle1" Color="Color.Secondary" Class="mb-6">Internal LPM simulator &amp; data entry.</MudText>
+<MudText Typo="Typo.h3" Class="mb-2">Planning Hub</MudText>
+<MudText Typo="Typo.subtitle1" Color="Color.Secondary" Class="mb-6">Internal stock-allocation &amp; merch-planning workspace.</MudText>
 
 <AuthorizeView>
     <Authorized>
@@ -14,51 +14,52 @@
 </AuthorizeView>
 
 <MudGrid>
+    @* Daily-workflow tiles. Icons + routes mirror the corresponding entries
+       in the left nav (NavMenu.razor). Admin tiles (User Access / Audit Log)
+       stay reachable via the side nav under the Admin section — they don't
+       need to take up real estate on the home page. *@
     <MudItem xs="12" md="6" lg="4">
         <MudCard Elevation="3">
             <MudCardContent>
-                <MudIcon Icon="@Icons.Material.Filled.GridOn" Color="Color.Primary" Size="Size.Large" />
-                <MudText Typo="Typo.h6" Class="mt-2">Division Max Entry</MudText>
+                <MudIcon Icon="@Icons.Material.Filled.PlayCircle" Color="Color.Primary" Size="Size.Large" />
+                <MudText Typo="Typo.h6" Class="mt-2">EOM Generate</MudText>
                 <MudText Typo="Typo.body2" Color="Color.Secondary">
-                    Enter max quantities per store and division.
+                    Run end-of-month target / SKU Max calculation per Country and period.
                 </MudText>
             </MudCardContent>
             <MudCardActions>
-                <MudButton Href="lpm/div-max" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
+                <MudButton Href="lpm/eom/generate" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
             </MudCardActions>
         </MudCard>
     </MudItem>
 
-    <AuthorizeView Roles="Admin" Context="adminCtx">
-        <Authorized>
-            <MudItem xs="12" md="6" lg="4">
-                <MudCard Elevation="3">
-                    <MudCardContent>
-                        <MudIcon Icon="@Icons.Material.Filled.People" Color="Color.Primary" Size="Size.Large" />
-                        <MudText Typo="Typo.h6" Class="mt-2">User Access</MudText>
-                        <MudText Typo="Typo.body2" Color="Color.Secondary">
-                            Manage who can sign in and what they can do.
-                        </MudText>
-                    </MudCardContent>
-                    <MudCardActions>
-                        <MudButton Href="admin/users" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
-                    </MudCardActions>
-                </MudCard>
-            </MudItem>
-            <MudItem xs="12" md="6" lg="4">
-                <MudCard Elevation="3">
-                    <MudCardContent>
-                        <MudIcon Icon="@Icons.Material.Filled.History" Color="Color.Primary" Size="Size.Large" />
-                        <MudText Typo="Typo.h6" Class="mt-2">Audit Log</MudText>
-                        <MudText Typo="Typo.body2" Color="Color.Secondary">
-                            Every insert, update, and delete across the app.
-                        </MudText>
-                    </MudCardContent>
-                    <MudCardActions>
-                        <MudButton Href="admin/audit" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
-                    </MudCardActions>
-                </MudCard>
-            </MudItem>
-        </Authorized>
-    </AuthorizeView>
+    <MudItem xs="12" md="6" lg="4">
+        <MudCard Elevation="3">
+            <MudCardContent>
+                <MudIcon Icon="@Icons.Material.Filled.AutoFixHigh" Color="Color.Primary" Size="Size.Large" />
+                <MudText Typo="Typo.h6" Class="mt-2">LPM SIM Generate</MudText>
+                <MudText Typo="Typo.body2" Color="Color.Secondary">
+                    Allocate eligible-pallet items to stores. Produces a Draft batch you can Approve.
+                </MudText>
+            </MudCardContent>
+            <MudCardActions>
+                <MudButton Href="lpm/lpm-sim/generate" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
+            </MudCardActions>
+        </MudCard>
+    </MudItem>
+
+    <MudItem xs="12" md="6" lg="4">
+        <MudCard Elevation="3">
+            <MudCardContent>
+                <MudIcon Icon="@Icons.Material.Filled.Warehouse" Color="Color.Primary" Size="Size.Large" />
+                <MudText Typo="Typo.h6" Class="mt-2">Warehouse Boxes</MudText>
+                <MudText Typo="Typo.body2" Color="Color.Secondary">
+                    Browse and filter warehouse stock — pallets, boxes, items, brands, LPM dates.
+                </MudText>
+            </MudCardContent>
+            <MudCardActions>
+                <MudButton Href="lpm/warehouse-boxes" Color="Color.Primary" Variant="Variant.Text">Open</MudButton>
+            </MudCardActions>
+        </MudCard>
+    </MudItem>
 </MudGrid>

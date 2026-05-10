@@ -59,6 +59,26 @@
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.NoLpm">No LPM (blank)</MudSelectItem>
             </MudSelect>
         </MudItem>
+        @* LPM month value (e.g. May-26). Distinct values from
+           racks.dbo.whboxitems.LPM. Different from "LPM Status" above which
+           only filters on presence (Any / Has / No). Empty = no filter. *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="LPM (month)" Value="_filter.Lpm"
+                             ValueChanged="v => { _filter = _filter with { Lpm = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_lpms, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" Class="@ActiveCls(_filter.Lpm)" />
+        </MudItem>
+        @* Container No (whboxitems.ContNo). *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="ContNo" Value="_filter.ContNo"
+                             ValueChanged="v => { _filter = _filter with { ContNo = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_contNos, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" Class="@ActiveCls(_filter.ContNo)" />
+        </MudItem>
         <MudItem xs="12" sm="8" md="2">
             <MudTextField T="string" Label="Pallet / Box contains"
                           Value="_filter.Search"
@@ -173,6 +193,16 @@
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Warehouse" InitialDirection="SortDirection.Ascending">Warehouse</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_rows.Select(r => r.Warehouse).Distinct().Count() distinct</span>
             </MudTh>
+            @* ContNo (container number) — sits before PalletNo so the row reads
+               container → pallet → box, top-down. *@
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.ContNo ?? string.Empty">ContNo</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.ContNo).Where(c => !string.IsNullOrEmpty(c)).Distinct().Count().ToString("N0") distinct</span>
+            </MudTh>
+            @* LPM (month value) — moved here so ContNo + LPM are visually
+               grouped at the front of the row. *@
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.LPM ?? string.Empty">LPM</MudTableSortLabel>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.LPM).Distinct().Count() distinct</span>
+            </MudTh>
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletNo">Pallet No</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_rows.Select(r => r.PalletNo).Distinct().Count().ToString("N0") distinct</span>
             </MudTh>
@@ -206,13 +236,12 @@
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty">Qty</MudTableSortLabel>
                 <span class="lpm-th-total">@_rows.Sum(r => r.Qty).ToString("N0")</span>
             </MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.LPM ?? string.Empty">LPM</MudTableSortLabel>
-                <span class="lpm-th-total is-count">@_rows.Select(r => r.LPM).Distinct().Count() distinct</span>
-            </MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>@context.Country</MudTd>
             <MudTd>@context.Warehouse</MudTd>
+            <MudTd>@context.ContNo</MudTd>
+            <MudTd>@context.LPM</MudTd>
             <MudTd><code>@context.PalletNo</code></MudTd>
             <MudTd><code>@context.BoxNo</code></MudTd>
             <MudTd>@context.PalletType</MudTd>
@@ -224,7 +253,6 @@
             <MudTd>@context.Rack</MudTd>
             <MudTd>@context.Purchased</MudTd>
             <MudTd Style="text-align:right;">@context.Qty.ToString("N0")</MudTd>
-            <MudTd>@context.LPM</MudTd>
         </RowTemplate>
         <PagerContent>
             <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -413,6 +441,7 @@ else if (!_loadedOnce)
     private List<string> _divisions        = new();
     private List<string> _departments      = new();
     private List<string> _brands           = new();
+    private List<string> _contNos          = new();
 
     // Result sets — only one is populated per Load depending on _groupBy.
     private List<WhBoxRow>        _rows       = new();
@@ -463,6 +492,7 @@ else if (!_loadedOnce)
             _divisions        = await Warehouse.GetDistinctDivisionsAsync();
             _departments      = await Warehouse.GetDistinctDepartmentsAsync();
             _brands           = await Warehouse.GetDistinctBrandsAsync();
+            _contNos          = await Warehouse.GetContNosAsync();
         }
         catch (Exception ex)
         {
@@ -492,9 +522,13 @@ else if (!_loadedOnce)
                 case WhGroupBy.Box:
                 {
                     var ws = wb.Worksheets.Add("Box Detail");
-                    string[] headers = { "Country", "Warehouse", "Pallet No", "Box No",
+                    // Column order mirrors the on-screen Box Detail table:
+                    //   ContNo + LPM moved to the front (after Warehouse) so
+                    //   the row reads container → pallet → box, top-down.
+                    string[] headers = { "Country", "Warehouse", "ContNo", "LPM",
+                        "Pallet No", "Box No",
                         "Pallet Type", "Type Name", "Pallet Category", "Division",
-                        "Department", "Brand", "Rack", "Purchased", "Qty", "LPM" };
+                        "Department", "Brand", "Rack", "Purchased", "Qty" };
                     for (int i = 0; i < headers.Length; i++)
                         ws.Cell(1, i + 1).Value = headers[i];
                     ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
@@ -503,18 +537,19 @@ else if (!_loadedOnce)
                     {
                         ws.Cell(row, 1).Value  = r.Country;
                         ws.Cell(row, 2).Value  = r.Warehouse;
-                        ws.Cell(row, 3).Value  = r.PalletNo;
-                        ws.Cell(row, 4).Value  = r.BoxNo;
-                        ws.Cell(row, 5).Value  = r.PalletType;
-                        ws.Cell(row, 6).Value  = r.TypeName ?? "";
-                        ws.Cell(row, 7).Value  = r.PalletCategory ?? "";
-                        ws.Cell(row, 8).Value  = r.Division ?? "";
-                        ws.Cell(row, 9).Value  = r.Department ?? "";
-                        ws.Cell(row, 10).Value = r.Brand ?? "";
-                        ws.Cell(row, 11).Value = r.Rack ?? "";
-                        ws.Cell(row, 12).Value = r.Purchased ?? "";
-                        ws.Cell(row, 13).Value = r.Qty;
-                        ws.Cell(row, 14).Value = r.LPM ?? "";
+                        ws.Cell(row, 3).Value  = r.ContNo ?? "";
+                        ws.Cell(row, 4).Value  = r.LPM ?? "";
+                        ws.Cell(row, 5).Value  = r.PalletNo;
+                        ws.Cell(row, 6).Value  = r.BoxNo;
+                        ws.Cell(row, 7).Value  = r.PalletType;
+                        ws.Cell(row, 8).Value  = r.TypeName ?? "";
+                        ws.Cell(row, 9).Value  = r.PalletCategory ?? "";
+                        ws.Cell(row, 10).Value = r.Division ?? "";
+                        ws.Cell(row, 11).Value = r.Department ?? "";
+                        ws.Cell(row, 12).Value = r.Brand ?? "";
+                        ws.Cell(row, 13).Value = r.Rack ?? "";
+                        ws.Cell(row, 14).Value = r.Purchased ?? "";
+                        ws.Cell(row, 15).Value = r.Qty;
                         row++;
                     }
                     ws.Columns().AdjustToContents();
