@@ -165,6 +165,30 @@ html, body {
     max-width: 100%;
 }
 
+/* Box-detail table column widths.
+   Column order on screen: Country | Warehouse | ContNo | LPM | Pallet No |
+                           Box No | Qty | Pallet Type | Type Name | …
+   Country / Warehouse / ContNo / LPM are short labels — keep them narrow so
+   Box No (e.g. AELOC6179-0011, 14 chars) and Type Name (eCom-Summer) get
+   enough room to render on a single line. nowrap on Box No and Type Name
+   keeps the dash from triggering a wrap. The remaining cols flow naturally.
+   Warehouse widened to 120px for hyphenated values (e.g. YOTO-BU). Pallet
+   Type capped at 70px since real values are 2–4 chars (GS / PB / etc.). */
+.lpm-wh-table-box th:nth-child(1),  /* Country */
+.lpm-wh-table-box td:nth-child(1) { width: 90px;  min-width: 90px;  max-width: 90px;  }
+.lpm-wh-table-box th:nth-child(2),  /* Warehouse */
+.lpm-wh-table-box td:nth-child(2) { width: 120px; min-width: 120px; max-width: 120px; white-space: nowrap; }
+.lpm-wh-table-box th:nth-child(3),  /* ContNo */
+.lpm-wh-table-box td:nth-child(3) { width: 110px; min-width: 110px; max-width: 110px; white-space: nowrap; }
+.lpm-wh-table-box th:nth-child(4),  /* LPM (month) */
+.lpm-wh-table-box td:nth-child(4) { width: 80px;  min-width: 80px;  max-width: 80px;  white-space: nowrap; }
+.lpm-wh-table-box td:nth-child(6) { white-space: nowrap; }  /* Box No */
+.lpm-wh-table-box th:nth-child(7),  /* Qty */
+.lpm-wh-table-box td:nth-child(7) { width: 70px;  min-width: 70px;  max-width: 70px;  }
+.lpm-wh-table-box th:nth-child(8),  /* Pallet Type */
+.lpm-wh-table-box td:nth-child(8) { width: 70px;  min-width: 70px;  max-width: 70px;  }
+.lpm-wh-table-box td:nth-child(9) { white-space: nowrap; }  /* Type Name */
+
 /* Persistent footer at the bottom of the navigation drawer — small,
    muted, hover-tooltip reveals full informational version (Phase tag etc.) */
 .lpm-drawer-footer {

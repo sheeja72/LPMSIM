@@ -207,10 +207,10 @@
 
     <MudTable T="WhBoxRow" Items="_rows" Hover="true" Striped="true" Dense="true"
               FixedHeader="true" Height="62vh" AllowUnsorted="false"
-              Class="lpm-wh-table">
+              Class="lpm-wh-table lpm-wh-table-box">
         <HeaderContent>
             <MudTh>Country
-                <span class="lpm-th-total is-count">@_rows.Count.ToString("N0") rows</span>
+                <span class="lpm-th-total is-count">@_rows.Select(r => r.Country).Distinct().Count() distinct</span>
             </MudTh>
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Warehouse" InitialDirection="SortDirection.Ascending">Warehouse</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_rows.Select(r => r.Warehouse).Distinct().Count() distinct</span>
@@ -230,6 +230,11 @@
             </MudTh>
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_rows.Select(r => r.BoxNo).Distinct().Count().ToString("N0") distinct</span>
+            </MudTh>
+            @* Qty sits right after Box No so each box's count is visible
+               without scrolling past Pallet Type / Type Name / Division etc. *@
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty">Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_rows.Sum(r => r.Qty).ToString("N0")</span>
             </MudTh>
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.PalletType">Pallet Type</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_rows.Select(r => r.PalletType).Distinct().Count() distinct</span>
@@ -255,9 +260,6 @@
             <MudTh>Purchased
                 <span class="lpm-th-total is-count">@_rows.Count(r => r.Purchased == "N").ToString("N0") = N</span>
             </MudTh>
-            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty">Qty</MudTableSortLabel>
-                <span class="lpm-th-total">@_rows.Sum(r => r.Qty).ToString("N0")</span>
-            </MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>@context.Country</MudTd>
@@ -266,6 +268,7 @@
             <MudTd>@context.LPM</MudTd>
             <MudTd><code>@context.PalletNo</code></MudTd>
             <MudTd><code>@context.BoxNo</code></MudTd>
+            <MudTd Style="text-align:right;">@context.Qty.ToString("N0")</MudTd>
             <MudTd>@context.PalletType</MudTd>
             <MudTd>@context.TypeName</MudTd>
             <MudTd>@context.PalletCategory</MudTd>
@@ -274,7 +277,6 @@
             <MudTd>@context.Brand</MudTd>
             <MudTd>@context.Rack</MudTd>
             <MudTd>@context.Purchased</MudTd>
-            <MudTd Style="text-align:right;">@context.Qty.ToString("N0")</MudTd>
         </RowTemplate>
         <PagerContent>
             <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -596,9 +598,9 @@ else if (!_loadedOnce)
                     //   ContNo + LPM moved to the front (after Warehouse) so
                     //   the row reads container → pallet → box, top-down.
                     string[] headers = { "Country", "Warehouse", "ContNo", "LPM",
-                        "Pallet No", "Box No",
+                        "Pallet No", "Box No", "Qty",
                         "Pallet Type", "Type Name", "Pallet Category", "Division",
-                        "Department", "Brand", "Rack", "Purchased", "Qty" };
+                        "Department", "Brand", "Rack", "Purchased" };
                     for (int i = 0; i < headers.Length; i++)
                         ws.Cell(1, i + 1).Value = headers[i];
                     ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
@@ -611,15 +613,15 @@ else if (!_loadedOnce)
                         ws.Cell(row, 4).Value  = r.LPM ?? "";
                         ws.Cell(row, 5).Value  = r.PalletNo;
                         ws.Cell(row, 6).Value  = r.BoxNo;
-                        ws.Cell(row, 7).Value  = r.PalletType;
-                        ws.Cell(row, 8).Value  = r.TypeName ?? "";
-                        ws.Cell(row, 9).Value  = r.PalletCategory ?? "";
-                        ws.Cell(row, 10).Value = r.Division ?? "";
-                        ws.Cell(row, 11).Value = r.Department ?? "";
-                        ws.Cell(row, 12).Value = r.Brand ?? "";
-                        ws.Cell(row, 13).Value = r.Rack ?? "";
-                        ws.Cell(row, 14).Value = r.Purchased ?? "";
-                        ws.Cell(row, 15).Value = r.Qty;
+                        ws.Cell(row, 7).Value  = r.Qty;
+                        ws.Cell(row, 8).Value  = r.PalletType;
+                        ws.Cell(row, 9).Value  = r.TypeName ?? "";
+                        ws.Cell(row, 10).Value = r.PalletCategory ?? "";
+                        ws.Cell(row, 11).Value = r.Division ?? "";
+                        ws.Cell(row, 12).Value = r.Department ?? "";
+                        ws.Cell(row, 13).Value = r.Brand ?? "";
+                        ws.Cell(row, 14).Value = r.Rack ?? "";
+                        ws.Cell(row, 15).Value = r.Purchased ?? "";
                         row++;
                     }
                     ws.Columns().AdjustToContents();
