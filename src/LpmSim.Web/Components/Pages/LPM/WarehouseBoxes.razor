@@ -14,9 +14,10 @@
 
 <div class="lpm-page-title">Warehouse Box Details</div>
 <div class="lpm-page-subtitle">
-    UAE warehouse stock — choose a Group By to switch between detailed box rows and category summaries.
-    All filters are optional (blank = All). LPM Current = LPMDt in past or current month; LPM Future = LPMDt
-    in next month or later; Non-LPM = LPMDt blank.
+    Warehouse stock — pick a Country (UAE reads from racks.dbo.whboxitems; others from
+    [&lt;DataName&gt;].dbo.WHBoxItemsExport). Use Group By to switch between detailed box rows and
+    category summaries. All filters are optional (blank = All). LPM Current = LPMDt in past or
+    current month; LPM Future = LPMDt in next month or later; Non-LPM = LPMDt blank.
 </div>
 
 <div class="lpm-section lpm-filter-bar lpm-filter-bar-lg">
@@ -25,6 +26,25 @@
            gets the lpm-filter-active class when its bound value is non-default
            so the planner instantly sees which filters are in effect. CSS in
            app.css turns the active filter yellow with a bold label. *@
+        @* Country sits FIRST — it determines the data source. Choosing UAE
+           reads from racks.dbo.whboxitems (current behaviour); choosing
+           another country reads from [<DataName>].dbo.WHBoxItemsExport where
+           DataName is looked up from bfldata.dbo.DataSettings.SIMCountry.
+           Switching country reloads Warehouse / LPM / ContNo / Brand
+           dropdowns from the new source and clears any stale filter values
+           via OnCountryChanged below. Master-table-driven dropdowns (Type
+           Name, Pallet Category, Division, Department) stay global. *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudSelect T="string" Label="Country" Value="_filter.Country"
+                       ValueChanged="@OnCountryChanged"
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Class="@(string.Equals(_filter.Country, "UAE", StringComparison.OrdinalIgnoreCase) ? "" : "lpm-filter-active")">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem T="string" Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
         <MudItem xs="12" sm="6" md="2">
             <MudAutocomplete T="string" Label="Warehouse" Value="_filter.Warehouse"
                              ValueChanged="v => { _filter = _filter with { Warehouse = v }; StateHasChanged(); }"
@@ -70,15 +90,6 @@
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Lpm)" />
         </MudItem>
-        @* Container No (whboxitems.ContNo). *@
-        <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="ContNo" Value="_filter.ContNo"
-                             ValueChanged="v => { _filter = _filter with { ContNo = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_contNos, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.ContNo)" />
-        </MudItem>
         <MudItem xs="12" sm="8" md="2">
             <MudTextField T="string" Label="Pallet / Box contains"
                           Value="_filter.Search"
@@ -123,6 +134,17 @@
                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Brand)" />
+        </MudItem>
+        @* Container No (whboxitems.ContNo). Moved from row 1 to row 2 to make
+           space for the new Country dropdown — row 1 now holds Country +
+           Warehouse + TypeName + PalletCategory + LPM Status + LPM (month). *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudAutocomplete T="string" Label="ContNo" Value="_filter.ContNo"
+                             ValueChanged="v => { _filter = _filter with { ContNo = v }; StateHasChanged(); }"
+                             SearchFunc="@((s, c) => Search(_contNos, s))"
+                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
+                             Placeholder="All" Class="@ActiveCls(_filter.ContNo)" />
         </MudItem>
         <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
             @* Default = OFF. When CHECKED, drops the ShopEligible <> 'E' filter
@@ -434,6 +456,7 @@ else if (!_loadedOnce)
 }
 
 @code {
+    private List<string> _countries        = new() { "UAE" };  // seeded with UAE so the dropdown is non-empty even before load
     private List<string> _warehouses       = new();
     private List<string> _typeNames        = new();
     private List<string> _palletCategories = new();
@@ -458,7 +481,53 @@ else if (!_loadedOnce)
         Lpm: null, Search: null,
         LpmStatus: LpmPresence.Any,
         Division: null, Department: null, Brand: null,
-        IncludeNonPurchased: false);
+        IncludeNonPurchased: false,
+        ContNo: null,
+        Country: "UAE");
+
+    /// <summary>
+    /// Country dropdown handler — kept as a named method (instead of inline in
+    /// the Razor attribute) so the "UAE" string literal doesn't have to be
+    /// escaped to survive Razor's attribute-value parser.
+    ///
+    /// <para>
+    /// Country also drives the data source: UAE → racks.dbo.whboxitems;
+    /// other countries → [&lt;DataName&gt;].dbo.WHBoxItemsExport. So when it
+    /// changes we reload the country-specific dropdowns (Warehouse, LPM,
+    /// ContNo, Brand) and clear any filter values from the previous country
+    /// that may not exist in the new country's box data. The global
+    /// dropdowns (Type Name, Pallet Category, Division, Department) come
+    /// from master tables that don't change with country, so we leave them
+    /// as-is.
+    /// </para>
+    /// </summary>
+    private async Task OnCountryChanged(string? v)
+    {
+        var c = string.IsNullOrWhiteSpace(v) ? "UAE" : v;
+        // Reset country-specific filter values — the previously-selected
+        // warehouse/LPM/ContNo/Brand may not exist in the new country's data,
+        // and silently keeping a stale value would return zero rows on Load.
+        _filter = _filter with
+        {
+            Country   = c,
+            Warehouse = null,
+            Lpm       = null,
+            ContNo    = null,
+            Brand     = null,
+        };
+        try
+        {
+            _warehouses = await Warehouse.GetWarehousesAsync(c);
+            _lpms       = await Warehouse.GetLpmsAsync(c);
+            _contNos    = await Warehouse.GetContNosAsync(c);
+            _brands     = await Warehouse.GetDistinctBrandsAsync(c);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not load filter lists for {c}: {ex.Message}", Severity.Error);
+        }
+        StateHasChanged();
+    }
     private WhGroupBy   _groupBy = WhGroupBy.Box;
     private bool _loading;
     private bool _loadedOnce;
@@ -485,6 +554,7 @@ else if (!_loadedOnce)
     {
         try
         {
+            _countries        = await Warehouse.GetCountriesAsync();
             _warehouses       = await Warehouse.GetWarehousesAsync();
             _typeNames        = await Warehouse.GetTypeNamesAsync();
             _palletCategories = await Warehouse.GetPalletCategoriesAsync();

@@ -33,7 +33,8 @@ public record WhBoxFilter(
     // Renamed from `NonPurchasedOnly` (which had inverted semantics — was
     // TRUE meaning "apply the filter") to match the SIM Generate flag.
     bool IncludeNonPurchased = false,
-    string? ContNo = null);                            // racks.dbo.whboxitems.ContNo — container number filter
+    string? ContNo  = null,                            // racks.dbo.whboxitems.ContNo — container number filter
+    string? Country = "UAE");                          // SIMCountry — drives data source: UAE→racks, others→<DataName>.dbo.WHBoxItemsExport
 
 public record WhBoxRow(
     string Country,
@@ -82,34 +83,65 @@ public class WarehouseQueryService(IConfiguration cfg)
         cfg.GetConnectionString("Warehouse")
         ?? throw new InvalidOperationException("Missing ConnectionStrings:Warehouse (set via User Secrets).");
 
-    public async Task<List<string>> GetWarehousesAsync(CancellationToken ct = default)
+    // The four distinct-value helpers below all read whboxitems, so they
+    // accept a country and resolve the right source via WhBoxItemsSource.
+    // Default = "UAE" (legacy callers that don't pass a country still get
+    // the UAE source). pallettype / subclassmaster are GLOBAL across
+    // countries — those helpers (GetTypeNamesAsync, GetPalletCategoriesAsync,
+    // GetDistinctDivisionsAsync, GetDistinctDepartmentsAsync) keep the
+    // hard-coded source and don't need a country parameter.
+
+    public async Task<List<string>> GetWarehousesAsync(string country = "UAE", CancellationToken ct = default)
     {
-        const string sql = @"
+        var src = await ResolveSourceAsync(country, ct);
+        var sql = $@"
             SELECT DISTINCT Warehouse
-              FROM racks.dbo.whboxitems
+              FROM {src}
              WHERE Warehouse IS NOT NULL AND Warehouse <> ''
              ORDER BY Warehouse;";
         return await ReadStringsAsync(sql, ct);
     }
 
-    public async Task<List<string>> GetLpmsAsync(CancellationToken ct = default)
+    public async Task<List<string>> GetLpmsAsync(string country = "UAE", CancellationToken ct = default)
     {
-        const string sql = @"
+        var src = await ResolveSourceAsync(country, ct);
+        var sql = $@"
             SELECT DISTINCT LPM
-              FROM racks.dbo.whboxitems
+              FROM {src}
              WHERE LPM IS NOT NULL AND LPM <> ''
              ORDER BY LPM;";
         return await ReadStringsAsync(sql, ct);
     }
 
-    public async Task<List<string>> GetContNosAsync(CancellationToken ct = default)
+    public async Task<List<string>> GetContNosAsync(string country = "UAE", CancellationToken ct = default)
     {
-        const string sql = @"
+        var src = await ResolveSourceAsync(country, ct);
+        var sql = $@"
             SELECT DISTINCT ContNo
-              FROM racks.dbo.whboxitems
+              FROM {src}
              WHERE ContNo IS NOT NULL AND ContNo <> ''
              ORDER BY ContNo;";
         return await ReadStringsAsync(sql, ct);
+    }
+
+    /// <summary>
+    /// List of SIM countries from <c>bfldata.dbo.DataSettings</c> — drives
+    /// the Country dropdown on Warehouse Boxes. Distinct + ordered. UAE
+    /// always present even if no row sets it (defensive — UAE is the
+    /// default country and the only one that reads from racks.dbo.whboxitems
+    /// directly).
+    /// </summary>
+    public async Task<List<string>> GetCountriesAsync(CancellationToken ct = default)
+    {
+        const string sql = @"
+            SELECT DISTINCT SIMCountry
+              FROM bfldata.dbo.DataSettings
+             WHERE SIMCountry IS NOT NULL AND LTRIM(RTRIM(SIMCountry)) <> ''
+             ORDER BY SIMCountry;";
+        var list = await ReadStringsAsync(sql, ct);
+        if (!list.Contains("UAE", StringComparer.OrdinalIgnoreCase))
+            list.Insert(0, "UAE");
+        return list;
     }
 
     public async Task<List<string>> GetTypeNamesAsync(CancellationToken ct = default)
@@ -155,14 +187,36 @@ public class WarehouseQueryService(IConfiguration cfg)
     }
 
     /// <summary>Distinct Brand values from whboxitems — for the Brand filter dropdown.</summary>
-    public async Task<List<string>> GetDistinctBrandsAsync(CancellationToken ct = default)
+    public async Task<List<string>> GetDistinctBrandsAsync(string country = "UAE", CancellationToken ct = default)
     {
-        const string sql = @"
+        var src = await ResolveSourceAsync(country, ct);
+        var sql = $@"
             SELECT DISTINCT Brand
-              FROM racks.dbo.whboxitems
+              FROM {src}
              WHERE Brand IS NOT NULL AND Brand <> ''
              ORDER BY Brand;";
         return await ReadStringsAsync(sql, ct);
+    }
+
+    /// <summary>
+    /// Open a connection just long enough to resolve the whboxitems source
+    /// for the given country. Used by the per-helper methods above so each
+    /// call resolves on its own short-lived connection (the calling
+    /// helper's `ReadStringsAsync` opens its own connection for the
+    /// distinct-values query). For high-frequency callers we'd want to
+    /// share a connection — for the dropdown-load path (small handful of
+    /// calls per page load) the per-call resolve is fine.
+    /// </summary>
+    private async Task<string> ResolveSourceAsync(string? country, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(country) ||
+            country.Equals("UAE", StringComparison.OrdinalIgnoreCase))
+        {
+            return WhBoxItemsSource.UaeSource;
+        }
+        using var conn = new SqlConnection(_connStr);
+        await conn.OpenAsync(ct);
+        return await WhBoxItemsSource.ResolveAsync(conn, country, ct);
     }
 
     public async Task<List<WhBoxRow>> GetBoxesAsync(WhBoxFilter filter, int top, CancellationToken ct = default)
@@ -178,9 +232,21 @@ public class WarehouseQueryService(IConfiguration cfg)
         //
         // Filters: Division/Department use HAVING (post-aggregation since their
         // value is the box's primary div/dept). Brand filter is on whboxitems.Brand.
-        const string sql = @"
+        //
+        // Country switch: UAE reads from racks.dbo.whboxitems; non-UAE reads
+        // from [<DataName>].dbo.WHBoxItemsExport (DataName looked up from
+        // DataSettings — see WhBoxItemsSource). Master tables (pallettype,
+        // subclassmaster) stay GLOBAL — same join in both paths.
+
+        using var conn = new SqlConnection(_connStr);
+        await conn.OpenAsync(ct);
+
+        var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
+        var country = string.IsNullOrWhiteSpace(filter.Country) ? "UAE" : filter.Country!;
+
+        var sql = $@"
             SELECT TOP (@top)
-                   'UAE' AS Country,
+                   @country AS Country,
                    w.Warehouse,
                    w.PalletNo,
                    w.BoxNo,
@@ -195,7 +261,7 @@ public class WarehouseQueryService(IConfiguration cfg)
                    MAX(w.Rack)                                                             AS Rack,
                    MAX(CASE WHEN w.ShopEligible = 'E' THEN 'N' ELSE NULL END)              AS Purchased,
                    MAX(w.ContNo)                                                           AS ContNo
-              FROM racks.dbo.whboxitems w
+              FROM {src} w
               LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               OUTER APPLY (
                   SELECT TOP 1 sm.Division, sm.Department
@@ -228,11 +294,10 @@ public class WarehouseQueryService(IConfiguration cfg)
                AND (@department IS NULL OR MAX(scm.Department) = @department)
              ORDER BY w.Warehouse, w.PalletNo, w.BoxNo;";
 
-        using var conn = new SqlConnection(_connStr);
-        await conn.OpenAsync(ct);
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 180 };
         AddFilterParams(cmd, filter);
-        cmd.Parameters.Add(new SqlParameter("@top", top));
+        cmd.Parameters.Add(new SqlParameter("@top",     top));
+        cmd.Parameters.Add(new SqlParameter("@country", country));
 
         var rows = new List<WhBoxRow>();
         using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -264,14 +329,16 @@ public class WarehouseQueryService(IConfiguration cfg)
         // each item actually belongs to. A box with items in 2 divisions
         // contributes proportionally to both, which is the right behaviour
         // for category-level reporting.
+        using var conn = new SqlConnection(_connStr);
+        await conn.OpenAsync(ct);
+        var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
+
         var sql = $@"
             DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
-            {SummarySelect(level: "div")}
+            {SummarySelect(level: "div", src: src)}
              GROUP BY sm.Division
              ORDER BY sm.Division;";
 
-        using var conn = new SqlConnection(_connStr);
-        await conn.OpenAsync(ct);
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 240 };
         AddFilterParams(cmd, filter);
 
@@ -290,14 +357,16 @@ public class WarehouseQueryService(IConfiguration cfg)
 
     public async Task<List<WhDepartmentRow>> GetDepartmentSummaryAsync(WhBoxFilter filter, CancellationToken ct = default)
     {
+        using var conn = new SqlConnection(_connStr);
+        await conn.OpenAsync(ct);
+        var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
+
         var sql = $@"
             DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
-            {SummarySelect(level: "dept")}
+            {SummarySelect(level: "dept", src: src)}
              GROUP BY sm.Division, sm.Department
              ORDER BY sm.Division, sm.Department;";
 
-        using var conn = new SqlConnection(_connStr);
-        await conn.OpenAsync(ct);
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 240 };
         AddFilterParams(cmd, filter);
 
@@ -317,14 +386,16 @@ public class WarehouseQueryService(IConfiguration cfg)
 
     public async Task<List<WhBrandRow>> GetBrandSummaryAsync(WhBoxFilter filter, CancellationToken ct = default)
     {
+        using var conn = new SqlConnection(_connStr);
+        await conn.OpenAsync(ct);
+        var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
+
         var sql = $@"
             DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
-            {SummarySelect(level: "brand")}
+            {SummarySelect(level: "brand", src: src)}
              GROUP BY sm.Division, sm.Department, w.Brand
              ORDER BY sm.Division, sm.Department, w.Brand;";
 
-        using var conn = new SqlConnection(_connStr);
-        await conn.OpenAsync(ct);
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 240 };
         AddFilterParams(cmd, filter);
 
@@ -346,9 +417,11 @@ public class WarehouseQueryService(IConfiguration cfg)
     /// <summary>
     /// Shared SELECT body for the three summary modes — only the SELECT-list
     /// columns differ (per level), so we generate the matching prefix here
-    /// and the caller appends GROUP BY / ORDER BY.
+    /// and the caller appends GROUP BY / ORDER BY. The whboxitems source
+    /// (<paramref name="src"/>) is resolved by the caller per-country (UAE
+    /// → racks.dbo.whboxitems; other → [&lt;DataName&gt;].dbo.WHBoxItemsExport).
     /// </summary>
-    private static string SummarySelect(string level)
+    private static string SummarySelect(string level, string src)
     {
         // Per-level SELECT prefix: division/department/brand columns shown
         // depend on which level the user picked. The 3 qty columns
@@ -366,7 +439,7 @@ public class WarehouseQueryService(IConfiguration cfg)
                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND w.LPMDt <  @nextMonthStart THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LPMCurrentQty,
                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND w.LPMDt >= @nextMonthStart THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LPMFutureQty,
                    SUM(CASE WHEN w.LPMDt IS NULL                                    THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS NonLPMQty
-              FROM racks.dbo.whboxitems w
+              FROM {src} w
               INNER JOIN bfldata.dbo.pallettype          pt ON pt.PalletType = w.PalletType
               INNER JOIN Datareporting.dbo.upc_subclass    u ON u.itemcode    = w.ItemCode
               INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID      = u.MH4ID

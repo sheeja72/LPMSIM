@@ -1,5 +1,6 @@
 using LpmSim.Core;
 using LpmSim.Core.Entities;
+using LpmSim.Data.Warehouse;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -62,6 +63,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         BoxSegmentCounts? segments = null;
         try
         {
+            // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
+            // others use [<DataName>].dbo.WHBoxItemsExport.
+            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
             using var cmd = conn.CreateCommand();
             // Build a parameterised IN-list for warehouses (empty = no filter, all warehouses).
             var (whClause, whParams)         = BuildWarehouseClause(warehouses);
@@ -125,7 +129,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' THEN 1 ELSE 0 END) AS NonLpmWinterLines,
                     SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
                     COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' THEN w.BoxNo END) AS NonLpmWinterBoxes
-                  FROM racks.dbo.whboxitems w
+                  FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE 1 = 1
                    {palletClause}
@@ -1543,12 +1547,15 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // BoxQty is the SUM of qty across all items in the box, computed via a
         // window function so the order remains stable per-box across all of
         // its item rows (a box with 3 items keeps all 3 rows together).
+        // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
+        // others use [<DataName>].dbo.WHBoxItemsExport.
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = $@"
             SELECT w.BoxNo, w.LPMDt, w.ItemCode, w.Qty,
                    Season = CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END,
                    BoxQty = SUM(w.Qty) OVER (PARTITION BY w.BoxNo)
-              FROM racks.dbo.whboxitems w
+              FROM {whSrc} w
               INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               LEFT  JOIN dbo.LPM_WarehousePriority wp
                      ON wp.Country   = @whCountry
@@ -1824,11 +1831,12 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         // of YEAR(...)/MONTH(...) wrappers. Lets SQL use any index on LPMDt
         // and brings this query down from a multi-million-row scan to a
         // sub-second seek.
+        var freshSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
         using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
                 SELECT MAX(w.LPMDt)
-                  FROM racks.dbo.whboxitems w
+                  FROM {freshSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE pt.PalletCategory = 'ELIGIBLE'
                    AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
@@ -1877,13 +1885,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             await db.Database.OpenConnectionAsync(ct);
 
         long all = 0, lpm = 0, nonLpm = 0;
+        // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
+        // others use [<DataName>].dbo.WHBoxItemsExport.
+        var scopeSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
         using (var cmd = conn.CreateCommand())
         {
             // Same ItemDiv + whboxitems shape as PreviewSkuMaxBuildAsync /
             // BuildItemSkuMaxAsync — keeps the count consistent with what
             // the build will actually process. Item is "in scope" iff it
             // exists in upc_subclass AND its subclass maps to a Division.
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
                 ;WITH ItemDiv AS (
                     SELECT u.itemcode
                       FROM Datareporting.dbo.upc_subclass    u
@@ -1893,14 +1904,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 ),
                 LpmItems AS (
                     SELECT DISTINCT w.ItemCode
-                      FROM racks.dbo.whboxitems w
+                      FROM {scopeSrc} w
                       INNER JOIN ItemDiv id ON id.itemcode = w.ItemCode
                      WHERE w.ItemCode IS NOT NULL AND w.ItemCode <> ''
                        AND w.LPMDt IS NOT NULL
                 ),
                 NonLpmItems AS (
                     SELECT DISTINCT w.ItemCode
-                      FROM racks.dbo.whboxitems w
+                      FROM {scopeSrc} w
                       INNER JOIN ItemDiv id ON id.itemcode = w.ItemCode
                      WHERE w.ItemCode IS NOT NULL AND w.ItemCode <> ''
                        AND w.LPMDt IS NULL
@@ -1939,6 +1950,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         };
 
         long itemsInScope = 0, itemsInWhBoxes = 0, existingInScope = 0, existingKept = 0;
+        // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
+        // others use [<DataName>].dbo.WHBoxItemsExport.
+        var previewSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
         using (var cmd = conn.CreateCommand())
         {
             // For the All scope the build does a FULL period wipe, so every
@@ -1968,7 +1982,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 ),
                 ItemsInScope AS (
                     SELECT DISTINCT w.ItemCode
-                      FROM racks.dbo.whboxitems w
+                      FROM {previewSrc} w
                       INNER JOIN ItemDiv id ON id.itemcode = w.ItemCode
                      WHERE w.ItemCode IS NOT NULL AND w.ItemCode <> ''
                        {scopeWhere}
@@ -1976,7 +1990,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 SELECT
                     (SELECT COUNT(*) FROM ItemsInScope) AS InScope,
                     (SELECT COUNT(DISTINCT w.ItemCode)
-                       FROM racks.dbo.whboxitems w
+                       FROM {previewSrc} w
                       WHERE w.ItemCode IS NOT NULL AND w.ItemCode <> ''
                         {scopeWhere}
                     ) AS InWhBoxes,
@@ -2132,6 +2146,10 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             _                             => ""
         };
 
+        // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
+        // others use [<DataName>].dbo.WHBoxItemsExport.
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+
         // ATOMIC REBUILD ORDER (fixed in v1.7.1):
         //   1) Build & populate temp tables  ← non-destructive, no transaction
         //   2) BEGIN TRAN
@@ -2231,7 +2249,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                        id.DivCode,
                        CASE WHEN ISNULL(pt.Season,'') = 'W' THEN 'W' ELSE 'S' END,
                        SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
-                  FROM racks.dbo.whboxitems w
+                  FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                   INNER JOIN ItemDiv id               ON id.itemcode    = w.ItemCode
                  WHERE 1 = 1
@@ -2255,7 +2273,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 SELECT
                     (SELECT COUNT(DISTINCT ItemCode) FROM #ItemWh) AS InScope,
                     (SELECT COUNT(DISTINCT w.ItemCode)
-                       FROM racks.dbo.whboxitems w
+                       FROM {whSrc} w
                       WHERE w.ItemCode IS NOT NULL AND w.ItemCode <> ''
                         {scopeWhere.Replace("AND w.LPMDt", "AND w.LPMDt")}
                     ) AS InWhBoxes;";
