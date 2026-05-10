@@ -140,6 +140,31 @@ html, body {
     font-weight: 600;
 }
 
+/* Warehouse Boxes table — header alignment fix.
+   Each <th> on this page has variable content: the first cell is just the
+   row count, the rest stack a sort-label + a totals span. With the default
+   `vertical-align: middle` the row-count cell ended up centered while the
+   2-line cells stretched the row taller, making the totals visually drift
+   ABOVE the header labels in adjacent columns (the "overlapping totals"
+   the planner reported). Forcing every th to top-align + giving the totals
+   their own block row with `nowrap + ellipsis` keeps everything on a tidy
+   horizontal grid even when the column is narrow. */
+.lpm-wh-table .mud-table-head th,
+.lpm-wh-table thead th {
+    vertical-align: top !important;
+    padding-top: 8px !important;
+    padding-bottom: 8px !important;
+    line-height: 1.2;
+}
+.lpm-wh-table .lpm-th-total {
+    display: block;
+    margin-top: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 100%;
+}
+
 /* Persistent footer at the bottom of the navigation drawer — small,
    muted, hover-tooltip reveals full informational version (Phase tag etc.) */
 .lpm-drawer-footer {

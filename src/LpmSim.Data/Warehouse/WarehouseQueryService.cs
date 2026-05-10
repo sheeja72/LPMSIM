@@ -26,7 +26,13 @@ public record WhBoxFilter(
     string? Division = null,
     string? Department = null,
     string? Brand = null,                              // whboxitems.Brand (the real brand)
-    bool NonPurchasedOnly = true);                     // default ON — hide ShopEligible='E' (already-shopped) boxes
+    // Default OFF — same default behaviour as before (filter ShopEligible='E'
+    // out of the result). When the planner checks the box, the
+    // `ShopEligible <> 'E'` filter is dropped and "non-purchased" boxes
+    // (the business term for ShopEligible='E') are also included.
+    // Renamed from `NonPurchasedOnly` (which had inverted semantics — was
+    // TRUE meaning "apply the filter") to match the SIM Generate flag.
+    bool IncludeNonPurchased = false);
 
 public record WhBoxRow(
     string Country,
@@ -196,7 +202,11 @@ public class WarehouseQueryService(IConfiguration cfg)
                AND (@search IS NULL
                     OR w.PalletNo LIKE @searchLike
                     OR w.BoxNo LIKE @searchLike)
-               AND (@nonPurchasedOnly = 0
+               -- IncludeNonPurchased = 1 → drop the filter (show all boxes,
+               -- including ShopEligible=E rows that the business calls
+               -- non-purchased). 0 = apply the filter (show only available
+               -- boxes — same behaviour as before).
+               AND (@includeNonPurchased = 1
                     OR w.ShopEligible IS NULL
                     OR w.ShopEligible <> 'E')
              GROUP BY w.Warehouse, w.PalletNo, w.BoxNo, w.PalletType, pt.TypeName, pt.PalletCategory
@@ -356,7 +366,11 @@ public class WarehouseQueryService(IConfiguration cfg)
                AND (@search IS NULL
                     OR w.PalletNo LIKE @searchLike
                     OR w.BoxNo LIKE @searchLike)
-               AND (@nonPurchasedOnly = 0
+               -- IncludeNonPurchased = 1 → drop the filter (show all boxes,
+               -- including ShopEligible=E rows that the business calls
+               -- non-purchased). 0 = apply the filter (show only available
+               -- boxes — same behaviour as before).
+               AND (@includeNonPurchased = 1
                     OR w.ShopEligible IS NULL
                     OR w.ShopEligible <> 'E')
                AND (@division   IS NULL OR sm.Division   = @division)
@@ -378,7 +392,7 @@ public class WarehouseQueryService(IConfiguration cfg)
         cmd.Parameters.Add(new SqlParameter("@division",       (object?)filter.Division       ?? DBNull.Value));
         cmd.Parameters.Add(new SqlParameter("@department",     (object?)filter.Department     ?? DBNull.Value));
         cmd.Parameters.Add(new SqlParameter("@brand",          (object?)filter.Brand          ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@nonPurchasedOnly", filter.NonPurchasedOnly ? 1 : 0));
+        cmd.Parameters.Add(new SqlParameter("@includeNonPurchased", filter.IncludeNonPurchased ? 1 : 0));
     }
 
     private async Task<List<string>> ReadStringsAsync(string sql, CancellationToken ct)

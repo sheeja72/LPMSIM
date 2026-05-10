@@ -870,48 +870,63 @@
         </div>
     }
 
-    @if (_aggregates is BatchAggregates ba)
+    @if (_sourceWh is { Count: > 0 } swRows)
     {
+        var swTotalSku   = swRows.Sum(r => r.SkuCount);   // sum across rows (same item across WHs counted multiple times)
+        var swTotalBoxes = swRows.Sum(r => r.BoxCount);
+        var swTotalBoxQty = swRows.Sum(r => r.BoxQty);
+        var swTotalSimQty = swRows.Sum(r => r.SimQty);
         <div class="lpm-section mb-3" style="padding:0.6rem 1rem;">
             <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
-                Allocation result — split by source
+                Allocation result — split by source × warehouse
             </MudText>
             <MudSimpleTable Dense Hover Bordered Class="lpm-seg-table mt-1" Style="font-size:0.85rem;">
                 <thead>
                     <tr>
-                        <th></th>
-                        <th class="text-right">Lines</th>
-                        <th class="text-right">Stores</th>
+                        <th>Kind</th>
+                        <th>Warehouse</th>
+                        <th class="text-right">SKU Count</th>
                         <th class="text-right">Boxes</th>
-                        <th class="text-right">Total Qty</th>
+                        <th class="text-right">Box Qty</th>
+                        <th class="text-right">Output SIM Qty</th>
                     </tr>
                 </thead>
                 <tbody>
-                    <tr>
-                        <td><strong>LPM</strong> <span class="text-muted">(Phase 1)</span></td>
-                        <td class="text-right">@ba.LpmLines.ToString("N0")</td>
-                        <td class="text-right">@ba.LpmStores.ToString("N0")</td>
-                        <td class="text-right">@ba.LpmBoxes.ToString("N0")</td>
-                        <td class="text-right">@ba.LpmQty.ToString("N0")</td>
-                    </tr>
-                    <tr>
-                        <td><strong>Non-LPM</strong> <span class="text-muted">(Phase 2)</span></td>
-                        <td class="text-right">@ba.NonLpmLines.ToString("N0")</td>
-                        <td class="text-right">@ba.NonLpmStores.ToString("N0")</td>
-                        <td class="text-right">@ba.NonLpmBoxes.ToString("N0")</td>
-                        <td class="text-right">@ba.NonLpmQty.ToString("N0")</td>
-                    </tr>
+                    @foreach (var r in swRows)
+                    {
+                        <tr>
+                            <td>
+                                @if (r.Kind == "LPM")
+                                {
+                                    <span class="lpm-status lpm-accent-blue">LPM</span>
+                                }
+                                else
+                                {
+                                    <span class="lpm-status lpm-accent-amber">Non-LPM</span>
+                                }
+                            </td>
+                            <td><code>@r.Warehouse</code></td>
+                            <td class="text-right">@r.SkuCount.ToString("N0")</td>
+                            <td class="text-right">@r.BoxCount.ToString("N0")</td>
+                            <td class="text-right">@r.BoxQty.ToString("N0")</td>
+                            <td class="text-right">@r.SimQty.ToString("N0")</td>
+                        </tr>
+                    }
                     <tr style="background:#f8fafc;font-weight:600;">
-                        <td>Total</td>
-                        <td class="text-right">@ba.Lines.ToString("N0")</td>
-                        <td class="text-right">@ba.Stores.ToString("N0")</td>
-                        <td class="text-right">@ba.Boxes.ToString("N0")</td>
-                        <td class="text-right" style="background:#fef9c3;">@ba.TotalQty.ToString("N0")</td>
+                        <td colspan="2">Total</td>
+                        <td class="text-right">@swTotalSku.ToString("N0")</td>
+                        <td class="text-right">@swTotalBoxes.ToString("N0")</td>
+                        <td class="text-right">@swTotalBoxQty.ToString("N0")</td>
+                        <td class="text-right" style="background:#fef9c3;">@swTotalSimQty.ToString("N0")</td>
                     </tr>
                 </tbody>
             </MudSimpleTable>
             <MudText Typo="Typo.caption" Style="color:#64748b;">
-                Stores column is distinct count per source — same store can appear in both rows.
+                One row per (Kind, Warehouse) pair that participated in this batch. <strong>SKU Count</strong>
+                = distinct itemcodes; <strong>Boxes</strong> = distinct BoxNos; <strong>Box Qty</strong> =
+                warehouse-side stock total of those boxes; <strong>Output SIM Qty</strong> = qty actually
+                allocated. SKU/Boxes totals can double-count when the same item or box appears in multiple
+                warehouses — Output SIM Qty is the only sum guaranteed not to double-count.
             </MudText>
         </div>
     }
@@ -2293,6 +2308,9 @@
     private List<BoxDetailRow> _boxRows = new();
     private List<ItemDetailRow> _itemRows = new();
     private BatchAggregates? _aggregates;
+    // (Kind × Warehouse) breakdown for the new "Allocation Result" table.
+    // Loaded alongside _aggregates whenever a batch is opened/refreshed.
+    private List<SourceWarehouseRow>? _sourceWh;
 
     // Q&A (Investigate) tab state
     private string _qaQuestion       = "BatchBlockers";   // default question
@@ -2476,6 +2494,8 @@
         // "show all" behaviour the user expects).
         try { _aggregates = await Reports.GetBatchAggregatesAsync(bn, _minUsability, _maxUsability); }
         catch { /* surfaced by tab load below */ }
+        try { _sourceWh = await Reports.GetSourceWarehouseBreakdownAsync(bn); }
+        catch { _sourceWh = null; /* table just won't render — non-fatal */ }
         // Invalidate every OTHER tab's cached data — next OnTabChanged will
         // refetch. The current tab's list is reloaded below by the switch.
         if (_activeTab != 0) _summary.Clear();
@@ -2957,6 +2977,7 @@
                 _summary.Clear(); _storeSummary.Clear(); _divisionSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
                 _traceCounts = null;
                 _aggregates = await Reports.GetBatchAggregatesAsync(existing.LPMBatchNo, _minUsability, _maxUsability);
+                try { _sourceWh = await Reports.GetSourceWarehouseBreakdownAsync(existing.LPMBatchNo); } catch { _sourceWh = null; }
                 _ = LoadSummaryAsync(existing.LPMBatchNo);
             }
             else
@@ -2964,6 +2985,7 @@
                 _summary = new(); _storeSummary = new(); _divisionSummary = new(); _boxRows = new();
                 _itemRows = new(); _traceRows = new(); _traceCounts = null;
                 _aggregates = null;
+                _sourceWh   = null;
             }
             _loadedBatchNo = existing?.LPMBatchNo;
         }
@@ -3062,6 +3084,7 @@
                         _summary.Clear(); _storeSummary.Clear(); _divisionSummary.Clear(); _boxRows.Clear(); _itemRows.Clear(); _traceRows.Clear();
                         _traceCounts = null;
                         _aggregates = await Reports.GetBatchAggregatesAsync(bn, _minUsability, _maxUsability);
+                        try { _sourceWh = await Reports.GetSourceWarehouseBreakdownAsync(bn); } catch { _sourceWh = null; }
 
                         // Summary tab load runs in the background — its own
                         // _loadingSummary flag drives the progress bar inside
@@ -3082,6 +3105,7 @@
                         _traceRows = new List<AllocTraceRow>();
                         _traceCounts = null;
                         _aggregates = null;
+                        _sourceWh   = null;
                     }
                     _loadedBatchNo = bnNow;
                 }

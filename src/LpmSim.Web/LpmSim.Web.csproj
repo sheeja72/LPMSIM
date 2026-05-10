@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.8.0</Version>
-    <AssemblyVersion>1.8.0.0</AssemblyVersion>
-    <FileVersion>1.8.0.0</FileVersion>
-    <InformationalVersion>1.8.0 (Phase H — Custom Report + Warehouse Priorities + ADM)</InformationalVersion>
+    <Version>1.8.1</Version>
+    <AssemblyVersion>1.8.1.0</AssemblyVersion>
+    <FileVersion>1.8.1.0</FileVersion>
+    <InformationalVersion>1.8.1 (Allocation Result × Warehouse + WH Box filter rename)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

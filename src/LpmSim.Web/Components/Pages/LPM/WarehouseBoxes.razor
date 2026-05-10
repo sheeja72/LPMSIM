@@ -105,14 +105,16 @@
                              Placeholder="All" Class="@ActiveCls(_filter.Brand)" />
         </MudItem>
         <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
-            @* Default = ON. When checked, only "available" boxes (ShopEligible <> 'E')
-               are shown; when unchecked, all boxes (purchased + non-purchased) are
-               shown. Highlighted whenever it's NOT the default of true. *@
-            <MudCheckBox T="bool" Value="_filter.NonPurchasedOnly"
-                         ValueChanged="v => { _filter = _filter with { NonPurchasedOnly = v }; StateHasChanged(); }"
+            @* Default = OFF. When CHECKED, drops the ShopEligible <> 'E' filter
+               and INCLUDES "non-purchased" boxes (the business term for
+               ShopEligible='E') in the result. Same semantics as the
+               "Include Non-Purchased Boxes" checkbox on SIM Generate.
+               Highlighted whenever it's NOT the default of false. *@
+            <MudCheckBox T="bool" Value="_filter.IncludeNonPurchased"
+                         ValueChanged="v => { _filter = _filter with { IncludeNonPurchased = v }; StateHasChanged(); }"
                          Color="Color.Primary"
-                         Class="@(_filter.NonPurchasedOnly ? "" : "lpm-filter-active")"
-                         Label="Show Non-Purchased" />
+                         Class="@(_filter.IncludeNonPurchased ? "lpm-filter-active" : "")"
+                         Label="Include non-Purchased Boxes" />
         </MudItem>
         <MudItem xs="12" md="3" Class="d-flex align-center justify-end gap-2">
             <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
@@ -162,7 +164,8 @@
     </MudGrid>
 
     <MudTable T="WhBoxRow" Items="_rows" Hover="true" Striped="true" Dense="true"
-              FixedHeader="true" Height="62vh" AllowUnsorted="false">
+              FixedHeader="true" Height="62vh" AllowUnsorted="false"
+              Class="lpm-wh-table">
         <HeaderContent>
             <MudTh>Country
                 <span class="lpm-th-total is-count">@_rows.Count.ToString("N0") rows</span>
@@ -254,7 +257,7 @@ else if (_groupBy == WhGroupBy.Division && _divRows.Count > 0)
     </MudGrid>
 
     <MudTable T="WhDivisionRow" Items="_divRows" Hover="true" Striped="true" Dense="true"
-              FixedHeader="true" Height="62vh">
+              FixedHeader="true" Height="62vh" Class="lpm-wh-table">
         <HeaderContent>
             <MudTh><MudTableSortLabel T="WhDivisionRow" SortBy="r => r.Division ?? string.Empty" InitialDirection="SortDirection.Ascending">Division</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_divRows.Count divisions</span></MudTh>
@@ -305,7 +308,7 @@ else if (_groupBy == WhGroupBy.Department && _deptRows.Count > 0)
     </MudGrid>
 
     <MudTable T="WhDepartmentRow" Items="_deptRows" Hover="true" Striped="true" Dense="true"
-              FixedHeader="true" Height="62vh">
+              FixedHeader="true" Height="62vh" Class="lpm-wh-table">
         <HeaderContent>
             <MudTh><MudTableSortLabel T="WhDepartmentRow" SortBy="r => r.Division ?? string.Empty" InitialDirection="SortDirection.Ascending">Division</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_deptRows.Select(r => r.Division).Distinct().Count() distinct</span></MudTh>
@@ -359,7 +362,7 @@ else if (_groupBy == WhGroupBy.Brand && _brandRows.Count > 0)
     </MudGrid>
 
     <MudTable T="WhBrandRow" Items="_brandRows" Hover="true" Striped="true" Dense="true"
-              FixedHeader="true" Height="62vh">
+              FixedHeader="true" Height="62vh" Class="lpm-wh-table">
         <HeaderContent>
             <MudTh><MudTableSortLabel T="WhBrandRow" SortBy="r => r.Division ?? string.Empty" InitialDirection="SortDirection.Ascending">Division</MudTableSortLabel>
                 <span class="lpm-th-total is-count">@_brandRows.Select(r => r.Division).Distinct().Count() distinct</span></MudTh>
@@ -417,15 +420,16 @@ else if (!_loadedOnce)
     private List<WhDepartmentRow> _deptRows   = new();
     private List<WhBrandRow>      _brandRows  = new();
 
-    // NonPurchasedOnly defaults to TRUE per business request — most planners
-    // only care about available stock, not boxes already shopped/purchased.
-    // Toggle off to include ShopEligible='E' rows in the result.
+    // IncludeNonPurchased defaults to FALSE — the planner sees only
+    // "available" boxes (ShopEligible <> 'E') by default. Tick the box to
+    // ALSO include the ShopEligible='E' rows (business term: "non-purchased").
+    // Same semantics as the SIM Generate "Include Non-Purchased Boxes" flag.
     private WhBoxFilter _filter = new(
         Warehouse: null, TypeName: null, PalletCategory: null,
         Lpm: null, Search: null,
         LpmStatus: LpmPresence.Any,
         Division: null, Department: null, Brand: null,
-        NonPurchasedOnly: true);
+        IncludeNonPurchased: false);
     private WhGroupBy   _groupBy = WhGroupBy.Box;
     private bool _loading;
     private bool _loadedOnce;

@@ -152,6 +152,24 @@ public record BatchAggregates(int Lines, int Stores, int Boxes, long TotalQty)
     public long NonLpmQty    { get; init; }
 }
 
+/// <summary>
+/// One row of the "Allocation Result" matrix at the top of the SIM Generate
+/// preview. Grain = (Kind, Warehouse). Each row shows how many distinct items
+/// / boxes flowed from a particular source-kind × warehouse pair, the
+/// warehouse-side stock total of those boxes, and the SIM Qty allocated.
+///
+/// Replaces the older two-row LPM/Non-LPM rollup. Lets the planner see
+/// "JAFZA contributed 220K of LPM stock and SIM allocated 99K of it" at a
+/// glance, broken out by warehouse.
+/// </summary>
+public sealed record SourceWarehouseRow(
+    string Kind,           // "LPM" or "Non-LPM" — derived from whboxitems.LPMDt
+    string Warehouse,      // racks.dbo.whboxitems.Warehouse
+    int    SkuCount,       // distinct itemcodes in LPMSIM_Output for this (Kind, WH)
+    int    BoxCount,       // distinct BoxNos in LPMSIM_Output for this (Kind, WH)
+    long   BoxQty,         // sum of warehouse-side qty for the boxes used (whboxitems.Qty)
+    long   SimQty);        // sum of allocated qty (LPMSIM_Output.Qty)
+
 public class ItemDetailRow
 {
     public long LPMBatchNo { get; set; }
@@ -903,6 +921,91 @@ SELECT
             };
         }
         return new BatchAggregates(0, 0, 0, 0);
+    }
+
+    /// <summary>
+    /// Per-(Kind × Warehouse) breakdown of a SIM batch — drives the
+    /// "Allocation Result" matrix at the top of the Result Preview. Returns
+    /// one row per (LPM/Non-LPM, Warehouse) pair that participated in the
+    /// batch, with distinct-item / distinct-box counts, the warehouse-side
+    /// stock that backed those boxes, and the SIM Qty allocated from them.
+    ///
+    /// Implementation: pre-aggregates <c>racks.dbo.whboxitems</c> ONCE for
+    /// the batch's box set (mirrors the perf pattern used by the Item
+    /// Details rewrite — no per-row correlated subqueries).
+    /// </summary>
+    public async Task<List<SourceWarehouseRow>> GetSourceWarehouseBreakdownAsync(
+        long batchNo, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var conn = db.Database.GetDbConnection();
+        await db.Database.OpenConnectionAsync(ct);
+
+        const string sql = @"
+;WITH BatchBoxes AS (
+    SELECT DISTINCT BoxNo
+      FROM dbo.LPMSIM_Output
+     WHERE LPMBatchNo = @batchNo
+),
+-- Per BoxNo: warehouse, kind (LPM if any whboxitems row for that box has
+-- a non-NULL LPMDt), and total warehouse stock for the box.
+BoxMeta AS (
+    SELECT w.BoxNo,
+           Warehouse = MAX(ISNULL(NULLIF(LTRIM(RTRIM(w.Warehouse)), ''), '(none)')),
+           Kind = CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
+                       THEN 'LPM' ELSE 'Non-LPM' END,
+           BoxQty = SUM(CAST(w.Qty AS bigint))
+      FROM racks.dbo.whboxitems w
+     WHERE w.BoxNo IN (SELECT BoxNo FROM BatchBoxes)
+     GROUP BY w.BoxNo
+),
+-- Per (Kind, Warehouse): distinct items + distinct boxes + SIM Qty.
+SimByGroup AS (
+    SELECT bm.Kind, bm.Warehouse,
+           SkuCount = COUNT(DISTINCT s.Itemcode),
+           BoxCount = COUNT(DISTINCT s.BoxNo),
+           SimQty   = SUM(CAST(s.Qty AS bigint))
+      FROM dbo.LPMSIM_Output s
+      INNER JOIN BoxMeta bm ON bm.BoxNo = s.BoxNo
+     WHERE s.LPMBatchNo = @batchNo
+     GROUP BY bm.Kind, bm.Warehouse
+),
+-- Per (Kind, Warehouse): warehouse stock total across the boxes used.
+BoxQtyByGroup AS (
+    SELECT Kind, Warehouse, BoxQty = SUM(BoxQty)
+      FROM BoxMeta
+     GROUP BY Kind, Warehouse
+)
+SELECT  sg.Kind,
+        sg.Warehouse,
+        sg.SkuCount,
+        sg.BoxCount,
+        BoxQty = ISNULL(bq.BoxQty, 0),
+        sg.SimQty
+  FROM  SimByGroup sg
+  LEFT  JOIN BoxQtyByGroup bq
+         ON bq.Kind = sg.Kind AND bq.Warehouse = sg.Warehouse
+ ORDER BY sg.Kind, sg.Warehouse;";
+
+        var rows = new List<SourceWarehouseRow>();
+        using (var cmd = (SqlCommand)conn.CreateCommand())
+        {
+            cmd.CommandText = sql;
+            cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
+            cmd.CommandTimeout = 120;
+            using var rdr = await cmd.ExecuteReaderAsync(ct);
+            while (await rdr.ReadAsync(ct))
+            {
+                rows.Add(new SourceWarehouseRow(
+                    Kind:      rdr.IsDBNull(0) ? "Non-LPM" : rdr.GetString(0),
+                    Warehouse: rdr.IsDBNull(1) ? "(unknown)" : rdr.GetString(1),
+                    SkuCount:  rdr.IsDBNull(2) ? 0 : rdr.GetInt32(2),
+                    BoxCount:  rdr.IsDBNull(3) ? 0 : rdr.GetInt32(3),
+                    BoxQty:    rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4),
+                    SimQty:    rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5)));
+            }
+        }
+        return rows;
     }
 
     public async Task<List<ItemDetailRow>> GetItemDetailsAsync(
