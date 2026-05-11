@@ -12,7 +12,10 @@
     --lpm-drawer-muted: #cbd5e1;     /* slightly brighter for contrast on blue */
     --lpm-accent: #2563eb;
     --lpm-border: #e5e7eb;
-    --lpm-table-head: #0f172a;
+    /* Table header background — switched from slate-900 to match the
+       new sidebar blue palette (1.10.7). Drives every MudTable's
+       header strip via the .mud-table-head rule below. */
+    --lpm-table-head: #1e3a8a;
 }
 
 html, body {

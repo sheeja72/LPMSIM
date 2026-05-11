@@ -23,6 +23,18 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.10.7 — Table headers: slate → blue (2026-05-11)
+
+### Changed
+- **All `MudTable` header strips** switched from slate (`#0f172a`) to **`#1e3a8a`** (Tailwind blue-900), matching the sidebar palette from 1.10.6. Affects every report grid in the app — EOM Generate (Store × Division, Store Summary, Division Summary), SIM Generate result tabs, SIM Reports (Item Details, Custom Report, Box Detail, etc.), Warehouse Boxes, Production Schedule, ADM, Audit Log, Weekly Sales Target Split, Store / Division Access, Store / Department Access, Warehouse Priorities, Grades, Volume Groups, SKU Max Rules, Users.
+- Single CSS variable: `--lpm-table-head` at the top of `app.css`. All tables pick it up via the `.mud-table-head th` rule.
+
+### Notes
+- Text on the header stays white/light for contrast.
+- No functional change. Pure color theme update.
+
+---
+
 ## 1.10.6 — Sidebar palette: slate → blue (2026-05-11)
 
 ### Changed
