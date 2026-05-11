@@ -92,6 +92,12 @@ public class EomRow
 /// </list>
 /// </para>
 /// </summary>
+/// <param name="DivCode">Division code (int).</param>
+/// <param name="Season">'S' (Summer) or 'W' (Winter).</param>
+/// <param name="HOStock">Σ <c>LPM_LocStock.SOH</c> for items in this Div × Season where <c>dataname='HODATA'</c>.</param>
+/// <param name="WHStockPurchased">Σ <c>whboxitems.Qty</c> where <c>ShopEligible IS NULL OR &lt;&gt; 'E'</c> (purchased / cleared boxes).</param>
+/// <param name="WHStockNonPurchased">Σ <c>whboxitems.Qty</c> where <c>ShopEligible = 'E'</c> (still in-process / not yet purchased).</param>
+/// <param name="EligibleStock">Σ <c>whboxitems.Qty</c> where <c>PalletCategory='ELIGIBLE' AND (ShopEligible IS NULL OR &lt;&gt; 'E')</c> — purchased subset of the ELIGIBLE pallet category.</param>
 public record DivisionStockBreakdown(
     int    DivCode,
     string Season,

@@ -23,6 +23,20 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.10.3 — Invert ShopEligible semantics on EOM Division Summary stock columns (2026-05-11)
+
+### Fixed
+- **WH Stock (Purchased)** and **WH Stock (Non-Purchased)** columns in the EOM Division Summary tab had their `ShopEligible` filters swapped. My 1.10.0 implementation followed the SIM allocator's convention (`ShopEligible = 'E'` → claimed/purchased), but the business labels work the opposite way:
+  - **WH Stock (Purchased)** = boxes where `ShopEligible IS NULL OR <> 'E'` (cleared past the 'E' in-process state)
+  - **WH Stock (Non-Purchased)** = boxes where `ShopEligible = 'E'` (still being processed)
+  - **Eligible Stock** = `PalletCategory = 'ELIGIBLE' AND (ShopEligible IS NULL OR <> 'E')` (purchased subset of the ELIGIBLE category)
+- The SIM allocator's filter on `ShopEligible <> 'E'` (= "available to allocate") is untouched and continues to mean what it always did. Only the Division Summary's display labels were reversed.
+
+### Notes
+- After the deploy lands, refresh the EOM Generate page — the larger number should now appear in "WH Stock (Purchased)" and the smaller in "WH Stock (Non-Purchased)" (the opposite of what 1.10.0–1.10.2 showed).
+
+---
+
 ## 1.10.2 — Fix EOM Store × Division header layout (2026-05-11)
 
 ### Fixed

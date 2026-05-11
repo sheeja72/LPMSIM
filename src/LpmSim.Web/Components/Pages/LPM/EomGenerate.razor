@@ -845,19 +845,19 @@
                 </MudTh>
                 <MudTh Style="width:8%;">
                     <div class="th-total">@dsTotalWHP.ToString("N0")</div>
-                    <span title="Σ whboxitems.Qty for boxes where ShopEligible='E' (already claimed by a shop).">
+                    <span title="Σ whboxitems.Qty for boxes where ShopEligible IS NULL OR <>'E' (boxes cleared past the 'E' in-process state — purchased).">
                         <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.WHStockPurchased">WH Stock<br />(Purchased)</MudTableSortLabel>
                     </span>
                 </MudTh>
                 <MudTh Style="width:8%;">
                     <div class="th-total">@dsTotalWHNP.ToString("N0")</div>
-                    <span title="Σ whboxitems.Qty for boxes where ShopEligible IS NULL OR <>'E' (still available for SIM).">
+                    <span title="Σ whboxitems.Qty for boxes where ShopEligible='E' (still being processed — not yet purchased).">
                         <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.WHStockNonPurchased">WH Stock<br />(Non-Purchased)</MudTableSortLabel>
                     </span>
                 </MudTh>
                 <MudTh Style="width:8%;">
                     <div class="th-total">@dsTotalElig.ToString("N0")</div>
-                    <span title="Σ whboxitems.Qty for boxes where PalletCategory='ELIGIBLE' AND ShopEligible='E' (purchased subset of ELIGIBLE category).">
+                    <span title="Σ whboxitems.Qty for boxes where PalletCategory='ELIGIBLE' AND ShopEligible IS NULL OR <>'E' (purchased subset of the ELIGIBLE pallet category).">
                         <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.EligibleStock">Eligible<br />Stock</MudTableSortLabel>
                     </span>
                 </MudTh>
