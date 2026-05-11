@@ -23,6 +23,18 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.10.6 — Sidebar palette: slate → blue (2026-05-11)
+
+### Changed
+- **Navigation drawer (sidebar) background** switched from slate (`#1e293b` / `#0f172a` — visually near-black) to a clearly blue palette: `#1e3a8a` (Tailwind blue-900) body, `#172554` (blue-950) for the header strip. Matches the existing `#2563eb` accent family.
+- `--lpm-drawer-muted` brightened from `#94a3b8` → `#cbd5e1` so section labels (LPM VARIABLES, PLANNING CONFIG) stay readable on the lighter blue.
+
+### Notes
+- Only the sidebar's color tokens changed — main page content, tables, and forms keep their existing light theme.
+- All 4 colors live as CSS variables at the top of `app.css`. If you want to tweak the exact shade later, edit `--lpm-drawer-bg` and `--lpm-drawer-bg-strong` — every navigation element picks them up automatically.
+
+---
+
 ## 1.10.5 — Full MudBlazor v7 analyzer cleanup sweep (2026-05-11)
 
 ### Fixed
