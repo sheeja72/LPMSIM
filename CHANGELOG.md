@@ -23,6 +23,34 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.9.6 — Rule 4 join fix: drop upcbarcodes detour (2026-05-11)
+
+### Fixed
+- **Rule 4 (`usa.dbo.ExcludeItemsMFCS`) was hanging the entire exclusions phase for 15+ minutes** in 1.9.5. The old SQL went through `usa.dbo.upcbarcodes` (**18,016,969 rows**) to map `ItemCode → HSCode`, then filtered on `(HSCode, Shopname)` against `ExcludeItemsMFCS`. Join space: 15.7M `#SkuSnap` × 18M `upcbarcodes` = potentially ~282 trillion combinations, even though `ExcludeItemsMFCS` itself has only **198 rows**.
+
+### Changed
+- **Rule 4 now joins `ExcludeItemsMFCS` directly on `(Itemcode, Shopname)`**:
+  ```sql
+  INNER JOIN usa.dbo.ExcludeItemsMFCS e
+          ON e.Itemcode = snap.ItemCode
+         AND e.Shopname = snap.StoreID;
+  ```
+  No `upcbarcodes` detour. The schema of `ExcludeItemsMFCS` already exposes `Itemcode` as a column, so this is the natural join. Drops Rule 4 from "many minutes" to milliseconds.
+- Reason text updated from `"Item HSCode x Shopname excluded in ExcludeItemsMFCS"` → `"Itemcode x Shopname excluded in ExcludeItemsMFCS"` to reflect the actual match shape.
+
+### Notes
+- The previous behaviour (HSCode-cascade — one row blocks every item sharing the same HSCode) is no longer applied. If that was the intended business semantic for some legacy reason, tell me and I'll revert + add a covering index on `upcbarcodes (itemcode) INCLUDE (HSCode)` to make the detour fast.
+- Row counts confirmed from the user's diagnostic on the live DB. All other rules' join sizes are reasonable:
+  - Rule 1: 15.7M × 430K (`ExcludeExport_Planning`)
+  - Rule 2: 15.7M × 20M (`upc_subclass`) × 8K (`ExcludeSubclass`) — fast if `upc_subclass.itemcode` is indexed (worth checking if Rule 2 timing is high in the next build's StageDetail)
+  - Rule 3: 15.7M × 540K (`RemoveItemsFromTransfer`)
+  - Rule 4: 15.7M × **198** (`ExcludeItemsMFCS`) — was 15.7M × 18M before this fix
+  - Rule 5: 15.7M × small (`DeptPriceMaxQty_MH4` 380 rows + `Hodata.SalesPrice` for items only)
+  - Rule 6: 15.7M × small (`#Deact` only contains deactivated rows)
+  - Rule 7: 15.7M × 1K (`subclassmaster`) × small (`LPM_StoreDeptAccess`)
+
+---
+
 ## 1.9.5 — Real fix for #NewSnap persistence (2026-05-11)
 
 ### Fixed

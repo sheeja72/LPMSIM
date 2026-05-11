@@ -2479,8 +2479,10 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             //   • usa.dbo.DeptPriceMaxQty_MH4         (shopname, DivCode, DEPARTMENT, PriceF, PriceT, maxqty, …)
             //   • Hodata.dbo.SalesPrice               (CostCode, ItemCode, SalesRate, TrnDate, …)
             //   • Datareporting.dbo.subclassmaster    (MH4ID, Division, Department, …)
-            //   • usa.dbo.upcbarcodes                 (itemcode, HSCode)
             //   • Datareporting.dbo.upc_subclass      (itemcode, MH4ID)
+            //   (upcbarcodes is no longer joined — Rule 4 now uses
+            //    ExcludeItemsMFCS.Itemcode directly; the 18M-row table is
+            //    never touched.)
             //
             // SQL Server uses case-insensitive column names by default, so
             // "Shopname" / "shopname" / "ShopName" / "SHOPNAME" all match the
@@ -2742,23 +2744,35 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     BEGIN CATCH SET @r3Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms3 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                    -- Rule 4 — usa.dbo.ExcludeItemsMFCS (HSCode x Shopname via upcbarcodes)
+                    -- Rule 4 — usa.dbo.ExcludeItemsMFCS (DIRECT Itemcode x Shopname join)
+                    --
+                    -- The schema of ExcludeItemsMFCS already has Itemcode as a
+                    -- column (alongside HScode), so the natural join is direct:
+                    -- (Itemcode × Shopname) → exclude. The old code went via
+                    -- usa.dbo.upcbarcodes (18M rows) to map ItemCode → HSCode
+                    -- and then filtered ExcludeItemsMFCS by HSCode. That
+                    -- expanded the join space to ~282 trillion potential
+                    -- combinations (15.7M #SkuSnap × 18M upcbarcodes) and was
+                    -- the dominant cost in 1.9.5 builds — hanging the whole
+                    -- 'Applying exclusion rules…' phase for 15+ minutes even
+                    -- with only 198 rows in ExcludeItemsMFCS.
+                    --
+                    -- Direct join: 15.7M × 198 with index seek on (Itemcode,
+                    -- Shopname) → milliseconds. Matches what the column shape
+                    -- on ExcludeItemsMFCS implies (the Itemcode column would
+                    -- be redundant otherwise).
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
                                'usa.dbo.ExcludeItemsMFCS',
-                               'Item HSCode x Shopname excluded in ExcludeItemsMFCS',
-                               CONCAT('HSCode=', b.HSCode)
+                               'Itemcode x Shopname excluded in ExcludeItemsMFCS',
+                               NULL
                           FROM #SkuSnap snap
-                          INNER JOIN usa.dbo.upcbarcodes b
-                                  ON b.itemcode = snap.ItemCode
-                         WHERE EXISTS (
-                              SELECT 1 FROM usa.dbo.ExcludeItemsMFCS e
-                               WHERE e.Shopname = snap.StoreID
-                                 AND e.hscode   = b.HSCode
-                           );
+                          INNER JOIN usa.dbo.ExcludeItemsMFCS e
+                                  ON e.Itemcode = snap.ItemCode
+                                 AND e.Shopname = snap.StoreID;
                     END TRY
                     BEGIN CATCH SET @r4Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms4 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
