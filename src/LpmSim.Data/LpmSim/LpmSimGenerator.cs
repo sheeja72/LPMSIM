@@ -2511,44 +2511,46 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             // DELETE/UPDATE/INSERT against the target authoritatively
             // based on what's in #NewSnap.
             ins.CommandText = @"
-                SET XACT_ABORT ON;
-                DECLARE @rc bigint = 0;
-                BEGIN TRY
-                    BEGIN TRAN;
+                -- NO BEGIN TRAN around the SELECT INTO. SQL Server has
+                -- subtle behaviour with temp tables created via SELECT
+                -- INTO inside a transaction — in some configurations the
+                -- temp table doesn't survive past COMMIT, leaving the
+                -- next SqlCommand with 'Invalid object name #NewSnap'.
+                -- The other temp tables in this method (#ItemWh, #Stores,
+                -- #Rules, #Deact) are all created without a transaction
+                -- wrapper for the same reason.
+                --
+                -- Atomicity isn't compromised: SELECT INTO is itself a
+                -- single statement; if it fails the table doesn't exist
+                -- and SqlClient throws. The CREATE INDEX after is benign
+                -- if it fails — joins still work, just slower.
+                IF OBJECT_ID('tempdb..#NewSnap') IS NOT NULL DROP TABLE #NewSnap;
 
-                    IF OBJECT_ID('tempdb..#NewSnap') IS NOT NULL DROP TABLE #NewSnap;
+                SELECT
+                    s.StoreID, iw.ItemCode, iw.Season,
+                    iw.DivCode, iw.WHBoxQty, s.VolumeGroup,
+                    CAST(ISNULL(r.SKUMax, 0) AS int) AS SKUMax
+                  INTO #NewSnap
+                  FROM #ItemWh iw
+                  INNER JOIN #Stores s
+                          ON s.DivCode = iw.DivCode
+                  OUTER APPLY (
+                      SELECT TOP 1 r2.SKUMax
+                        FROM #Rules r2
+                       WHERE r2.DivCode    = iw.DivCode
+                         AND r2.GroupCode  = s.VolumeGroup
+                         AND iw.WHBoxQty BETWEEN r2.WHStockFrom AND r2.WHStockTo
+                       ORDER BY r2.WHStockFrom
+                  ) r;
 
-                    SELECT
-                        s.StoreID, iw.ItemCode, iw.Season,
-                        iw.DivCode, iw.WHBoxQty, s.VolumeGroup,
-                        CAST(ISNULL(r.SKUMax, 0) AS int) AS SKUMax
-                      INTO #NewSnap
-                      FROM #ItemWh iw
-                      INNER JOIN #Stores s
-                              ON s.DivCode = iw.DivCode
-                      OUTER APPLY (
-                          SELECT TOP 1 r2.SKUMax
-                            FROM #Rules r2
-                           WHERE r2.DivCode    = iw.DivCode
-                             AND r2.GroupCode  = s.VolumeGroup
-                             AND iw.WHBoxQty BETWEEN r2.WHStockFrom AND r2.WHStockTo
-                           ORDER BY r2.WHStockFrom
-                      ) r;
+                DECLARE @rc bigint = @@ROWCOUNT;
 
-                    SET @rc = @@ROWCOUNT;
+                -- Clustered key matches the rule + delta JOIN pattern
+                -- (StoreID, ItemCode, Season). Country/Year/Month are
+                -- constants for the whole table so don't need to be in
+                -- the key.
+                CREATE CLUSTERED INDEX IX_NewSnap ON #NewSnap (StoreID, ItemCode, Season);
 
-                    -- Clustered key matches the rule + delta JOIN pattern
-                    -- (StoreID, ItemCode, Season). Country/Year/Month are
-                    -- constants for the whole table so don't need to be in
-                    -- the key.
-                    CREATE CLUSTERED INDEX IX_NewSnap ON #NewSnap (StoreID, ItemCode, Season);
-
-                    COMMIT;
-                END TRY
-                BEGIN CATCH
-                    IF @@TRANCOUNT > 0 ROLLBACK;
-                    THROW;
-                END CATCH;
                 SELECT @rc AS Rc;";
             ins.Parameters.Add(new SqlParameter("@country", country));
             ins.Parameters.Add(new SqlParameter("@y", year));
