@@ -480,65 +480,66 @@
             @* Hover tooltips only on the columns the planning team specified.
                Store / Division / Sold Qty Rank / Turns Rank have no tooltip
                by design — they're self-explanatory. *@
+            @* Fixed pixel widths instead of percentages — 18 columns at % was
+               squashing every header into vertical letter-stacks
+               ('W t A v g S o l d'). Pixel widths force each header to a
+               readable line width; the table overflows horizontally when
+               total exceeds the viewport and the MudTable wrapper scrolls
+               naturally. Each width was picked to fit its header text
+               (3-line wraps like 'Wt / Avg / Sold' are intentional and
+               stay clean at these widths). *@
             <HeaderContent>
-                <MudTh Style="width:11%;"><div class="th-total">@rowCount.ToString("N0") rows</div>
+                <MudTh Style="width:140px;min-width:140px;"><div class="th-total">@rowCount.ToString("N0") rows</div>
                     <MudTableSortLabel T="EomRow" SortBy="r => r.StoreID" InitialDirection="SortDirection.Ascending">Store</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:9%;"><div class="th-total">&nbsp;</div>
+                <MudTh Style="width:140px;min-width:140px;"><div class="th-total">&nbsp;</div>
                     <MudTableSortLabel T="EomRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">@totalSold.ToString("N0")</div><span title="WtAvgSold = Avg(Sum(Monthly Actual SoldQty after applying Weights))">
+                <MudTh Style="width:70px;min-width:70px;"><div class="th-total">@totalSold.ToString("N0")</div><span title="WtAvgSold = Avg(Sum(Monthly Actual SoldQty after applying Weights))">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WtAvgSoldQty">Wt<br />Avg<br />Sold</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="WtAvgTurn = Avg(Sum(Monthly Actual Turns after applying Weights))">
+                <MudTh Style="width:70px;min-width:70px;"><div class="th-total">&nbsp;</div><span title="WtAvgTurn = Avg(Sum(Monthly Actual Turns after applying Weights))">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WtAvgTurn">Wt<br />Avg<br />Turn</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div>
+                <MudTh Style="width:70px;min-width:70px;"><div class="th-total">&nbsp;</div>
                     <MudTableSortLabel T="EomRow" SortBy="r => r.SoldQtyRank">Sold<br />Qty<br />Rank</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:5%;"><div class="th-total">&nbsp;</div>
+                <MudTh Style="width:65px;min-width:65px;"><div class="th-total">&nbsp;</div>
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TurnsRank">Turns<br />Rank</MudTableSortLabel></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="PriRank = avg(SoldQtyrank and TurnsRank)">
+                <MudTh Style="width:65px;min-width:65px;"><div class="th-total">&nbsp;</div><span title="PriRank = avg(SoldQtyrank and TurnsRank)">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.PriorityRank">Pri<br />Rank</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="Grade = Stores are ordered by PriorityRank and bucketed by Share% for each Grade">
+                <MudTh Style="width:75px;min-width:75px;"><div class="th-total">&nbsp;</div><span title="Grade = Stores are ordered by PriorityRank and bucketed by Share% for each Grade">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.Grade ?? string.Empty">Grade</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">&nbsp;</div><span title="TgtTurn = PlannedTurn × (1 − Markup%) based on Grade">
+                <MudTh Style="width:70px;min-width:70px;"><div class="th-total">&nbsp;</div><span title="TgtTurn = PlannedTurn × (1 − Markup%) based on Grade">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetTurn">Tgt<br />Turn</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:8%;"><div class="th-total">@totalTgtSales.ToString("N0")</div><span title="TargetSales = Apportion Planned Sales Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
+                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtSales.ToString("N0")</div><span title="TargetSales = Apportion Planned Sales Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetSales">Tgt<br />Sales</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:8%;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM = Apportion Planned EOM Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
+                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM = Apportion Planned EOM Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetEOM">Tgt<br />EOM</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:6%;"><div class="th-total">@totalSoh.ToString("N0")</div><span title="SOH = Sum of LPM_LocStock.SOH across all items for this (Store, Division). Source: racks.dbo.LPM_LocStock joined to active stores in DataSettings.">
+                <MudTh Style="width:80px;min-width:80px;"><div class="th-total">@totalSoh.ToString("N0")</div><span title="SOH = Sum of LPM_LocStock.SOH across all items for this (Store, Division). Source: racks.dbo.LPM_LocStock joined to active stores in DataSettings.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total">@totalMerchM.ToString("N0")</div><span title="Merch Need (Month) = TargetEOM − SOH + TargetSales. Open-to-receive: what WH must ship this month so the store ends at TargetEOM after selling TargetSales.">
+                <MudTh Style="width:100px;min-width:100px;"><div class="th-total">@totalMerchM.ToString("N0")</div><span title="Merch Need (Month) = TargetEOM − SOH + TargetSales. Open-to-receive: what WH must ship this month so the store ends at TargetEOM after selling TargetSales.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedMonth">Merch Need<br />(Month)</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total">@totalMerchW.ToString("N0")</div><span title="Merch Need (Week) = mirror of Wk1 — kept as a back-compat column for ADM / Reports / ProductionScheduler that haven't been week-aware'd yet.">
+                <MudTh Style="width:100px;min-width:100px;"><div class="th-total">@totalMerchW.ToString("N0")</div><span title="Merch Need (Week) = mirror of Wk1 — kept as a back-compat column for ADM / Reports / ProductionScheduler that haven't been week-aware'd yet.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></span></MudTh>
 
-                @* Per-week Wk1/Wk2/Wk3/Wk4 columns were removed in 1.10.1 —
-                   they were squashing the header layout. The per-week values
-                   are still computed and stored on LPM_EOM_Output (Wk1..4)
-                   and SIM Generate's Week dropdown still picks the right
-                   one for the allocator's cap; we just don't render them on
-                   this Store × Division grid. *@
-
-                <MudTh Style="width:7%;"><div class="th-total">@totalMerchD.ToString("N0")</div><span title="Merch Need (Day) = Merch Need (Week) / 6. Reference daily slice assuming a 6-day production week.">
+                <MudTh Style="width:100px;min-width:100px;"><div class="th-total">@totalMerchD.ToString("N0")</div><span title="Merch Need (Day) = Merch Need (Week) / 6. Reference daily slice assuming a 6-day production week.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total">&nbsp;</div><span title="VolGrp = Stores are sorted by TgtEOM and bucketed by SharePct of Volume Groups">Vol<br />Grp</span></MudTh>
+                <MudTh Style="width:75px;min-width:75px;"><div class="th-total">&nbsp;</div><span title="VolGrp = Stores are sorted by TgtEOM and bucketed by SharePct of Volume Groups">Vol<br />Grp</span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhSummer.ToString("N0")</div><span title="WHSummer = Total Eligible Stock Summer per Division&#10;= SUM(Qty) for Summer-tagged eligible boxes mapped to this Division">
+                <MudTh Style="width:85px;min-width:85px;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhSummer.ToString("N0")</div><span title="WHSummer = Total Eligible Stock Summer per Division&#10;= SUM(Qty) for Summer-tagged eligible boxes mapped to this Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WHStockSummer">WH<br />Summer</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:7%;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhWinter.ToString("N0")</div><span title="WHWinter = Total Eligible Stock Winter per Division&#10;= SUM(Qty) for Winter-tagged eligible boxes mapped to this Division">
+                <MudTh Style="width:85px;min-width:85px;"><div class="th-total" title="Sum of distinct Division values (not per-row, since WH Stock repeats across stores in the same Division).">@totalWhWinter.ToString("N0")</div><span title="WHWinter = Total Eligible Stock Winter per Division&#10;= SUM(Qty) for Winter-tagged eligible boxes mapped to this Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.WHStockWinter">WH<br />Winter</MudTableSortLabel></span></MudTh>
             </HeaderContent>
             <RowTemplate>

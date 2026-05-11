@@ -682,21 +682,18 @@ html, body {
     white-space: nowrap !important;
 }
 
-/* EOM preview: force ALL 12 columns to fit the viewport with no horizontal scroll.
-   Headings wrap to 2-3 lines; cells use a fixed layout. */
-.lpm-eom-preview,
-.lpm-eom-preview .mud-table-container,
-.lpm-eom-preview .mud-table-root {
-    width: 100% !important;
-    max-width: 100% !important;
-    min-width: 0 !important;
-}
+/* EOM preview table layout (updated 1.10.2 — 18 columns).
+   Earlier this rule forced everything to fit the viewport with no
+   horizontal scroll, which squashed each header into a vertical
+   letter-stack ('W t A v g S o l d') at typical screen widths.
+   Now: respect the pixel widths set on each MudTh and let the
+   container scroll horizontally when the sum exceeds viewport. */
 .lpm-eom-preview .mud-table-root {
     table-layout: fixed !important;
 }
 .lpm-eom-preview .mud-table-container,
 .lpm-eom-preview .mud-xs-table-responsive {
-    overflow-x: hidden !important;
+    overflow-x: auto !important;
 }
 .lpm-eom-preview .mud-table-head th {
     white-space: normal !important;
