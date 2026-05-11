@@ -23,6 +23,29 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.9.5 — Real fix for #NewSnap persistence (2026-05-11)
+
+### Fixed
+- **`Invalid object name '#NewSnap'`** still firing on 1.9.4. Dropping `BEGIN TRAN` (1.9.4's attempted fix) didn't address the actual root cause: the main INSERT command used `ExecuteReaderAsync` + manual `using var rdr = ... ; await rdr.ReadAsync(ct);` to fetch the staged row count. Combined with DDL statements (`CREATE CLUSTERED INDEX`) and DML (`SELECT INTO`) producing implicit "X rows affected" info messages, the reader was leaving the connection in a state that occasionally triggered a session reset on the next `SqlCommand` execution — wiping all session-scoped temp tables including `#NewSnap`. The fact that the staging count `15,755,634 staged` reached C# correctly proved the SELECT INTO succeeded; the failure was purely in the *next* command's view of session state.
+
+### Changed
+- Main INSERT command now:
+  - Uses `SET NOCOUNT ON` to suppress the DDL/DML row-count notifications
+  - Uses `ExecuteScalarAsync` (not `ExecuteReaderAsync`) — which is what every other count-returning command in this file already uses, including the temp-tables-setup commands that have always worked. ExecuteScalar drains the result set immediately after reading the scalar and doesn't leave the connection in an ambiguous state.
+  - No longer adds unused `@country`, `@y`, `@m`, `@now`, `@user` parameters (the staging SQL doesn't reference them — those columns get added during the delta-apply phase later).
+
+### Notes
+- After 1.9.5 deploys, re-run **Build SKU Max** for the active period. Expected StageDetail:
+  ```
+  Done · X items · ... · Insert ~60s · 15.7M staged ·
+  Delta XXs · N ins · M upd · K del · J unchanged ·
+  Y excluded · M price-capped · K div-deact · L dept-deact
+  [R1...R7 ms] [· R5 SKIPPED (Hodata...) until permission granted]
+  ```
+- If `Invalid object name '#NewSnap'` reappears in this version's StageDetail, the next step is the bigger refactor: merge the staging SELECT INTO into the same SqlCommand as the existing `#Deact` populate. Let me know.
+
+---
+
 ## 1.9.4 — Fix #NewSnap persistence between SqlCommands (2026-05-11)
 
 ### Fixed

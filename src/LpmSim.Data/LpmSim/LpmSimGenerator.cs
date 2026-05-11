@@ -2511,19 +2511,22 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             // DELETE/UPDATE/INSERT against the target authoritatively
             // based on what's in #NewSnap.
             ins.CommandText = @"
-                -- NO BEGIN TRAN around the SELECT INTO. SQL Server has
-                -- subtle behaviour with temp tables created via SELECT
-                -- INTO inside a transaction — in some configurations the
-                -- temp table doesn't survive past COMMIT, leaving the
-                -- next SqlCommand with 'Invalid object name #NewSnap'.
-                -- The other temp tables in this method (#ItemWh, #Stores,
-                -- #Rules, #Deact) are all created without a transaction
-                -- wrapper for the same reason.
+                -- SET NOCOUNT ON suppresses the per-statement 'X rows
+                -- affected' info messages that DDL (CREATE INDEX) and DML
+                -- (SELECT INTO) otherwise stream back to SqlClient as
+                -- separate notifications. Without this, the SqlClient
+                -- reader receives multiple 'result' frames and the
+                -- subsequent SqlCommand on the same connection occasionally
+                -- sees a session reset that drops session-scoped temp
+                -- tables — the cause of the 1.9.3/1.9.4 'Invalid object
+                -- name #NewSnap' regression. Matches the pattern used by
+                -- the other temp-table commands in this method.
                 --
-                -- Atomicity isn't compromised: SELECT INTO is itself a
-                -- single statement; if it fails the table doesn't exist
-                -- and SqlClient throws. The CREATE INDEX after is benign
-                -- if it fails — joins still work, just slower.
+                -- No BEGIN TRAN: SELECT INTO is atomic on its own, and
+                -- wrapping in BEGIN TRAN/COMMIT has its own subtle temp-
+                -- table-persistence issues across SqlCommand boundaries.
+                SET NOCOUNT ON;
+
                 IF OBJECT_ID('tempdb..#NewSnap') IS NOT NULL DROP TABLE #NewSnap;
 
                 SELECT
@@ -2552,18 +2555,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 CREATE CLUSTERED INDEX IX_NewSnap ON #NewSnap (StoreID, ItemCode, Season);
 
                 SELECT @rc AS Rc;";
-            ins.Parameters.Add(new SqlParameter("@country", country));
-            ins.Parameters.Add(new SqlParameter("@y", year));
-            ins.Parameters.Add(new SqlParameter("@m", month));
-            ins.Parameters.Add(new SqlParameter("@now",  DateTime.Now));
-            ins.Parameters.Add(new SqlParameter("@user",
-                string.IsNullOrEmpty(user) ? (object)DBNull.Value : user));
             ins.CommandTimeout = 1800;  // 30 min ceiling
-            using var rdr = await ins.ExecuteReaderAsync(ct);
-            if (await rdr.ReadAsync(ct))
-            {
-                inserted = rdr.IsDBNull(0) ? 0L : Convert.ToInt64(rdr.GetValue(0));
-            }
+            // ExecuteScalarAsync (not ExecuteReaderAsync) — single value
+            // return + immediate result-set drain matches the pattern used
+            // by every other count-returning command in this file. The
+            // ExecuteReaderAsync + manual `using var rdr` pattern that
+            // 1.9.3/1.9.4 used was leaving the connection in a state that
+            // intermittently lost #NewSnap on the next SqlCommand.
+            var stageRc = await ins.ExecuteScalarAsync(ct);
+            inserted = stageRc is null || stageRc == DBNull.Value
+                ? 0L
+                : Convert.ToInt64(stageRc);
         }
 
         // === EXCLUSION RULES === best-effort, non-fatal.
