@@ -18,7 +18,7 @@
         <MudItem xs="12" sm="3" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="async v => { _country = v ?? string.Empty; await ReloadBatchesAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>
@@ -33,7 +33,7 @@
         <MudItem xs="12" sm="3" md="3">
             <MudSelect T="long" Label="Batch No" Value="_batchNo"
                        ValueChanged="async (long v) => { _batchNo = v; await LoadActiveTabAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
                 @foreach (var b in _batches)
                 {
                     <MudSelectItem T="long" Value="b.LPMBatchNo">

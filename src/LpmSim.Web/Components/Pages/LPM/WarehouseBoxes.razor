@@ -37,7 +37,7 @@
         <MudItem xs="12" sm="6" md="2">
             <MudSelect T="string" Label="Country" Value="_filter.Country"
                        ValueChanged="@OnCountryChanged"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Class="@(string.Equals(_filter.Country, "UAE", StringComparison.OrdinalIgnoreCase) ? "" : "lpm-filter-active")">
                 @foreach (var c in _countries)
                 {
@@ -49,7 +49,7 @@
             <MudAutocomplete T="string" Label="Warehouse" Value="_filter.Warehouse"
                              ValueChanged="v => { _filter = _filter with { Warehouse = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_warehouses, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Warehouse)" />
         </MudItem>
@@ -57,7 +57,7 @@
             <MudAutocomplete T="string" Label="Type Name" Value="_filter.TypeName"
                              ValueChanged="v => { _filter = _filter with { TypeName = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_typeNames, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.TypeName)" />
         </MudItem>
@@ -65,14 +65,14 @@
             <MudAutocomplete T="string" Label="Pallet Category" Value="_filter.PalletCategory"
                              ValueChanged="v => { _filter = _filter with { PalletCategory = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_palletCategories, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.PalletCategory)" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
             <MudSelect T="LpmPresence" Label="LPM Status" Value="_filter.LpmStatus"
                        ValueChanged="v => { _filter = _filter with { LpmStatus = v }; StateHasChanged(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Class="@(_filter.LpmStatus == LpmPresence.Any ? "" : "lpm-filter-active")">
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.Any">Any</MudSelectItem>
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.HasLpm">Has LPM</MudSelectItem>
@@ -86,7 +86,7 @@
             <MudAutocomplete T="string" Label="LPM (month)" Value="_filter.Lpm"
                              ValueChanged="v => { _filter = _filter with { Lpm = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_lpms, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Lpm)" />
         </MudItem>
@@ -101,7 +101,7 @@
         <MudItem xs="12" sm="4" md="2">
             <MudSelect T="WhGroupBy" Label="Group By" Value="_groupBy"
                        ValueChanged="v => { _groupBy = v; StateHasChanged(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Class="@(_groupBy == WhGroupBy.Box ? "" : "lpm-filter-active")">
                 <MudSelectItem T="WhGroupBy" Value="WhGroupBy.Box">Box (detail)</MudSelectItem>
                 <MudSelectItem T="WhGroupBy" Value="WhGroupBy.Division">Division</MudSelectItem>
@@ -115,7 +115,7 @@
             <MudAutocomplete T="string" Label="Division" Value="_filter.Division"
                              ValueChanged="v => { _filter = _filter with { Division = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_divisions, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Division)" />
         </MudItem>
@@ -123,7 +123,7 @@
             <MudAutocomplete T="string" Label="Department" Value="_filter.Department"
                              ValueChanged="v => { _filter = _filter with { Department = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_departments, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Department)" />
         </MudItem>
@@ -131,7 +131,7 @@
             <MudAutocomplete T="string" Label="Brand" Value="_filter.Brand"
                              ValueChanged="v => { _filter = _filter with { Brand = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_brands, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.Brand)" />
         </MudItem>
@@ -142,7 +142,7 @@
             <MudAutocomplete T="string" Label="ContNo" Value="_filter.ContNo"
                              ValueChanged="v => { _filter = _filter with { ContNo = v }; StateHasChanged(); }"
                              SearchFunc="@((s, c) => Search(_contNos, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
                              CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                              Placeholder="All" Class="@ActiveCls(_filter.ContNo)" />
         </MudItem>

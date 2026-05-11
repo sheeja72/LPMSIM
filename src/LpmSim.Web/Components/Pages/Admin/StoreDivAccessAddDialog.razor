@@ -14,7 +14,7 @@
                 <MudText Typo="Typo.subtitle2" Class="mb-1">Stores</MudText>
                 <MudTextField T="string" Placeholder="Filter store id or name…"
                               ValueChanged="(string v) => { _storeFilter = v ?? string.Empty; }"
-                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                              Variant="Variant.Outlined" Margin="Margin.Dense"
                               Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
                 <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
                     @foreach (var s in FilteredStores)
@@ -37,7 +37,7 @@
                 <MudText Typo="Typo.subtitle2" Class="mb-1">Divisions</MudText>
                 <MudTextField T="string" Placeholder="Filter division name or code…"
                               ValueChanged="(string v) => { _divFilter = v ?? string.Empty; }"
-                              Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                              Variant="Variant.Outlined" Margin="Margin.Dense"
                               Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
                 <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
                     @foreach (var d in FilteredDivisions)

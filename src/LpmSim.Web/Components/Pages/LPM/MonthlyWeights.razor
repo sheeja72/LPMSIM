@@ -17,7 +17,7 @@
     <MudGrid Spacing="2">
         <MudItem xs="12" sm="4" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
-                       ValueChanged="OnContextChangedAsync" Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                       ValueChanged="OnContextChangedAsync" Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>
@@ -32,7 +32,7 @@
         <MudItem xs="6" sm="3" md="2">
             <MudSelect T="int" Label="Month" Value="_runMonth"
                        ValueChanged="async (int v) => { _runMonth = v; await LoadAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
                 @for (int m = 1; m <= 12; m++)
                 {
                     var mv = m;

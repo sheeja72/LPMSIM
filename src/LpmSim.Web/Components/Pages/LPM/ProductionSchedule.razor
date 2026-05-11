@@ -36,7 +36,7 @@
         <MudItem xs="6" sm="4" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="async v => { _country = v ?? string.Empty; await LoadBatchesAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>
@@ -46,7 +46,7 @@
         <MudItem xs="12" sm="6" md="3">
             <MudSelect T="long?" Label="SIM Batch" Value="_selectedBatch"
                        ValueChanged="async (long? v) => { _selectedBatch = v; await LoadScheduleAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var b in _batches)
                 {
                     <MudSelectItem T="long?" Value="@((long?)b.LPMBatchNo)">
@@ -81,7 +81,7 @@
                        SelectedValues="_priorityWarehouses"
                        SelectedValuesChanged="(IEnumerable<string> vs) => { _priorityWarehouses = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); }"
                        MultiSelection="true"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Clearable
                        Placeholder="(None — equal priority)"
                        SelectAll="true" SelectAllText="All warehouses"
@@ -237,7 +237,7 @@
                     <MudItem xs="6" md="2">
                         <MudSelect T="int?" Label="Filter Day" Value="_divDayFilter"
                                    ValueChanged="async (int? v) => { _divDayFilter = v; await ReloadDivisionsAsync(); }"
-                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                             <MudSelectItem T="int?" Value="@((int?)null)">All days</MudSelectItem>
                             <MudSelectItem T="int?" Value="@((int?)0)">Unscheduled (Day = NULL)</MudSelectItem>
                             @for (int d = 1; d <= s.DaysInWeek; d++)
@@ -250,7 +250,7 @@
                     <MudItem xs="6" md="3">
                         <MudSelect T="string" Label="Filter Status" Value="_divStatusFilter"
                                    ValueChanged="async (string v) => { _divStatusFilter = v ?? string.Empty; await ReloadDivisionsAsync(); }"
-                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                             <MudSelectItem T="string" Value="@(string.Empty)">All</MudSelectItem>
                             <MudSelectItem T="string" Value="@("Scheduled")">Scheduled</MudSelectItem>
                             <MudSelectItem T="string" Value="@("Deferred")">Deferred</MudSelectItem>
@@ -338,7 +338,7 @@
                     <MudItem xs="6" md="2">
                         <MudSelect T="int?" Label="Filter Day" Value="_dayFilter"
                                    ValueChanged="(int? v) => { _dayFilter = v; StateHasChanged(); }"
-                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                             <MudSelectItem T="int?" Value="@((int?)null)">All days</MudSelectItem>
                             @for (int d = 1; d <= s.DaysInWeek; d++)
                             {
@@ -350,7 +350,7 @@
                     <MudItem xs="6" md="3">
                         <MudSelect T="string" Label="Filter Status" Value="_statusFilter"
                                    ValueChanged="(string v) => { _statusFilter = v ?? string.Empty; StateHasChanged(); }"
-                                   Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                                   Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                             <MudSelectItem T="string" Value="@(string.Empty)">All</MudSelectItem>
                             <MudSelectItem T="string" Value="@("Scheduled")">Scheduled</MudSelectItem>
                             <MudSelectItem T="string" Value="@("Deferred")">Deferred</MudSelectItem>

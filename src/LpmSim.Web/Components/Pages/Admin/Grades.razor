@@ -18,7 +18,7 @@
         <MudItem xs="12" md="3">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>

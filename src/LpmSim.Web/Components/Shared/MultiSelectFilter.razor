@@ -20,7 +20,7 @@
        that opens the popover on click. *@
     <MudTextField T="string" Label="@Label"
                   Value="@DisplayText" ReadOnly="true"
-                  Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                  Variant="Variant.Outlined" Margin="Margin.Dense"
                   Adornment="Adornment.End"
                   AdornmentIcon="@(_open ? Icons.Material.Filled.ArrowDropUp : Icons.Material.Filled.ArrowDropDown)"
                   OnAdornmentClick="@Toggle"
@@ -43,7 +43,7 @@
             <MudTextField T="string" Value="_search"
                           ValueChanged="@((string v) => { _search = v ?? string.Empty; StateHasChanged(); })"
                           Placeholder="Search…"
-                          Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                          Variant="Variant.Outlined" Margin="Margin.Dense"
                           Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
                           Clearable="true" Immediate="true" DebounceInterval="0" />
             <div style="margin-top:0.4rem;font-size:0.75rem;color:#64748b;">

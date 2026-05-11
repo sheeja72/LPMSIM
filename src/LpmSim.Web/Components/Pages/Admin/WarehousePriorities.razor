@@ -25,7 +25,7 @@
         <MudItem xs="12" md="3">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="async v => { _country = v ?? string.Empty; await ReloadAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>
@@ -86,7 +86,7 @@
                 @(context.IsActive ? "Disable" : "Enable")
             </MudButton>
             <MudIconButton Size="Size.Small" Icon="@Icons.Material.Filled.Delete"
-                           Color="Color.Default" Title="Remove this warehouse from the priority list"
+                           Color="Color.Default" title="Remove this warehouse from the priority list"
                            OnClick="@(() => DeleteAsync(context))" />
         </MudTd>
     </RowTemplate>

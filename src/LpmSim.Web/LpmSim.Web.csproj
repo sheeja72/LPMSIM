@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.10.4</Version>
-    <AssemblyVersion>1.10.4.0</AssemblyVersion>
-    <FileVersion>1.10.4.0</FileVersion>
-    <InformationalVersion>1.10.4 (MudBlazor v7 analyzer warnings cleanup)</InformationalVersion>
+    <Version>1.10.5</Version>
+    <AssemblyVersion>1.10.5.0</AssemblyVersion>
+    <FileVersion>1.10.5.0</FileVersion>
+    <InformationalVersion>1.10.5 (MudBlazor v7 analyzer cleanup - sweep)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

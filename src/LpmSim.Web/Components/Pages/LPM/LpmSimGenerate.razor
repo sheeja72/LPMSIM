@@ -301,7 +301,7 @@
         <MudItem xs="6" sm="4" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="async v => { _country = v ?? string.Empty; _viewBatchNo = null; await LoadStoresForCountryAsync(); await CheckAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>
@@ -320,7 +320,7 @@
         <MudItem xs="6" sm="4" md="1">
             <MudSelect T="int" Label="Week" Value="_runWeek"
                        ValueChanged="(int v) => { _runWeek = v; }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
                 <MudSelectItem T="int" Value="1">Wk 1</MudSelectItem>
                 <MudSelectItem T="int" Value="2">Wk 2</MudSelectItem>
                 <MudSelectItem T="int" Value="3">Wk 3</MudSelectItem>
@@ -332,7 +332,7 @@
                        SelectedValues="_selectedSources"
                        SelectedValuesChanged="OnBoxSourceChangedAsync"
                        MultiSelection="true"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Clearable
                        Placeholder="(Pick at least one)">
                 <MudSelectItem T="string" Value="@("LPM")">LPM</MudSelectItem>
@@ -346,7 +346,7 @@
                            SelectedValues="_selectedLpmMonths"
                            SelectedValuesChanged="async (IEnumerable<DateTime> vs) => { _selectedLpmMonths = vs?.ToHashSet() ?? new HashSet<DateTime>(); await CheckAsync(); }"
                            MultiSelection="true"
-                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                           Variant="Variant.Outlined" Margin="Margin.Dense"
                            Clearable
                            Placeholder="(All)"
                            SelectAll="true" SelectAllText="All months"
@@ -363,7 +363,7 @@
                        SelectedValues="_selectedPalletCategories"
                        SelectedValuesChanged="async (IEnumerable<string> vs) => { _selectedPalletCategories = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); await CheckAsync(); }"
                        MultiSelection="true"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Clearable
                        Placeholder="(All)"
                        SelectAll="true" SelectAllText="All categories"
@@ -379,7 +379,7 @@
                        SelectedValues="_selectedWarehouses"
                        SelectedValuesChanged="OnWarehousesSelectionChanged"
                        MultiSelection="true"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
                        Clearable
                        Placeholder="(All)"
                        SelectAll="true" SelectAllText="All warehouses"
@@ -1155,7 +1155,7 @@
                                SelectedValues="_divisionSummaryFilter"
                                SelectedValuesChanged="(IEnumerable<string> vs) => { _divisionSummaryFilter = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); StateHasChanged(); }"
                                MultiSelection="true"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                               Variant="Variant.Outlined" Margin="Margin.Dense"
                                Clearable
                                Placeholder="(All)"
                                SelectAll="true" SelectAllText="All divisions"
@@ -1272,7 +1272,7 @@
                 </MudItem>
                 <MudItem xs="6" md="2">
                     <MudSelect T="string" Label="Kind" @bind-Value="_boxKindFilter"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                         <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
                         <MudSelectItem T="string" Value="@("LPM")">LPM</MudSelectItem>
                         <MudSelectItem T="string" Value="@("Non-LPM")">Non-LPM</MudSelectItem>
@@ -1280,7 +1280,7 @@
                 </MudItem>
                 <MudItem xs="6" md="2">
                     <MudSelect T="string" Label="Warehouse" @bind-Value="_boxWarehouseFilter"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                         <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
                         @foreach (var w in BoxWarehouseOptions)
                         {
@@ -1498,7 +1498,7 @@
                                SelectedValues="_customGroupBy"
                                SelectedValuesChanged="@((IEnumerable<CustomReportField> v) => _customGroupBy = v?.ToList() ?? new())"
                                MultiSelection="true"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                               Variant="Variant.Outlined" Margin="Margin.Dense"
                                Placeholder="(none — single aggregate row)"
                                MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedFieldsText))">
                         @foreach (var f in CustomReportDimensionFields)
@@ -1512,7 +1512,7 @@
                                SelectedValues="_customColumns"
                                SelectedValuesChanged="@((IEnumerable<CustomReportField> v) => _customColumns = v?.ToList() ?? new())"
                                MultiSelection="true"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                               Variant="Variant.Outlined" Margin="Margin.Dense"
                                Placeholder="Pick fields to display"
                                MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedFieldsText))">
                         @foreach (var f in CustomReportAllFields)
@@ -1663,7 +1663,7 @@
                 <MudItem xs="6" md="2">
                     <MudSelect T="string" Label="Decision" Value="_traceDecisionFilter"
                                ValueChanged="v => _traceDecisionFilter = v ?? string.Empty"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                         <MudSelectItem T="string" Value="@string.Empty">(All)</MudSelectItem>
                         <MudSelectItem T="string" Value="@("ALLOC")">ALLOC</MudSelectItem>
                         <MudSelectItem T="string" Value="@("ALLOC_RR")">ALLOC_RR</MudSelectItem>
@@ -1882,7 +1882,7 @@
                 <MudItem xs="12" md="4">
                     <MudSelect T="string" Label="Question" Value="_qaQuestion"
                                ValueChanged="v => { _qaQuestion = v ?? string.Empty; _qaResult = null; StateHasChanged(); }"
-                               Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                               Variant="Variant.Outlined" Margin="Margin.Dense">
                         <MudSelectItem T="string" Value="@("StoreDivGap")">Why did (Store, Division) get partial allocation?</MudSelectItem>
                         <MudSelectItem T="string" Value="@("BoxLow")">Why is this Box under-utilised?</MudSelectItem>
                         <MudSelectItem T="string" Value="@("StoreOverview")">What did this Store receive overall?</MudSelectItem>

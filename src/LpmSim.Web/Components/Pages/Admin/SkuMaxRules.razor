@@ -16,7 +16,7 @@
         <MudItem xs="12" sm="4" md="3">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="async v => { _country = v ?? string.Empty; await LoadAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" Clearable>
+                       Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem Value="@c">@c</MudSelectItem>
@@ -26,7 +26,7 @@
         <MudItem xs="12" sm="5" md="4">
             <MudSelect T="int" Label="Division" Value="_divCode"
                        ValueChanged="async (int v) => { _divCode = v; await LoadAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
                 <MudSelectItem T="int" Value="0">All divisions</MudSelectItem>
                 @foreach (var d in _divisions)
                 {
@@ -80,7 +80,7 @@ else
             <MudTd Class="py-0">
                 <MudSelect T="int" Value="context.DivCode"
                            ValueChanged="(int v) => { context.DivCode = v; context.IsDirty = true; }"
-                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                           Variant="Variant.Outlined" Margin="Margin.Dense">
                     @foreach (var d in _divisions)
                     {
                         <MudSelectItem T="int" Value="d.DivCode">@d.Name</MudSelectItem>
@@ -90,7 +90,7 @@ else
             <MudTd Class="py-0">
                 <MudSelect T="string" Value="context.GroupCode"
                            ValueChanged="v => { context.GroupCode = v ?? string.Empty; context.IsDirty = true; }"
-                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                           Variant="Variant.Outlined" Margin="Margin.Dense">
                     @foreach (var g in _groups)
                     {
                         <MudSelectItem Value="@g.GroupCode">@g.GroupCode</MudSelectItem>

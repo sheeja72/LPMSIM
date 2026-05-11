@@ -10,7 +10,7 @@
             <MudItem xs="12" md="8">
                 <MudSelect T="string" Label="Warehouse" Value="_warehouse"
                            ValueChanged="(string v) => _warehouse = v ?? string.Empty"
-                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                           Variant="Variant.Outlined" Margin="Margin.Dense"
                            Placeholder="Pick a warehouse">
                     @foreach (var w in Available)
                     {
