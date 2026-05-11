@@ -23,6 +23,18 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.10.4 — MudBlazor v7 analyzer warnings cleanup (2026-05-11)
+
+### Fixed
+- **MUD0001** — `IsInitiallyExpanded` on `MudExpansionPanel` in `EomGenerate.razor` renamed to `Expanded` (MudBlazor v7 dropped the `IsInitiallyExpanded` naming).
+- **MUD0002** — `Dense="true"` removed from 7 `MudNumericField` instances across `WarehousePriorities.razor`, `WarehousePriorityAddDialog.razor`, `LpmSimGenerate.razor` (2x), and `ProductionSchedule.razor` (3x). MudBlazor v7 form components only honour `Margin="Margin.Dense"` for compact spacing; the legacy `Dense` parameter is deprecated. `Margin="Margin.Dense"` was already present alongside `Dense="true"` in every flagged location, so removing `Dense="true"` is a net-zero visual change.
+
+### Notes
+- `Dense="true"` is still used (and still valid) on non-form components like `MudTable`, `MudCheckBox`, `MudAlert`, and `MudChip`. Those weren't flagged by the analyzer and were left alone — they have their own `Dense` parameter that's unrelated to the form-field deprecation.
+- No functional change. Pure analyzer cleanup.
+
+---
+
 ## 1.10.3 — Invert ShopEligible semantics on EOM Division Summary stock columns (2026-05-11)
 
 ### Fixed

@@ -305,7 +305,7 @@
 
     <MudExpansionPanels Elevation="0" Class="mb-3">
         <MudExpansionPanel Text="@headerLabel"
-                           IsInitiallyExpanded="@(blockedCount > 0)"
+                           Expanded="@(blockedCount > 0)"
                            Icon="@(blockedCount == 0 ? Icons.Material.Filled.CheckCircle : Icons.Material.Filled.WarningAmber)">
             <MudGrid Spacing="2">
                 @foreach (var item in _readiness.All)

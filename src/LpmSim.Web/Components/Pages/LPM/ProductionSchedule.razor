@@ -60,21 +60,21 @@
                              Value="_dailyTarget"
                              ValueChanged="(int v) => _dailyTarget = v"
                              Min="1" Max="1000000" Step="1000"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+                             Variant="Variant.Outlined" Margin="Margin.Dense" />
         </MudItem>
         <MudItem xs="6" sm="3" md="1">
             <MudNumericField T="int" Label="Days/Week"
                              Value="_daysInWeek"
                              ValueChanged="(int v) => _daysInWeek = v"
                              Min="1" Max="14" Step="1"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+                             Variant="Variant.Outlined" Margin="Margin.Dense" />
         </MudItem>
         <MudItem xs="6" sm="3" md="2">
             <MudNumericField T="decimal" Label="Min Usability %"
                              Value="_minUsability"
                              ValueChanged="(decimal v) => _minUsability = v"
                              Min="0m" Max="100m" Step="5m"
-                             Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true" />
+                             Variant="Variant.Outlined" Margin="Margin.Dense" />
         </MudItem>
         <MudItem xs="12" sm="6" md="3">
             <MudSelect T="string" Label="Priority Warehouses"

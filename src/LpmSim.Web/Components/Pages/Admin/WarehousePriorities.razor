@@ -55,7 +55,7 @@
         <MudTd>
             @* Inline numeric edit — direct typing changes Priority and saves on blur. *@
             <MudNumericField T="int" Value="@context.Priority" ValueChanged="@(async (int v) => await UpdatePriorityAsync(context, v))"
-                             Min="1" Max="9999" Step="1" Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true"
+                             Min="1" Max="9999" Step="1" Variant="Variant.Outlined" Margin="Margin.Dense"
                              Style="max-width:80px;" />
         </MudTd>
         <MudTd><code>@context.Warehouse</code></MudTd>
