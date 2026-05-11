@@ -458,10 +458,6 @@
             var totalSoh     = fp.Sum(r => (long)r.SOH);                      // SOH is int — no precision loss
             var totalMerchM  = fp.Sum(r => (long)r.MerchNeedMonth);           // MerchNeed* are int
             var totalMerchW  = fp.Sum(r => (long)r.MerchNeedWeek);
-            var totalMerchW1 = fp.Sum(r => (long)r.MerchNeedWeek1);
-            var totalMerchW2 = fp.Sum(r => (long)r.MerchNeedWeek2);
-            var totalMerchW3 = fp.Sum(r => (long)r.MerchNeedWeek3);
-            var totalMerchW4 = fp.Sum(r => (long)r.MerchNeedWeek4);
             var totalMerchD  = fp.Sum(r => (long)r.MerchNeedDay);
             var rowCount     = fp.Count;
 
@@ -527,19 +523,12 @@
                 <MudTh Style="width:7%;"><div class="th-total">@totalMerchW.ToString("N0")</div><span title="Merch Need (Week) = mirror of Wk1 — kept as a back-compat column for ADM / Reports / ProductionScheduler that haven't been week-aware'd yet.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></span></MudTh>
 
-                @* Per-week Merch Need columns (new). Formula:
-                   MerchNeedWeekN = (TargetEOM − SOH) / 4 + (TargetSales × SplitPct[N] / 100).
-                   SplitPct comes from LPM_WeeklySalesTargetSplit (default 20/20/25/35
-                   when no row exists). The SIM allocator picks one of these via the
-                   Week dropdown on SIM Generate. *@
-                <MudTh Style="width:5%;"><div class="th-total">@totalMerchW1.ToString("N0")</div><span title="Wk1 Merch Need = (TargetEOM − SOH)/4 + TargetSales × SplitPct[1]/100. Default split 20%.">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek1">Wk1</MudTableSortLabel></span></MudTh>
-                <MudTh Style="width:5%;"><div class="th-total">@totalMerchW2.ToString("N0")</div><span title="Wk2 Merch Need = (TargetEOM − SOH)/4 + TargetSales × SplitPct[2]/100. Default split 20%.">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek2">Wk2</MudTableSortLabel></span></MudTh>
-                <MudTh Style="width:5%;"><div class="th-total">@totalMerchW3.ToString("N0")</div><span title="Wk3 Merch Need = (TargetEOM − SOH)/4 + TargetSales × SplitPct[3]/100. Default split 25%.">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek3">Wk3</MudTableSortLabel></span></MudTh>
-                <MudTh Style="width:5%;"><div class="th-total">@totalMerchW4.ToString("N0")</div><span title="Wk4 Merch Need = (TargetEOM − SOH)/4 + TargetSales × SplitPct[4]/100. Default split 35%.">
-                    <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedWeek4">Wk4</MudTableSortLabel></span></MudTh>
+                @* Per-week Wk1/Wk2/Wk3/Wk4 columns were removed in 1.10.1 —
+                   they were squashing the header layout. The per-week values
+                   are still computed and stored on LPM_EOM_Output (Wk1..4)
+                   and SIM Generate's Week dropdown still picks the right
+                   one for the allocator's cap; we just don't render them on
+                   this Store × Division grid. *@
 
                 <MudTh Style="width:7%;"><div class="th-total">@totalMerchD.ToString("N0")</div><span title="Merch Need (Day) = Merch Need (Week) / 6. Reference daily slice assuming a 6-day production week.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel></span></MudTh>
@@ -570,10 +559,7 @@
                 <MudTd>@context.SOH.ToString("N0")</MudTd>
                 <MudTd>@context.MerchNeedMonth.ToString("N0")</MudTd>
                 <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
-                <MudTd>@context.MerchNeedWeek1.ToString("N0")</MudTd>
-                <MudTd>@context.MerchNeedWeek2.ToString("N0")</MudTd>
-                <MudTd>@context.MerchNeedWeek3.ToString("N0")</MudTd>
-                <MudTd>@context.MerchNeedWeek4.ToString("N0")</MudTd>
+                @* Wk1..Wk4 cells removed in 1.10.1 — see header comment. *@
                 <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
                 <MudTd><MudChip T="string" Size="Size.Small" Color="Color.Info">@context.VolumeGroup</MudChip></MudTd>
                 <MudTd>@context.WHStockSummer.ToString("N0")</MudTd>
