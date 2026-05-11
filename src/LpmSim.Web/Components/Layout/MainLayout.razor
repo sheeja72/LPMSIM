@@ -65,7 +65,13 @@
             TextPrimary       = "#0f172a",
             TextSecondary     = "#64748b",
             LinesDefault      = "#e5e7eb",
-            DrawerBackground  = "#1e293b",
+            // DrawerBackground was #1e293b (slate-800) until 1.10.8 — the
+            // CSS variable --lpm-drawer-bg got updated to blue-900 (#1e3a8a)
+            // in 1.10.6 but MudBlazor's theme palette applies its own
+            // inline style with HIGHER specificity, so the actual rendered
+            // drawer was still slate. Both values now agree at #1e3a8a so
+            // sidebar + table headers visually match.
+            DrawerBackground  = "#1e3a8a",
             DrawerText        = "#e2e8f0",
             DrawerIcon        = "#cbd5e1",
         }

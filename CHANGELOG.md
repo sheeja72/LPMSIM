@@ -23,6 +23,17 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.10.8 — Real fix for sidebar/table header color mismatch (2026-05-11)
+
+### Fixed
+- **Sidebar and table headers were rendering different shades of blue** despite 1.10.6/1.10.7 setting both `--lpm-drawer-bg` and `--lpm-table-head` to `#1e3a8a`. The CSS variable for the drawer was being overridden by MudBlazor's `PaletteLight.DrawerBackground` in `MainLayout.razor`, which still pointed at the old slate `#1e293b` — MudBlazor injects that as an inline style with higher specificity than the CSS variable rule.
+- Updated `PaletteLight.DrawerBackground` from `#1e293b` → `#1e3a8a` so it agrees with the CSS variable. Sidebar and every table header now render the same `#1e3a8a` blue.
+
+### Notes
+- The same kind of MudTheme-vs-CSS-variable override could affect other tokens (`Surface`, `Background`, etc.) — but for now everything else is unchanged and looks consistent. If something else looks off later, check both `MainLayout.razor`'s palette AND `app.css`'s `:root` variables.
+
+---
+
 ## 1.10.7 — Table headers: slate → blue (2026-05-11)
 
 ### Changed
