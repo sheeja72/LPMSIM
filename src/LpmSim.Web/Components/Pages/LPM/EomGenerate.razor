@@ -716,21 +716,30 @@
             // Country scoping is implicit via _preview.
             var divRoll = _preview
                 .GroupBy(r => new { r.DivCode, r.DivisionName })
-                .Select(g => new DivisionSummaryEom
+                .Select(g =>
                 {
-                    DivCode        = g.Key.DivCode,
-                    DivisionName   = g.Key.DivisionName ?? "",
-                    SOH            = g.Sum(r => (long)r.SOH),
-                    // Sum decimal values first, round once. Per-row long
-                    // cast was truncating fractional parts before summing.
-                    TargetEOM      = (long)Math.Round(g.Sum(r => r.TargetEOM),   MidpointRounding.AwayFromZero),
-                    TargetSales    = (long)Math.Round(g.Sum(r => r.TargetSales), MidpointRounding.AwayFromZero),
-                    MerchNeedMonth = g.Sum(r => (long)r.MerchNeedMonth),
-                    MerchNeedWeek  = g.Sum(r => (long)r.MerchNeedWeek),
-                    MerchNeedDay   = g.Sum(r => (long)r.MerchNeedDay),
-                    // LPMBoxQty is per-Division (repeated across stores) —
-                    // take the value from any row in the group, not Sum().
-                    LPMBoxQty      = g.First().LPMBoxQty,
+                    var stock = StockForDiv(g.Key.DivCode);
+                    return new DivisionSummaryEom
+                    {
+                        DivCode        = g.Key.DivCode,
+                        DivisionName   = g.Key.DivisionName ?? "",
+                        SOH            = g.Sum(r => (long)r.SOH),
+                        // Sum decimal values first, round once. Per-row long
+                        // cast was truncating fractional parts before summing.
+                        TargetEOM      = (long)Math.Round(g.Sum(r => r.TargetEOM),   MidpointRounding.AwayFromZero),
+                        TargetSales    = (long)Math.Round(g.Sum(r => r.TargetSales), MidpointRounding.AwayFromZero),
+                        MerchNeedMonth = g.Sum(r => (long)r.MerchNeedMonth),
+                        MerchNeedWeek  = g.Sum(r => (long)r.MerchNeedWeek),
+                        MerchNeedDay   = g.Sum(r => (long)r.MerchNeedDay),
+                        // LPMBoxQty is per-Division (repeated across stores) —
+                        // take the value from any row in the group, not Sum().
+                        LPMBoxQty      = g.First().LPMBoxQty,
+                        // Stock breakdown — values driven by _divSummarySeason.
+                        HOStock             = stock.HO,
+                        WHStockPurchased    = stock.WHPurch,
+                        WHStockNonPurchased = stock.WHNonPurch,
+                        EligibleStock       = stock.Elig,
+                    };
                 })
                 .Where(d => string.IsNullOrEmpty(_filterDivisionSummary)
                          || d.DivisionName.Contains(_filterDivisionSummary, StringComparison.OrdinalIgnoreCase)
@@ -746,6 +755,10 @@
             var dsTotalMerchW  = divRoll.Sum(d => d.MerchNeedWeek);
             var dsTotalMerchD  = divRoll.Sum(d => d.MerchNeedDay);
             var dsTotalLpmBox  = divRoll.Sum(d => (long)d.LPMBoxQty);
+            var dsTotalHO      = divRoll.Sum(d => d.HOStock);
+            var dsTotalWHP     = divRoll.Sum(d => d.WHStockPurchased);
+            var dsTotalWHNP    = divRoll.Sum(d => d.WHStockNonPurchased);
+            var dsTotalElig    = divRoll.Sum(d => d.EligibleStock);
         }
 
         <MudGrid Spacing="2" Class="mb-2 align-center">
@@ -758,7 +771,21 @@
                                  CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
                                  Placeholder="All divisions" />
             </MudItem>
-            <MudItem xs="12" md="8" Class="d-flex justify-end align-center">
+            @* Season filter — applies ONLY to the rightmost 4 columns
+               (HO Stock, WH Purchased, WH Non-Purchased, Eligible).
+               SOH / Target EOM / Target Sales / Merch Need columns stay
+               aggregated across both seasons regardless of this filter. *@
+            <MudItem xs="12" md="3">
+                <MudSelect T="string" Label="Season (stock cols)"
+                           Value="_divSummarySeason"
+                           ValueChanged="OnDivSummarySeasonChanged"
+                           Variant="Variant.Outlined" Margin="Margin.Dense" Dense="true">
+                    <MudSelectItem T="string" Value="@SeasonAll">All seasons</MudSelectItem>
+                    <MudSelectItem T="string" Value="@SeasonSummer">Summer</MudSelectItem>
+                    <MudSelectItem T="string" Value="@SeasonWinter">Winter</MudSelectItem>
+                </MudSelect>
+            </MudItem>
+            <MudItem xs="12" md="5" Class="d-flex justify-end align-center">
                 <MudText Typo="Typo.caption" Style="color:#64748b;">
                     Aggregated across all stores for @_country @_year-@_month.ToString("D2"). Excel export above writes all three tabs.
                 </MudText>
@@ -813,10 +840,38 @@
                         <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.MerchNeedDay">Merch Need<br />(Day)</MudTableSortLabel>
                     </span>
                 </MudTh>
-                <MudTh Style="width:12%;">
+                <MudTh Style="width:8%;">
                     <div class="th-total">@dsTotalLpmBox.ToString("N0")</div>
                     <span title="Σ qty of LPM-tagged eligible boxes (PalletCategory='ELIGIBLE' AND LPMDt IS NOT NULL). No ShopEligible filter.">
                         <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.LPMBoxQty">LPM Box<br />Qty</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                @* 4 new stock columns — driven by the Season filter above.
+                   Values come from EomCalculator.GetDivisionStockBreakdownAsync
+                   (LPM_LocStock + whboxitems queries), refreshed every time
+                   the preview reloads. *@
+                <MudTh Style="width:8%;">
+                    <div class="th-total">@dsTotalHO.ToString("N0")</div>
+                    <span title="Σ LPM_LocStock.SOH for items in this division where dataname='HODATA'. Season comes from upcbarcodes.Itemtype ('W' = Winter, else Summer). Drives by the Season filter above.">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.HOStock">HO<br />Stock</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:8%;">
+                    <div class="th-total">@dsTotalWHP.ToString("N0")</div>
+                    <span title="Σ whboxitems.Qty for boxes where ShopEligible='E' (already claimed by a shop).">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.WHStockPurchased">WH Stock<br />(Purchased)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:8%;">
+                    <div class="th-total">@dsTotalWHNP.ToString("N0")</div>
+                    <span title="Σ whboxitems.Qty for boxes where ShopEligible IS NULL OR <>'E' (still available for SIM).">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.WHStockNonPurchased">WH Stock<br />(Non-Purchased)</MudTableSortLabel>
+                    </span>
+                </MudTh>
+                <MudTh Style="width:8%;">
+                    <div class="th-total">@dsTotalElig.ToString("N0")</div>
+                    <span title="Σ whboxitems.Qty for boxes where PalletCategory='ELIGIBLE' AND ShopEligible='E' (purchased subset of ELIGIBLE category).">
+                        <MudTableSortLabel T="DivisionSummaryEom" SortBy="r => r.EligibleStock">Eligible<br />Stock</MudTableSortLabel>
                     </span>
                 </MudTh>
             </HeaderContent>
@@ -830,6 +885,10 @@
                 <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
                 <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
                 <MudTd>@context.LPMBoxQty.ToString("N0")</MudTd>
+                <MudTd>@context.HOStock.ToString("N0")</MudTd>
+                <MudTd>@context.WHStockPurchased.ToString("N0")</MudTd>
+                <MudTd>@context.WHStockNonPurchased.ToString("N0")</MudTd>
+                <MudTd>@context.EligibleStock.ToString("N0")</MudTd>
             </RowTemplate>
             <PagerContent>
                 <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -858,6 +917,19 @@
     private string _filterVolGrp       = "";
     private string _filterStoreSummary    = "";   // Store filter on the Store-Summary tab
     private string _filterDivisionSummary = "";   // Division filter on the Division-Summary tab
+    /// <summary>Season filter for the Division-Summary tab's 4 stock columns
+    /// (HO Stock, WH Purchased, WH Non-Purchased, Eligible). "All" sums
+    /// Summer + Winter; "S"/"W" shows just that season. Doesn't affect the
+    /// pre-existing SOH / Target EOM / Target Sales / Merch Need columns.</summary>
+    private string _divSummarySeason = SeasonAll;
+    private const string SeasonAll    = "All";
+    private const string SeasonSummer = "S";
+    private const string SeasonWinter = "W";
+    /// <summary>Per-(Div × Season) stock breakdown keyed by (DivCode, Season).
+    /// Loaded once after Preview/Generate completes via
+    /// EomCalculator.GetDivisionStockBreakdownAsync — refreshed every time
+    /// the preview re-runs so the values match the underlying data.</summary>
+    private Dictionary<(int DivCode, string Season), DivisionStockBreakdown> _divStock = new();
     private string _previewLabel       = "Preview";
     private DateTime? _savedAt;
 
@@ -893,6 +965,49 @@
         public long   MerchNeedDay   { get; set; }
         /// <summary>Per-Division qty of LPM-tagged eligible boxes (no ShopEligible filter).</summary>
         public int    LPMBoxQty      { get; set; }
+
+        // Stock breakdown (loaded on-demand via GetDivisionStockBreakdownAsync).
+        // Driven by _divSummarySeason — "All" sums Summer + Winter; "S"/"W"
+        // shows just that season. Defaults to 0 when no stock data exists
+        // for the division (rare but possible if upc_subclass mapping is
+        // missing or the country has no data).
+        /// <summary>Σ SOH for items in this Div × Season from <c>LPM_LocStock</c> where <c>dataname='HODATA'</c>.</summary>
+        public long   HOStock             { get; set; }
+        /// <summary>Σ <c>whboxitems.Qty</c> with <c>ShopEligible='E'</c>.</summary>
+        public long   WHStockPurchased    { get; set; }
+        /// <summary>Σ <c>whboxitems.Qty</c> with <c>ShopEligible IS NULL OR &lt;&gt; 'E'</c>.</summary>
+        public long   WHStockNonPurchased { get; set; }
+        /// <summary>Σ <c>whboxitems.Qty</c> with <c>PalletCategory='ELIGIBLE' AND ShopEligible='E'</c>.</summary>
+        public long   EligibleStock       { get; set; }
+    }
+
+    /// <summary>
+    /// Helper to look up the 4 stock metrics for a (DivCode, Season-filter)
+    /// combination from the on-demand <c>_divStock</c> dictionary. When the
+    /// filter is "All", sums Summer + Winter; otherwise returns just that
+    /// season's row (or zeros if no data).
+    /// </summary>
+    private (long HO, long WHPurch, long WHNonPurch, long Elig) StockForDiv(int divCode)
+    {
+        if (_divSummarySeason == SeasonSummer || _divSummarySeason == SeasonWinter)
+        {
+            return _divStock.TryGetValue((divCode, _divSummarySeason), out var r)
+                ? (r.HOStock, r.WHStockPurchased, r.WHStockNonPurchased, r.EligibleStock)
+                : (0L, 0L, 0L, 0L);
+        }
+        // SeasonAll — sum both seasons.
+        long ho = 0, wp = 0, wn = 0, el = 0;
+        foreach (var s in new[] { SeasonSummer, SeasonWinter })
+        {
+            if (_divStock.TryGetValue((divCode, s), out var r))
+            {
+                ho += r.HOStock;
+                wp += r.WHStockPurchased;
+                wn += r.WHStockNonPurchased;
+                el += r.EligibleStock;
+            }
+        }
+        return (ho, wp, wn, el);
     }
 
     private IEnumerable<EomRow> FilteredPreview
@@ -1059,9 +1174,44 @@
                 _preview = rows;
                 _savedAt = last;
                 _previewLabel = "Saved Output";
+                await LoadDivisionStockBreakdownAsync();
             }
         }
         finally { _running = false; StateHasChanged(); }
+    }
+
+    /// <summary>
+    /// Refresh the on-demand stock breakdown that backs the new
+    /// Division Summary columns (HO Stock / WH Purchased / WH Non-Purchased
+    /// / Eligible Stock). Cheap on the SQL side (a single query with two
+    /// CTE rollups), so we fire it whenever <c>_preview</c> is reloaded.
+    /// Non-fatal: any failure just leaves the columns at 0 — the rest of
+    /// the page keeps working.
+    /// </summary>
+    /// <summary>
+    /// Named handler for the Season filter dropdown on the Division Summary
+    /// tab — kept as a method (instead of inline) to keep the Razor markup
+    /// clean and avoid double-quote escape issues inside Razor attribute
+    /// values.
+    /// </summary>
+    private void OnDivSummarySeasonChanged(string? v)
+    {
+        _divSummarySeason = string.IsNullOrEmpty(v) ? "All" : v;
+        StateHasChanged();
+    }
+
+    private async Task LoadDivisionStockBreakdownAsync()
+    {
+        try
+        {
+            var rows = await Eom.GetDivisionStockBreakdownAsync(_country);
+            _divStock = rows.ToDictionary(r => (r.DivCode, r.Season));
+        }
+        catch (Exception ex)
+        {
+            _divStock = new();
+            Snackbar.Add($"Division stock breakdown failed: {ex.Message}", Severity.Warning);
+        }
     }
 
     /// <summary>
@@ -1078,6 +1228,7 @@
             _preview = await Eom.PreviewAsync(_country, _year, _month);
             _previewLabel = "Generated (not saved)";
             _savedAt = null;
+            await LoadDivisionStockBreakdownAsync();
             Snackbar.Add($"Generated: {_preview.Count} rows. Click Approve to save.", Severity.Info);
         }
         catch (Exception ex)
@@ -1096,6 +1247,7 @@
             _preview = rows;
             _savedAt = last;
             _previewLabel = "Saved Output";
+            await LoadDivisionStockBreakdownAsync();
             if (rows.Count == 0)
                 Snackbar.Add($"No saved EOM output for {_country} {_year}/{_month:D2}. Click Generate first.", Severity.Info);
             else
@@ -1130,6 +1282,7 @@
             _preview = rows;
             _savedAt = last;
             _previewLabel = "Saved Output";
+            await LoadDivisionStockBreakdownAsync();
         }
         catch (Exception ex)
         {

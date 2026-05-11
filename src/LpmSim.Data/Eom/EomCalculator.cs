@@ -1,4 +1,6 @@
 using LpmSim.Core.Entities;
+using LpmSim.Data.Warehouse;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
 namespace LpmSim.Data.Eom;
@@ -162,6 +164,128 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         return await CalculateAsync(db, country, year, month, ct);
+    }
+
+    /// <summary>
+    /// Returns one row per <c>(DivCode × Season)</c> with on-demand stock
+    /// metrics for the Division Summary tab of EOM Generate. Refreshed every
+    /// time the user lands on that tab — values are NOT persisted to
+    /// <c>LPM_EOM_Output</c> because the underlying sources
+    /// (<c>LPM_LocStock</c>, <c>whboxitems</c>) change daily and the planner
+    /// always wants the current snapshot.
+    ///
+    /// <para>
+    /// Sources:
+    /// <list type="bullet">
+    ///   <item><strong>HO Stock</strong> — <c>racks.dbo.LPM_LocStock</c> where
+    ///         <c>dataname = 'HODATA'</c>, mapped to division via
+    ///         <c>upc_subclass × subclassmaster × Division</c>; season from
+    ///         <c>usa.dbo.upcbarcodes.Itemtype</c> (<c>'W'</c> → Winter, else
+    ///         Summer).</item>
+    ///   <item><strong>WH (Purchased)</strong> — <c>whboxitems.Qty</c> where
+    ///         <c>ShopEligible = 'E'</c>.</item>
+    ///   <item><strong>WH (Non-Purchased)</strong> — <c>whboxitems.Qty</c>
+    ///         where <c>ShopEligible IS NULL OR &lt;&gt; 'E'</c>.</item>
+    ///   <item><strong>Eligible Stock</strong> — <c>whboxitems.Qty</c> where
+    ///         <c>pallettype.PalletCategory = 'ELIGIBLE'</c> AND
+    ///         <c>ShopEligible = 'E'</c> (the purchased subset of the
+    ///         ELIGIBLE pallet category).</item>
+    /// </list>
+    /// </para>
+    ///
+    /// <para>
+    /// All WH-side metrics break down by <c>pallettype.Season</c>. HO Stock
+    /// uses <c>upcbarcodes.Itemtype</c> for its season.
+    /// </para>
+    /// </summary>
+    public async Task<List<DivisionStockBreakdown>> GetDivisionStockBreakdownAsync(
+        string country, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
+
+        // Resolve country-aware whboxitems source (UAE → racks.dbo.whboxitems;
+        // others → [<DataName>].dbo.WHBoxItemsExport).
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+
+        var rows = new List<DivisionStockBreakdown>();
+        using var cmd = conn.CreateCommand();
+        // Single batch — two correlated rollups (HO + WH) UNION'd, joined to
+        // an item → division map. The final FULL OUTER JOIN ensures a row
+        // exists for every (Div, Season) combination where either side has
+        // data. Country filter for HO comes from DataSettings.SIMCountry →
+        // StoreID match in LPM_LocStock; whboxitems is already country-scoped
+        // by whSrc.
+        cmd.CommandText = $@"
+            ;WITH ItemDiv AS (
+                SELECT u.itemcode, MIN(d.DivCode) AS DivCode
+                  FROM Datareporting.dbo.upc_subclass    u
+                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                  INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                 GROUP BY u.itemcode
+            ),
+            ItemSeason AS (
+                -- HO season per item: MAX('W' or 'S') so any 'W' barcode wins.
+                -- Items with no upcbarcodes row default to 'S' via LEFT JOIN
+                -- below (handled in HOByDiv with ISNULL).
+                SELECT b.itemcode,
+                       MAX(CASE WHEN UPPER(LTRIM(RTRIM(b.Itemtype))) = 'W' THEN 'W' ELSE 'S' END) AS Season
+                  FROM usa.dbo.upcbarcodes b
+                 WHERE b.itemcode IS NOT NULL AND b.itemcode <> ''
+                 GROUP BY b.itemcode
+            ),
+            HOByDiv AS (
+                SELECT id.DivCode,
+                       ISNULL(its.Season, 'S') AS Season,
+                       SUM(CAST(ISNULL(ls.SOH, 0) AS bigint)) AS HOStock
+                  FROM racks.dbo.LPM_LocStock ls
+                  INNER JOIN ItemDiv id ON id.itemcode = ls.ItemCode
+                  LEFT  JOIN ItemSeason its ON its.itemcode = ls.ItemCode
+                 WHERE ls.dataname = 'HODATA'
+                   AND ls.ItemCode IS NOT NULL AND ls.ItemCode <> ''
+                 GROUP BY id.DivCode, ISNULL(its.Season, 'S')
+            ),
+            WHByDiv AS (
+                SELECT id.DivCode,
+                       CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END AS Season,
+                       SUM(CASE WHEN w.ShopEligible = 'E'
+                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStockPurchased,
+                       SUM(CASE WHEN w.ShopEligible IS NULL OR w.ShopEligible <> 'E'
+                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStockNonPurchased,
+                       SUM(CASE WHEN pt.PalletCategory = 'ELIGIBLE' AND w.ShopEligible = 'E'
+                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS EligibleStock
+                  FROM {whSrc} w
+                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
+                  INNER JOIN ItemDiv id              ON id.itemcode    = w.ItemCode
+                 GROUP BY id.DivCode,
+                          CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END
+            )
+            SELECT
+                COALESCE(h.DivCode, w.DivCode)   AS DivCode,
+                COALESCE(h.Season,  w.Season)    AS Season,
+                ISNULL(h.HOStock,               0) AS HOStock,
+                ISNULL(w.WHStockPurchased,      0) AS WHStockPurchased,
+                ISNULL(w.WHStockNonPurchased,   0) AS WHStockNonPurchased,
+                ISNULL(w.EligibleStock,         0) AS EligibleStock
+              FROM HOByDiv h
+              FULL OUTER JOIN WHByDiv w
+                       ON w.DivCode = h.DivCode AND w.Season = h.Season
+             ORDER BY DivCode, Season;";
+        cmd.CommandTimeout = 300;
+        using var rdr = await cmd.ExecuteReaderAsync(ct);
+        while (await rdr.ReadAsync(ct))
+        {
+            rows.Add(new DivisionStockBreakdown(
+                DivCode:             rdr.IsDBNull(0) ? 0      : rdr.GetInt32(0),
+                Season:              rdr.IsDBNull(1) ? "S"    : rdr.GetString(1),
+                HOStock:             rdr.IsDBNull(2) ? 0L     : rdr.GetInt64(2),
+                WHStockPurchased:    rdr.IsDBNull(3) ? 0L     : rdr.GetInt64(3),
+                WHStockNonPurchased: rdr.IsDBNull(4) ? 0L     : rdr.GetInt64(4),
+                EligibleStock:       rdr.IsDBNull(5) ? 0L     : rdr.GetInt64(5)));
+        }
+        return rows;
     }
 
     public async Task<int> GenerateAsync(string country, int year, int month, string user, CancellationToken ct = default)

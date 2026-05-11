@@ -74,3 +74,28 @@ public class EomRow
     /// the same division.</summary>
     public int LPMBoxQty { get; set; }
 }
+
+/// <summary>
+/// Per-(Division × Season) stock breakdown surfaced on the Division Summary
+/// tab of the EOM Generate page. Computed on-demand from
+/// <c>racks.dbo.LPM_LocStock</c> (HO Stock) and
+/// <c>racks.dbo.whboxitems</c> (WH Stock variants) joined to
+/// <c>upc_subclass × subclassmaster × Division</c> for the item → division
+/// mapping. Not persisted to <c>LPM_EOM_Output</c> — refreshed every time
+/// the user lands on the Division Summary tab so the values are always
+/// current.
+///
+/// <para>Season source:
+/// <list type="bullet">
+///   <item>HO Stock — <c>usa.dbo.upcbarcodes.Itemtype</c> (<c>'W'</c> → Winter, else Summer)</item>
+///   <item>WH Stock variants — <c>bfldata.dbo.pallettype.Season</c></item>
+/// </list>
+/// </para>
+/// </summary>
+public record DivisionStockBreakdown(
+    int    DivCode,
+    string Season,
+    long   HOStock,
+    long   WHStockPurchased,
+    long   WHStockNonPurchased,
+    long   EligibleStock);
