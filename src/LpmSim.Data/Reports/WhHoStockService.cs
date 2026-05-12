@@ -123,22 +123,32 @@ public class WhHoStockService(IConfiguration cfg)
             hoParms.Add(new SqlParameter(name, hoStoreIds[i]));
         }
 
-        // Optional Division filter (multi-select). Applied identically to
-        // BOTH the HO CTE and the WH CTE so the totals stay aligned.
-        var divFilterFrag = "";
+        // Optional Division filter (multi-select). Two near-identical
+        // fragments — one per CTE — because each side now references its
+        // own division-name expression (HO uses id.Division; WH uses
+        // sm.Division from the OUTER APPLY). Both default to '(no division)'
+        // for unmapped items via ISNULL, and since the planner never picks
+        // '(no division)' from the dropdown, the filter naturally excludes
+        // the unmapped bucket when specific divisions are chosen.
+        var hoDivFilterFrag = "";
+        var whDivFilterFrag = "";
         var divParms = new List<SqlParameter>();
         if (filter.Divisions is { Count: > 0 })
         {
-            var sb = new StringBuilder(" AND (");
+            var hoDivSb = new StringBuilder(" AND (");
+            var whDivSb = new StringBuilder(" AND (");
             for (int i = 0; i < filter.Divisions.Count; i++)
             {
-                if (i > 0) sb.Append(" OR ");
+                if (i > 0) { hoDivSb.Append(" OR "); whDivSb.Append(" OR "); }
                 var name = $"@div{i}";
-                sb.Append("sm.Division = ").Append(name);
+                hoDivSb.Append("id.Division = ").Append(name);
+                whDivSb.Append("sm.Division = ").Append(name);
                 divParms.Add(new SqlParameter(name, filter.Divisions[i]));
             }
-            sb.Append(')');
-            divFilterFrag = sb.ToString();
+            hoDivSb.Append(')');
+            whDivSb.Append(')');
+            hoDivFilterFrag = hoDivSb.ToString();
+            whDivFilterFrag = whDivSb.ToString();
         }
 
         // Season filter — encoded as a single @season param the SQL inspects.
@@ -178,22 +188,24 @@ public class WhHoStockService(IConfiguration cfg)
                 -- HO Stock per Division. storeid filter is dynamic — UAE
                 -- gets the literal 'HODATA'; other countries get every
                 -- storeid where DataSettings.ExportWH='Y' for the country.
-                SELECT sm.Division,
+                --
+                -- 1.13.1 fix: LEFT JOIN ItemDiv (was INNER) so items with no
+                -- subclass→division mapping still contribute to the page
+                -- total, bucketed as '(no division)'. This makes the page
+                -- HO-total reconcile with SELECT SUM(SOH) FROM LPM_LocStock
+                -- WHERE storeid IN (...).
+                -- Also dropped the previous ItemCode IS NOT NULL guard so a
+                -- direct sum matches exactly — null-itemcode rows still fall
+                -- into '(no division)' via the LEFT JOIN.
+                SELECT ISNULL(id.Division, '(no division)') AS Division,
                        SUM(CAST(ISNULL(ls.SOH, 0) AS bigint)) AS HOStock
                   FROM racks.dbo.LPM_LocStock ls
-                  INNER JOIN ItemDiv id ON id.itemcode = ls.ItemCode
-                  -- Re-join subclass→division to apply the optional
-                  -- Division filter without losing the row → Division mapping.
-                  INNER JOIN (
-                      SELECT itemcode, Division
-                        FROM ItemDiv
-                  ) sm ON sm.itemcode = ls.ItemCode
+                  LEFT  JOIN ItemDiv id ON id.itemcode = ls.ItemCode
                   LEFT  JOIN ItemSeason its ON its.itemcode = ls.ItemCode
                  WHERE ls.storeid IN ({hoSb})
-                   AND ls.ItemCode IS NOT NULL AND ls.ItemCode <> ''
                    AND (@season = 'A' OR ISNULL(its.Season, 'S') = @season)
-                   {divFilterFrag}
-                 GROUP BY sm.Division
+                   {hoDivFilterFrag}
+                 GROUP BY ISNULL(id.Division, '(no division)')
             ),
             WHByDiv AS (
                 -- WH side. Season filter reads w.Season directly (per user
@@ -225,17 +237,22 @@ public class WhHoStockService(IConfiguration cfg)
                   FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                   OUTER APPLY (
-                      SELECT TOP 1 sm0.Division
-                        FROM Datareporting.dbo.upc_subclass    u
-                        INNER JOIN Datareporting.dbo.subclassmaster sm0 ON sm0.MH4ID = u.MH4ID
-                       WHERE u.itemcode = w.ItemCode
-                       ORDER BY sm0.Division
+                      -- 1.13.1 fix: wrap in ISNULL so unmapped items bucket
+                      -- as '(no division)' instead of being dropped by the
+                      -- previous WHERE sm.Division IS NOT NULL filter. Keeps
+                      -- WH totals reconcilable against a raw SUM(Qty).
+                      SELECT ISNULL(
+                          (SELECT TOP 1 sm0.Division
+                             FROM Datareporting.dbo.upc_subclass    u
+                             INNER JOIN Datareporting.dbo.subclassmaster sm0 ON sm0.MH4ID = u.MH4ID
+                            WHERE u.itemcode = w.ItemCode
+                            ORDER BY sm0.Division),
+                          '(no division)') AS Division
                   ) sm
-                 WHERE sm.Division IS NOT NULL
-                   AND (@season = 'A'
+                 WHERE (@season = 'A'
                         OR (@season = 'W' AND UPPER(ISNULL(w.Season, '')) = 'W')
                         OR (@season = 'S' AND UPPER(ISNULL(w.Season, '')) <> 'W'))
-                   {divFilterFrag}
+                   {whDivFilterFrag}
                  GROUP BY sm.Division
             )
             SELECT

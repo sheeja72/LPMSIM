@@ -11,11 +11,14 @@
     <MudNavLink Href="lpm/lpm-sim/reports"              Icon="@Icons.Material.Filled.Assessment">LPM SIM Reports</MudNavLink>
     <MudNavLink Href="lpm/warehouse-boxes"  Icon="@Icons.Material.Filled.Warehouse">Warehouse Boxes</MudNavLink>
 
-    @* Reports — read-only operational reports. Sits between Warehouse Boxes
+    @* Reports — collapsible group (MudNavGroup). Sub-items only render when
+       the planner expands the header; default is collapsed. Each new report
+       becomes a MudNavLink inside this group. Sits between Warehouse Boxes
        and Planning Config so it groups visually with the other reporting /
-       allocation pages above it. Each new report becomes a MudNavLink here. *@
-    <div class="lpm-nav-section">Reports</div>
-    <MudNavLink Href="lpm/reports/wh-ho-stock" Icon="@Icons.Material.Filled.CompareArrows">WH / HO Stock</MudNavLink>
+       allocation pages above it. *@
+    <MudNavGroup Title="Reports" Icon="@Icons.Material.Filled.Assessment" Expanded="false">
+        <MudNavLink Href="lpm/reports/wh-ho-stock" Icon="@Icons.Material.Filled.CompareArrows">WH / HO Stock</MudNavLink>
+    </MudNavGroup>
 
     @* Planning Config — operational config (Monthly Weights / Planned Inputs /
        Data Uploads) is visible to all signed-in users; the master-data pages
