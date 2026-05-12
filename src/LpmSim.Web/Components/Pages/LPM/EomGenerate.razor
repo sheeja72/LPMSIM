@@ -281,11 +281,17 @@
                        OnClick="GenerateAsync">
                 Generate
             </MudButton>
+            @* 1.14.4: button renamed from "Approve" → "Generate & Approve"
+               because it actually calls Eom.GenerateAsync — i.e. it RUNS
+               the engine and SAVES in a single call, regardless of whether
+               a preview-via-Generate was clicked first. The old name
+               implied "approve what was just previewed" which was misleading
+               (no preview is required, and Approve always re-calculates). *@
             <MudButton Variant="Variant.Filled" Color="Color.Primary" DropShadow="false"
                        StartIcon="@Icons.Material.Filled.CheckCircle"
                        Disabled="@(_readiness?.IsReady != true || _running)"
                        OnClick="ApproveAsync">
-                Approve
+                Generate &amp; Approve
             </MudButton>
         </MudItem>
     </MudGrid>
@@ -1290,23 +1296,25 @@
     }
 
     /// <summary>
-    /// "Approve" button — runs the engine AND writes to LPM_EOM_Output,
-    /// replacing any existing rows for the same (Country, Year, Month).
-    /// SIM Generate consumes the saved output, so this is the action that
-    /// actually publishes EOM for downstream use.
+    /// "Generate &amp; Approve" button (renamed from "Approve" in 1.14.4) —
+    /// runs the engine AND writes to LPM_EOM_Output in one call, replacing
+    /// any existing rows for the same (Country, Year, Month). SIM Generate
+    /// consumes the saved output, so this is the action that actually
+    /// publishes EOM for downstream use. Preview-only "Generate" stays
+    /// separate for sanity-checking before committing.
     /// </summary>
     private async Task ApproveAsync()
     {
-        var ok = await DialogService.ShowMessageBox("Approve EOM",
-            $"This will REPLACE any existing LPM_EOM_Output rows for {_country} {_year}/{_month:D2}. Continue?",
-            yesText: "Approve", cancelText: "Cancel");
+        var ok = await DialogService.ShowMessageBox("Generate & Approve EOM",
+            $"This will RUN the EOM engine and REPLACE any existing LPM_EOM_Output rows for {_country} {_year}/{_month:D2}. Continue?",
+            yesText: "Generate & Approve", cancelText: "Cancel");
         if (ok != true) return;
 
         _running = true; StateHasChanged();
         try
         {
             var count = await Eom.GenerateAsync(_country, _year, _month, CurrentUser.Name);
-            Snackbar.Add($"Approved {count} rows for {_country} {_year}/{_month:D2}.", Severity.Success);
+            Snackbar.Add($"Generated & approved {count} rows for {_country} {_year}/{_month:D2}.", Severity.Success);
             var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
             _preview = rows;
             _savedAt = last;
@@ -1315,7 +1323,7 @@
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Approve failed: {ex.Message}", Severity.Error);
+            Snackbar.Add($"Generate & Approve failed: {ex.Message}", Severity.Error);
         }
         finally { _running = false; StateHasChanged(); }
     }

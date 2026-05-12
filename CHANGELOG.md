@@ -23,6 +23,19 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.4 — EOM Generate: rename Approve → Generate & Approve (2026-05-12)
+
+### Changed
+- **The "Approve" button on the EOM Generate page is renamed to "Generate & Approve"** to reflect what it actually does. The button calls `Eom.GenerateAsync` which both runs the EOM engine AND saves to `LPM_EOM_Output` in a single call — a prior click on "Generate" is NOT required and a previous in-memory preview is NOT used (Approve always re-calculates). The old label implied "approve what was just previewed", which was misleading and led the planner to think a Generate click alone would save.
+- Confirmation dialog title and primary button text updated to match. Success / failure Snackbar messages now say "Generated & approved …" / "Generate & Approve failed …".
+
+### Notes
+- **The standalone "Generate" button is unchanged** — still preview-only, in-memory, useful for sanity-checking before committing.
+- Internal method name (`ApproveAsync`) stayed put — only the user-facing labels changed.
+- No business-logic change. Same SQL, same data, same output rows.
+
+---
+
 ## 1.14.3 — EOM Generate: more parallelism (2026-05-12)
 
 ### Performance
