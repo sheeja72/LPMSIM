@@ -1480,7 +1480,15 @@ SELECT TOP (@top)
         await db.Database.OpenConnectionAsync(ct);
         using var cmd = (SqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
-        cmd.CommandTimeout = 180;
+        // 1.14.6: bumped from 180s → 600s. The shared CommandTimeout
+        // applies to every report query routed through this helper
+        // (EOM Summary, Store Summary, Box Detail, Allocation Trace,
+        // Custom Report). EOM Summary was hitting the previous 180s
+        // ceiling on larger batches and surfacing "Execution Timeout
+        // Expired" to the planner. If a single query genuinely needs
+        // more than 10 minutes, the right fix is at the SQL / index
+        // level rather than another timeout bump.
+        cmd.CommandTimeout = 600;
         foreach (var (name, val) in parameters)
             cmd.Parameters.Add(new SqlParameter(name, val));
         var rows = new List<T>();

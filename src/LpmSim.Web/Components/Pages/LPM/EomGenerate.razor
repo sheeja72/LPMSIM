@@ -1263,7 +1263,12 @@
             _preview = await Eom.PreviewAsync(_country, _year, _month);
             _previewLabel = "Generated (not saved)";
             _savedAt = null;
-            await LoadDivisionStockBreakdownAsync();
+            // 1.14.6: stock breakdown lazy-loads on Division Summary tab
+            // click — reset the cache so the next tab click refetches.
+            // Eager-loading here was the source of "page busy" lag after
+            // the Snackbar appeared.
+            _divStock = new();
+            _divStockLoadedForScope = null;
             Snackbar.Add($"Generated: {_preview.Count} rows. Click Approve to save.", Severity.Info);
         }
         catch (Exception ex)
@@ -1282,7 +1287,9 @@
             _preview = rows;
             _savedAt = last;
             _previewLabel = "Saved Output";
-            await LoadDivisionStockBreakdownAsync();
+            // 1.14.6: see notes in GenerateAsync — lazy load on tab click.
+            _divStock = new();
+            _divStockLoadedForScope = null;
             if (rows.Count == 0)
                 Snackbar.Add($"No saved EOM output for {_country} {_year}/{_month:D2}. Click Generate first.", Severity.Info);
             else
@@ -1319,7 +1326,9 @@
             _preview = rows;
             _savedAt = last;
             _previewLabel = "Saved Output";
-            await LoadDivisionStockBreakdownAsync();
+            // 1.14.6: see notes in GenerateAsync — lazy load on tab click.
+            _divStock = new();
+            _divStockLoadedForScope = null;
         }
         catch (Exception ex)
         {

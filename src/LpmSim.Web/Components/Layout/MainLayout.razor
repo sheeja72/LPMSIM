@@ -65,14 +65,13 @@
             TextPrimary       = "#0f172a",
             TextSecondary     = "#64748b",
             LinesDefault      = "#e5e7eb",
-            // 1.14.5: drawer flipped from blue-900 (1.10.x) to golden
-            // yellow per user request. Kept in lock-step with the CSS
-            // variable --lpm-drawer-bg in app.css — MudBlazor injects an
-            // inline style on the drawer surface that beats the CSS var,
-            // so both values have to agree. Text + icon flipped from
-            // light-slate (readable on blue) to near-black (readable on
-            // yellow).
-            DrawerBackground  = "#FBC02D",
+            // 1.14.6: drawer flipped from golden yellow (1.14.5) to light
+            // blue per user request. Kept in lock-step with --lpm-drawer-bg
+            // in app.css — MudBlazor injects an inline style on the drawer
+            // surface that beats the CSS var. Text + icon stay near-black
+            // (same as 1.14.5) since both yellow and light-blue need dark
+            // foreground for contrast.
+            DrawerBackground  = "#93C5FD",
             DrawerText        = "#0F172A",
             DrawerIcon        = "#0F172A",
         }
