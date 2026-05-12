@@ -1,20 +1,20 @@
 :root {
     --lpm-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
     --lpm-bg: #f4f6fa;
-    /* Sidebar + table-head palette — 1.14.6 flipped from golden-yellow
-       (1.14.5) to a light-blue family per user request. Bg stays light
-       so the dark text/icons (already in place from 1.14.5) keep their
-       contrast — no further text recoloring needed. */
-    --lpm-drawer-bg: #93C5FD;        /* Tailwind blue-300 — soft light blue */
-    --lpm-drawer-bg-strong: #60A5FA; /* blue-400 — darker brand-strip header */
-    --lpm-drawer-text: #0F172A;      /* slate-900 — near-black, same as 1.14.5 */
-    --lpm-drawer-muted: #475569;     /* slate-600 — readable on light blue */
+    /* Sidebar + table-head palette — 1.14.7 reverted from light-blue
+       (1.14.6) back to golden-yellow (originally introduced in 1.14.5)
+       per user request. Dark text/icons stay since both yellow and
+       light-blue need dark foreground for contrast. */
+    --lpm-drawer-bg: #FBC02D;        /* golden yellow (Material amber 600-ish) */
+    --lpm-drawer-bg-strong: #F9A825; /* deeper amber for the brand-strip header */
+    --lpm-drawer-text: #0F172A;      /* slate-900 — near-black */
+    --lpm-drawer-muted: #475569;     /* slate-600 — readable on yellow */
     --lpm-accent: #2563eb;
     --lpm-border: #e5e7eb;
     /* Table header background mirrors the sidebar — every MudTable's
-       header strip turns light blue with dark text via the .mud-table-head
+       header strip turns yellow with dark text via the .mud-table-head
        rule below. */
-    --lpm-table-head: #93C5FD;
+    --lpm-table-head: #FBC02D;
 }
 
 html, body {
@@ -129,13 +129,12 @@ html, body {
 /* In-header per-column totals — small bold subtitle under the column
    name in each MudTh. Used by Warehouse Box Details so the planner
    sees totals inline with the column headers.
-   1.14.6: header bg flipped from yellow to light blue — subtitle
-   recolored from deep-amber to blue-800 for readability. */
+   1.14.7: reverted to yellow theme — subtitle back to deep amber. */
 .lpm-th-total {
     display: block;
     font-size: 0.72rem;
     font-weight: 700;
-    color: #1E40AF !important;       /* blue-800 on light-blue header */
+    color: #854D0E !important;       /* deep amber on yellow header */
     margin-top: 2px;
     letter-spacing: 0.01em;
     line-height: 1.1;
@@ -245,9 +244,9 @@ html, body {
 }
 
 .lpm-signout-btn:hover {
-    background: #FFFFFF;                          /* white on hover — distinct from light-blue bg */
+    background: #FFFFFF;                          /* white on hover — distinct from yellow bg */
     color: #1f2937;
-    border-color: #1E40AF;                        /* 1.14.6: dark blue border on hover */
+    border-color: #854D0E;                        /* 1.14.7: dark amber border on hover */
 }
 
 /* --------------- Nav menu --------------- */
@@ -271,17 +270,16 @@ html, body {
     font-size: 0.92rem !important;
 }
 
-/* 1.14.6: hover / active highlights flipped from amber to blue tones
-   to fit the light-blue sidebar bg. Same pattern: hover is slightly
-   lighter than the bg, active is lighter still, active border + icon
-   use a deep blue marker. */
+/* 1.14.7: hover / active highlights reverted back to amber tones
+   to fit the yellow sidebar bg. Pattern: hover slightly lighter than
+   bg, active lighter still, active border + icon use deep amber. */
 .lpm-drawer .mud-nav-link:hover {
-    background-color: #BFDBFE !important; /* blue-200 — softer than the 93C5FD bg */
+    background-color: #FCD34D !important; /* amber-300 — clearly different from FBC02D bg */
     color: #1f2937 !important;
 }
 
 .lpm-drawer .mud-nav-link:hover .mud-nav-link-icon {
-    color: #1E40AF !important; /* blue-800 icon when hovering */
+    color: #854D0E !important; /* deep amber icon when hovering */
 }
 
 /* ---- Active (clicked / current page) ---- */
@@ -291,10 +289,10 @@ html, body {
 .lpm-drawer .mud-nav-link.mud-nav-link-active:hover,
 .lpm-drawer .mud-nav-link.active-item:hover,
 .lpm-drawer a.mud-nav-link[aria-current="page"]:hover {
-    background-color: #DBEAFE !important; /* blue-100 — lightest, so the active row stands out */
+    background-color: #FDE047 !important; /* yellow-300 — lighter than the bg so the active row pops */
     color: #1f2937 !important;
     font-weight: 600 !important;
-    border-left: 3px solid #1E40AF !important; /* blue-800 active marker */
+    border-left: 3px solid #854D0E !important; /* deep-amber active marker */
     padding-left: calc(1.25rem - 3px) !important;
 }
 
@@ -302,7 +300,7 @@ html, body {
 .lpm-drawer .mud-nav-link.mud-nav-link-active:hover,
 .lpm-drawer .mud-nav-link.active-item:hover,
 .lpm-drawer a.mud-nav-link[aria-current="page"]:hover {
-    background-color: #BFDBFE !important;
+    background-color: #FCD34D !important;
 }
 
 .lpm-drawer .mud-nav-link .mud-nav-link-icon {
@@ -312,7 +310,7 @@ html, body {
 .lpm-drawer .mud-nav-link.mud-nav-link-active .mud-nav-link-icon,
 .lpm-drawer .mud-nav-link.active-item .mud-nav-link-icon,
 .lpm-drawer a.mud-nav-link[aria-current="page"] .mud-nav-link-icon {
-    color: #1E40AF !important; /* blue-800 for active icon */
+    color: #854D0E !important; /* deep amber for active icon */
 }
 
 /* --------------- Cards / Papers --------------- */
@@ -361,7 +359,7 @@ html, body {
     display: block;
     font-size: 0.7rem !important;
     font-weight: 500 !important;
-    color: #1E40AF !important;            /* 1.14.6: blue-800 for visibility on light blue */
+    color: #854D0E !important;            /* 1.14.7: deep amber for visibility on yellow */
     letter-spacing: 0;
     text-transform: none;
     line-height: 1.1;

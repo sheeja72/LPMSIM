@@ -71,11 +71,10 @@
         width: 100%;
     }
 
-/* 1.14.6: sidebar bg flipped from yellow to light blue — highlight
-   colors re-tuned to lighter / softer blue tones so they still pop
-   against the new #93C5FD bg. */
+/* 1.14.7: reverted from light blue (1.14.6) back to yellow tones
+   to fit the yellow sidebar bg. */
 .nav-item ::deep a.active {
-    background-color: #DBEAFE; /* blue-100 — lightest, active row stands out */
+    background-color: #FDE047; /* yellow-300 — lighter than the bg so the active row pops */
     color: #1f2937;
     font-weight: 600;
 }
@@ -86,12 +85,12 @@
 }
 
 .nav-item ::deep .nav-link:hover {
-    background-color: #BFDBFE; /* blue-200 hover */
+    background-color: #FCD34D; /* amber-300 hover */
     color: #1f2937;
 }
 
 .nav-item ::deep a.active:hover {
-    background-color: #BFDBFE; /* same hover for active rows */
+    background-color: #FCD34D; /* same hover for active rows */
     color: #1f2937;
 }
 

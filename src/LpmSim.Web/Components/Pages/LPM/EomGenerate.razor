@@ -974,11 +974,11 @@
         // missing or the country has no data).
         /// <summary>Σ SOH for items in this Div × Season from <c>LPM_LocStock</c> where <c>dataname='HODATA'</c>.</summary>
         public long   HOStock             { get; set; }
-        /// <summary>Σ <c>whboxitems.Qty</c> with <c>ShopEligible='E'</c>.</summary>
+        /// <summary>Σ <c>whboxitems.Qty</c> with <c>ShopEligible &lt;&gt; 'E'</c> (1.14.7 strict; was IS NULL OR &lt;&gt; 'E').</summary>
         public long   WHStockPurchased    { get; set; }
-        /// <summary>Σ <c>whboxitems.Qty</c> with <c>ShopEligible IS NULL OR &lt;&gt; 'E'</c>.</summary>
+        /// <summary>Σ <c>whboxitems.Qty</c> with <c>ShopEligible = 'E'</c>.</summary>
         public long   WHStockNonPurchased { get; set; }
-        /// <summary>Σ <c>whboxitems.Qty</c> with <c>PalletCategory='ELIGIBLE' AND ShopEligible='E'</c>.</summary>
+        /// <summary>Σ <c>whboxitems.Qty</c> with <c>PalletCategory='ELIGIBLE' AND ShopEligible &lt;&gt; 'E'</c> (1.14.7 — now reads PalletCategory from whboxitems, not pallettype).</summary>
         public long   EligibleStock       { get; set; }
     }
 

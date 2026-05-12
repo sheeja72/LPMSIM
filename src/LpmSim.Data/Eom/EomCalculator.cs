@@ -252,7 +252,8 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
     /// always wants the current snapshot.
     ///
     /// <para>
-    /// Sources:
+    /// Sources (1.14.7 — aligned with WH Stock Position and Variance Report
+    /// so all three reports reconcile against the planner's SSMS queries):
     /// <list type="bullet">
     ///   <item><strong>HO Stock</strong> — <c>racks.dbo.LPM_LocStock</c> where
     ///         <c>dataname = 'HODATA'</c>, mapped to division via
@@ -260,20 +261,25 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
     ///         <c>usa.dbo.upcbarcodes.Itemtype</c> (<c>'W'</c> → Winter, else
     ///         Summer).</item>
     ///   <item><strong>WH (Purchased)</strong> — <c>whboxitems.Qty</c> where
-    ///         <c>ShopEligible IS NULL OR &lt;&gt; 'E'</c> (boxes cleared / moved
-    ///         past the 'E' in-process state).</item>
+    ///         <c>ShopEligible &lt;&gt; 'E'</c> (boxes cleared / moved past
+    ///         the 'E' in-process state). Strict <c>&lt;&gt;</c> excludes
+    ///         NULL ShopEligible — matches the planner's reference SSMS
+    ///         query <c>WHERE ShopEligible &lt;&gt; 'E'</c>.</item>
     ///   <item><strong>WH (Non-Purchased)</strong> — <c>whboxitems.Qty</c>
     ///         where <c>ShopEligible = 'E'</c> (still being processed).</item>
     ///   <item><strong>Eligible Stock</strong> — <c>whboxitems.Qty</c> where
-    ///         <c>pallettype.PalletCategory = 'ELIGIBLE' AND
-    ///         (ShopEligible IS NULL OR &lt;&gt; 'E')</c> — purchased subset of
-    ///         the ELIGIBLE pallet category.</item>
+    ///         <c>whboxitems.PalletCategory = 'ELIGIBLE' AND
+    ///         ShopEligible &lt;&gt; 'E'</c> — purchased subset of the
+    ///         ELIGIBLE pallet category.</item>
     /// </list>
     /// </para>
     ///
     /// <para>
-    /// All WH-side metrics break down by <c>pallettype.Season</c>. HO Stock
-    /// uses <c>upcbarcodes.Itemtype</c> for its season.
+    /// 1.14.7: PalletCategory and Season both read from <c>whboxitems</c>
+    /// directly (was via an <c>INNER JOIN</c> to <c>bfldata.dbo.pallettype</c>
+    /// on <c>PalletType</c>, which silently dropped boxes whose
+    /// <c>PalletType</c> had no master row). HO Stock continues to derive
+    /// season from <c>upcbarcodes.Itemtype</c>.
     /// </para>
     /// </summary>
     public async Task<List<DivisionStockBreakdown>> GetDivisionStockBreakdownAsync(
@@ -326,17 +332,20 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                  GROUP BY id.DivCode, ISNULL(its.Season, 'S')
             ),
             WHByDiv AS (
-                -- Business definitions confirmed by user:
-                --   • Purchased     = ShopEligible IS NULL OR <> 'E' (boxes
-                --                     that have been moved/cleared/shipped —
-                --                     'E' marks the still-in-process state)
-                --   • Non-Purchased = ShopEligible = 'E' (still being
-                --                     processed / not yet shipped)
+                -- 1.14.7: rule unification with WH Stock Position + Variance
+                -- Report. Season and PalletCategory both come from whboxitems
+                -- directly (was via pt.* through an INNER JOIN to pallettype
+                -- master, which silently dropped boxes whose PalletType had
+                -- no master row). Purchased filter tightened from
+                -- IS NULL OR <> 'E' to strict <> 'E' so it matches the
+                -- planner's SSMS reference queries.
+                --   • Purchased     = ShopEligible <> 'E' (boxes that have
+                --                     been moved/cleared/shipped — 'E' marks
+                --                     the still-in-process state).
+                --   • Non-Purchased = ShopEligible = 'E' (still in-process).
                 --   • Eligible      = PalletCategory='ELIGIBLE' AND
                 --                     ShopEligible <> 'E' (eligible-category
-                --                     stock that has been purchased — i.e.
-                --                     what's available for the next SIM run
-                --                     after the 'E' work clears).
+                --                     subset of Purchased).
                 --
                 -- Note: this naming is the OPPOSITE of how the existing SIM
                 -- allocator filters use ShopEligible <> E (which there means
@@ -344,19 +353,18 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 -- business team labels; the allocator behaviour stays
                 -- untouched.
                 SELECT id.DivCode,
-                       CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END AS Season,
-                       SUM(CASE WHEN w.ShopEligible IS NULL OR w.ShopEligible <> 'E'
+                       CASE WHEN UPPER(ISNULL(w.Season, '')) = 'W' THEN 'W' ELSE 'S' END AS Season,
+                       SUM(CASE WHEN w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStockPurchased,
                        SUM(CASE WHEN w.ShopEligible = 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStockNonPurchased,
-                       SUM(CASE WHEN pt.PalletCategory = 'ELIGIBLE'
-                                 AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS EligibleStock
                   FROM {whSrc} w
-                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-                  INNER JOIN ItemDiv id              ON id.itemcode    = w.ItemCode
+                  INNER JOIN ItemDiv id ON id.itemcode = w.ItemCode
                  GROUP BY id.DivCode,
-                          CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END
+                          CASE WHEN UPPER(ISNULL(w.Season, '')) = 'W' THEN 'W' ELSE 'S' END
             )
             SELECT
                 COALESCE(h.DivCode, w.DivCode)   AS DivCode,

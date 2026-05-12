@@ -23,6 +23,37 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.7 — EOM rule unification + theme revert to yellow (2026-05-12)
+
+### Changed — theme
+- **Sidebar + table-head reverted from light blue (1.14.6) back to golden yellow** (`#FBC02D` family, same values as 1.14.5). Hover/active/icon/subtitle colors all flipped back to the amber palette. Dark text + icons unchanged.
+
+### Changed — EOM Division Summary stock breakdown
+- **EOM Generate's Division Summary stock-breakdown query now follows the same WH-side rule as the WH Stock Position and Variance Report.** Three tweaks in `EomCalculator.GetDivisionStockBreakdownAsync`:
+  1. **Purchased filter strict:** `ShopEligible IS NULL OR <> 'E'` → **`ShopEligible <> 'E'`**. Matches the planner's SSMS reference query (`WHERE ShopEligible <> 'E'`). NULL ShopEligible rows no longer count as Purchased.
+  2. **PalletCategory from whboxitems direct:** was `pt.PalletCategory` via `INNER JOIN bfldata.dbo.pallettype pt`. Now reads `w.PalletCategory` straight from the source. Boxes whose PalletType is missing from the pallettype master are no longer silently dropped.
+  3. **Season from whboxitems direct:** was `pt.Season` (also from the pallettype join). Now reads `w.Season`. Same rule (`'W'` → Winter, else Summer).
+- HO side unchanged — still derives season from `upcbarcodes.Itemtype`.
+
+### Affects
+- ONLY the **Division Summary** tab's 4 stock columns: HO Stock, WH Stock (Purchased), WH Stock (Non-Purchased), Eligible Stock.
+- Other columns on the Division Summary tab (SOH / Target EOM / Target Sales / Merch Need / LPM Box Qty) come from `LPM_EOM_Output` and are NOT affected.
+- The EOM calculation engine (the 6-step algorithm) and the saved `LPM_EOM_Output` rows are NOT affected.
+- SIM Generate and downstream allocation are NOT affected.
+
+### Expected number shifts
+- WH Stock (Purchased) may **drop slightly** — rows with `ShopEligible IS NULL` no longer count.
+- All 4 columns may **rise slightly** — boxes with PalletType not in pallettype master are no longer lost.
+- Summer/Winter split may move for individual boxes if `whboxitems.Season` differs from the joined `pallettype.Season`.
+
+### Fixed
+- **Reversed XML doc comments** on `DivisionSummaryEom.WHStockPurchased` and `WHStockNonPurchased` in `EomGenerate.razor` (lines 977–980). The data was always correct; the inline `<summary>` tags were swapped. Now updated to match the SQL.
+
+### Notes
+- No schema change, no migrations. Behavioural change is confined to the 4 informational columns on the Division Summary tab.
+
+---
+
 ## 1.14.6 — Theme light blue + EOM page-busy fix + SIM Summary timeout (2026-05-12)
 
 ### Fixed
