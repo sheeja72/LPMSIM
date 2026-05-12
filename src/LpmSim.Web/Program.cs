@@ -101,6 +101,7 @@ public class Program
         builder.Services.AddScoped<LpmAdmService>();
         builder.Services.AddScoped<WarehouseQueryService>();
         builder.Services.AddScoped<WhHoStockService>();
+        builder.Services.AddScoped<VarianceReportService>();
 
         // SKU Max background job manager — Singleton so a Build can survive
         // the user navigating away from the SIM Generate page. Builds run on

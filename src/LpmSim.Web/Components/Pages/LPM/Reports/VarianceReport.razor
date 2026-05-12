@@ -1,0 +1,281 @@
+@page "/lpm/reports/variance"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.Reports
+@using LpmSim.Data.Warehouse
+@using LpmSim.Data.Auditing
+@using ClosedXML.Excel
+@using LpmSim.Web.Components.Pages.Uploads
+@inject VarianceReportService Report
+@inject WarehouseQueryService Warehouse
+@inject IActionLogger ActionLog
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<PageTitle>Variance Report</PageTitle>
+
+<div class="lpm-page-title">Variance Report (Item-level)</div>
+<div class="lpm-page-subtitle">
+    Item-by-item breakdown of the gap between Head Office stock and Warehouse stock — same data sources
+    as the WH Stock Position report, aggregated at <code>ItemCode × Division</code> instead of Division.
+    Only items where HO ≠ WH are shown (use this to drill into the source of any division-level
+    variance). Item descriptions come from <code>HODATA.dbo.Itemmaster</code>.
+</div>
+
+<div class="lpm-section lpm-filter-bar lpm-filter-bar-lg">
+    <MudGrid Spacing="2">
+        <MudItem xs="12" sm="6" md="2">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="@OnCountryChanged"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       Class="@(string.Equals(_country, "UAE", StringComparison.OrdinalIgnoreCase) ? "" : "lpm-filter-active")">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem T="string" Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+
+        <MudItem xs="12" sm="6" md="3">
+            <MultiSelectFilter Label="Filter Division"
+                               Items="_divisions"
+                               Selected="_selectedDivisions"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDivisions = s; StateHasChanged(); })" />
+        </MudItem>
+
+        <MudItem xs="12" sm="6" md="2">
+            <MudSelect T="WhHoSeason" Label="Season" Value="_season"
+                       ValueChanged="v => { _season = v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       Class="@(_season == WhHoSeason.All ? "" : "lpm-filter-active")">
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.All">All</MudSelectItem>
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.Summer">Summer</MudSelectItem>
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.Winter">Winter</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+
+        @* Itemcode contains-search — narrows the result before SQL runs.
+           Helps when investigating a specific SKU or family of SKUs. *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudTextField T="string" Label="Itemcode contains"
+                          Value="_itemSearch"
+                          ValueChanged="@((string v) => { _itemSearch = v; StateHasChanged(); })"
+                          Variant="Variant.Outlined" Margin="Margin.Dense"
+                          Adornment="Adornment.End" AdornmentIcon="@Icons.Material.Filled.Search"
+                          Clearable="true"
+                          Class="@(string.IsNullOrWhiteSpace(_itemSearch) ? "" : "lpm-filter-active")" />
+        </MudItem>
+
+        <MudItem xs="12" md="3" Class="d-flex align-center justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
+                       StartIcon="@Icons.Material.Filled.PlayArrow"
+                       Disabled="_loading" OnClick="LoadAsync">
+                Load
+            </MudButton>
+            <MudButton Color="Color.Success" Variant="Variant.Outlined" DropShadow="false" Size="Size.Small"
+                       StartIcon="@Icons.Material.Filled.Download"
+                       Disabled="@(_loading || _rows.Count == 0)" OnClick="ExportExcelAsync">
+                Excel
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_loading)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_rows.Count > 0)
+{
+    var totHo  = _rows.Sum(r => r.HoStock);
+    var totWh  = _rows.Sum(r => r.WhStock);
+    var totVar = _rows.Sum(r => r.Variance);
+
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Items with variance</div>
+            <div class="lpm-metric-value">@_rows.Count.ToString("N0")</div>
+            <div class="lpm-metric-sub">@(_rows.Count >= _topLimit ? "capped at " + _topLimit.ToString("N0") : "result rows")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">HO Stock (total)</div>
+            <div class="lpm-metric-value">@totHo.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-green">
+            <div class="lpm-metric-label">WH Stock (total)</div>
+            <div class="lpm-metric-value">@totWh.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">Variance (total)</div>
+            <div class="lpm-metric-value">@totVar.ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <MudTable Items="_rows" Dense="true" Striped="true" Hover="true" Bordered="true"
+              SortLabel="Sort" Class="lpm-table" FixedHeader="true" Height="65vh">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel T="VarianceRow" SortBy="r => r.ItemCode">Itemcode</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="VarianceRow" SortBy="r => r.ItemName">Item Name</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="VarianceRow" SortBy="r => r.Division">Division</MudTableSortLabel></MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="VarianceRow" SortBy="r => r.HoStock">HO Stock</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="VarianceRow" SortBy="r => r.WhStock">WH Stock</MudTableSortLabel>
+                <div style="font-size:0.72rem;font-weight:400;color:#cbd5e1;line-height:1;margin-top:0.15rem;">
+                    excl. NON ELIGIBLE, ECOM
+                </div>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                @* Default sort = ABS(Variance) DESC on the SQL side.
+                   Clicking re-sorts in-memory. *@
+                <MudTableSortLabel T="VarianceRow" SortBy="r => r.Variance"
+                                   InitialDirection="SortDirection.Descending">Variance</MudTableSortLabel>
+            </MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd><code>@context.ItemCode</code></MudTd>
+            <MudTd>@context.ItemName</MudTd>
+            <MudTd>@context.Division</MudTd>
+            <MudTd Style="text-align:right;">@context.HoStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.WhStock.ToString("N0")</MudTd>
+            @* Red when negative (WH > HO — extra stock in WH vs HO). *@
+            <MudTd Style="@($"text-align:right;{(context.Variance < 0 ? "color:#b91c1c;font-weight:600;" : "")}")">
+                @context.Variance.ToString("N0")
+            </MudTd>
+        </RowTemplate>
+        <PagerContent>
+            <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+        </PagerContent>
+    </MudTable>
+}
+else if (_loadedOnce)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mt-2">
+        No variance items for the current filter combination — every item either has HO = WH, or the
+        filter set excluded all candidates.
+    </MudAlert>
+}
+else
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mt-2">
+        Pick filters and click <b>Load</b> to run the report.
+    </MudAlert>
+}
+
+@code {
+    private List<string> _countries = new() { "UAE" };
+    private List<string> _divisions = new();
+
+    private string          _country           = "UAE";
+    private HashSet<string> _selectedDivisions = new(StringComparer.OrdinalIgnoreCase);
+    private WhHoSeason      _season            = WhHoSeason.All;
+    private string?         _itemSearch        = null;
+
+    private List<VarianceRow> _rows       = new();
+    private bool              _loading;
+    private bool              _loadedOnce;
+    private const int         _topLimit   = 10_000;
+
+    protected override async Task OnInitializedAsync()
+    {
+        var countriesTask = Warehouse.GetCountriesAsync();
+        var divisionsTask = Warehouse.GetDistinctDivisionsAsync();
+        try
+        {
+            _countries = await countriesTask;
+            _divisions = await divisionsTask;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not load filter lists: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private void OnCountryChanged(string? v)
+    {
+        _country = string.IsNullOrWhiteSpace(v) ? "UAE" : v;
+        StateHasChanged();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true; StateHasChanged();
+        var started = DateTime.Now;
+        _rows.Clear();
+        var filter = new VarianceFilter(
+            Country:    _country,
+            Divisions:  _selectedDivisions.Count == 0 ? null : _selectedDivisions.ToList(),
+            Season:     _season,
+            ItemSearch: string.IsNullOrWhiteSpace(_itemSearch) ? null : _itemSearch,
+            TopLimit:   _topLimit);
+        try
+        {
+            _rows = await Report.GetAsync(filter);
+            _loadedOnce = true;
+            if (_rows.Count >= _topLimit)
+                Snackbar.Add($"Result capped at {_topLimit:N0} rows. Narrow the filter to see more.", Severity.Warning);
+            await ActionLog.LogAsync(
+                "Reports.Variance.Load",
+                $"{started:yyyyMMddHHmmss}",
+                new { filter = filter, rows = _rows.Count, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
+            await ActionLog.LogAsync(
+                "Reports.Variance.Load",
+                $"{started:yyyyMMddHHmmss}-error",
+                new { filter = filter, error = ex.Message });
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    private async Task ExportExcelAsync()
+    {
+        if (_rows.Count == 0)
+        {
+            Snackbar.Add("Nothing to export — Load a result first.", Severity.Info);
+            return;
+        }
+        try
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("Variance");
+            string[] headers = { "Itemcode", "Item Name", "Division", "HO Stock", "WH Stock", "Variance" };
+            for (int i = 0; i < headers.Length; i++) ws.Cell(1, i + 1).Value = headers[i];
+            ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+
+            int row = 2;
+            foreach (var r in _rows)
+            {
+                ws.Cell(row, 1).Value = r.ItemCode;
+                ws.Cell(row, 2).Value = r.ItemName;
+                ws.Cell(row, 3).Value = r.Division;
+                ws.Cell(row, 4).Value = r.HoStock;
+                ws.Cell(row, 5).Value = r.WhStock;
+                ws.Cell(row, 6).Value = r.Variance;
+                row++;
+            }
+            // Totals row.
+            ws.Cell(row, 1).Value = "TOTAL";
+            ws.Cell(row, 4).Value = _rows.Sum(r => r.HoStock);
+            ws.Cell(row, 5).Value = _rows.Sum(r => r.WhStock);
+            ws.Cell(row, 6).Value = _rows.Sum(r => r.Variance);
+            ws.Range(row, 1, row, headers.Length).Style.Font.Bold = true;
+            ws.Columns().AdjustToContents();
+
+            var fileName = $"VarianceReport_{_country}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            await UploadHelpers.DownloadAsync(JS, wb, fileName);
+            Snackbar.Add($"Exported {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+    }
+}
