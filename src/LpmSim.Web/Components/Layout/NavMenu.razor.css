@@ -71,25 +71,27 @@
         width: 100%;
     }
 
+/* 1.14.5: sidebar bg flipped to yellow — these highlight colors were
+   tuned for a blue bg and are invisible on yellow. Brightened the
+   active+hover surfaces and switched hover text to dark for readability. */
 .nav-item ::deep a.active {
-    background-color: #fef9c3; /* light yellow (tailwind yellow-100) */
-    color: #1f2937;            /* dark slate for contrast */
+    background-color: #FDE047; /* yellow-300 — lighter than the bg so the active row pops */
+    color: #1f2937;
     font-weight: 600;
 }
 
 .nav-item ::deep a.active .bi {
-    /* Icons are white SVG masks; tint them dark so they remain visible
-       against the light-yellow active background. */
+    /* Dark icon glyph on the lighter yellow active row. */
     filter: invert(1) brightness(0.4);
 }
 
 .nav-item ::deep .nav-link:hover {
-    background-color: rgba(254,249,195,0.25); /* faint yellow tint on hover */
-    color: white;
+    background-color: #FCD34D; /* amber-300 hover */
+    color: #1f2937;
 }
 
 .nav-item ::deep a.active:hover {
-    background-color: #fde68a; /* slightly deeper yellow when hovering the active item */
+    background-color: #FCD34D; /* same hover for active rows */
     color: #1f2937;
 }
 
