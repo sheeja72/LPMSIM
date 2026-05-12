@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.13.2</Version>
-    <AssemblyVersion>1.13.2.0</AssemblyVersion>
-    <FileVersion>1.13.2.0</FileVersion>
-    <InformationalVersion>1.13.2 (EOM Generate — parallel readiness + lazy stock breakdown)</InformationalVersion>
+    <Version>1.13.3</Version>
+    <AssemblyVersion>1.13.3.0</AssemblyVersion>
+    <FileVersion>1.13.3.0</FileVersion>
+    <InformationalVersion>1.13.3 (Reports — rename WH/HO Stock → WH Stock Position)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

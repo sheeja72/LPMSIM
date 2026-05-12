@@ -23,6 +23,17 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.13.3 — Reports: rename WH/HO Stock → WH Stock Position (2026-05-12)
+
+### Changed
+- **Renamed the WH/HO Stock report to "WH Stock Position"** across the sidebar label, page title, page heading, Excel sheet name, Excel filename prefix (now `WhStockPosition_<Country>_<Timestamp>.xlsx`), and audit-log category (`Reports.WhStockPosition.Load`). Same page, same columns, same SQL — naming only.
+
+### Notes
+- **URL preserved at `/lpm/reports/wh-ho-stock`** so any existing bookmarks keep working. Change the route on request.
+- Internal C# type names (`WhHoStockService`, `WhHoStockRow`, `WhHoStockFilter`, `WhHoSeason`) and the source file (`WhHoStock.razor`) were intentionally left untouched — they're developer-facing only and renaming would be a wider refactor.
+
+---
+
 ## 1.13.2 — EOM perf + WH/HO Stock PalletCategory source (2026-05-12)
 
 ### Performance — EOM Generate page load

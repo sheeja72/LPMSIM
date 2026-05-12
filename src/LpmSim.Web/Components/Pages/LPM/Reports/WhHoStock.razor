@@ -12,9 +12,9 @@
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 
-<PageTitle>WH / HO Stock</PageTitle>
+<PageTitle>WH Stock Position</PageTitle>
 
-<div class="lpm-page-title">WH / HO Stock</div>
+<div class="lpm-page-title">WH Stock Position</div>
 <div class="lpm-page-subtitle">
     Per-Division comparison of Head Office stock (LPM_LocStock) vs Warehouse stock (whboxitems), broken
     down by pallet category and LPM presence. Country switches the WH source (UAE → racks.dbo.whboxitems;
@@ -261,7 +261,7 @@ else
             _rows = await Report.GetAsync(filter);
             _loadedOnce = true;
             await ActionLog.LogAsync(
-                "Reports.WhHoStock.Load",
+                "Reports.WhStockPosition.Load",
                 $"{started:yyyyMMddHHmmss}",
                 new { filter = filter, rows = _rows.Count, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
         }
@@ -269,7 +269,7 @@ else
         {
             Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
             await ActionLog.LogAsync(
-                "Reports.WhHoStock.Load",
+                "Reports.WhStockPosition.Load",
                 $"{started:yyyyMMddHHmmss}-error",
                 new { filter = filter, error = ex.Message });
         }
@@ -294,7 +294,7 @@ else
         try
         {
             using var wb = new XLWorkbook();
-            var ws = wb.Worksheets.Add("WH-HO Stock");
+            var ws = wb.Worksheets.Add("WH Stock Position");
             string[] headers = {
                 "Division", "HO Stock", "WH Stock", "Variance",
                 "Reserved", "Seasonal", "On Hold", "Eligible",
@@ -332,7 +332,7 @@ else
             ws.Range(row, 1, row, headers.Length).Style.Font.Bold = true;
             ws.Columns().AdjustToContents();
 
-            var fileName = $"WhHoStock_{_country}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            var fileName = $"WhStockPosition_{_country}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }
