@@ -1,0 +1,338 @@
+@page "/lpm/reports/wh-ho-stock"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@using LpmSim.Data.Reports
+@using LpmSim.Data.Warehouse
+@using LpmSim.Data.Auditing
+@using ClosedXML.Excel
+@using LpmSim.Web.Components.Pages.Uploads
+@inject WhHoStockService Report
+@inject WarehouseQueryService Warehouse
+@inject IActionLogger ActionLog
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<PageTitle>WH / HO Stock</PageTitle>
+
+<div class="lpm-page-title">WH / HO Stock</div>
+<div class="lpm-page-subtitle">
+    Per-Division comparison of Head Office stock (LPM_LocStock) vs Warehouse stock (whboxitems), broken
+    down by pallet category and LPM presence. Country switches the WH source (UAE → racks.dbo.whboxitems;
+    others → [&lt;DataName&gt;].dbo.WHBoxItemsExport) and the HO storeid filter (UAE → storeid='HODATA';
+    others → DataSettings.storeid where ExportWH='Y'). Season filter optionally narrows everything to
+    Summer or Winter (WH side reads whboxitems.Season; HO side derives from UPCBarcodes.Itemtype).
+</div>
+
+<div class="lpm-section lpm-filter-bar lpm-filter-bar-lg">
+    <MudGrid Spacing="2">
+        @* Country (single). Drives both the whboxitems source AND the HO
+           storeids list. Highlighted when not the UAE default. *@
+        <MudItem xs="12" sm="6" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="@OnCountryChanged"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       Class="@(string.Equals(_country, "UAE", StringComparison.OrdinalIgnoreCase) ? "" : "lpm-filter-active")">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem T="string" Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+
+        @* Division (multi-select). Uses the reusable MultiSelectFilter
+           component — same UX as the WH Boxes page. *@
+        <MudItem xs="12" sm="6" md="4">
+            <MultiSelectFilter Label="Filter Division"
+                               Items="_divisions"
+                               Selected="_selectedDivisions"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDivisions = s; StateHasChanged(); })" />
+        </MudItem>
+
+        @* Season (single). All = no filter (default). Summer / Winter
+           narrow both sides via their respective season columns. *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudSelect T="WhHoSeason" Label="Season" Value="_season"
+                       ValueChanged="v => { _season = v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       Class="@(_season == WhHoSeason.All ? "" : "lpm-filter-active")">
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.All">All</MudSelectItem>
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.Summer">Summer</MudSelectItem>
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.Winter">Winter</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+
+        <MudItem xs="12" md="3" Class="d-flex align-center justify-end gap-2">
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
+                       StartIcon="@Icons.Material.Filled.PlayArrow"
+                       Disabled="_loading" OnClick="LoadAsync">
+                Load
+            </MudButton>
+            <MudButton Color="Color.Success" Variant="Variant.Outlined" DropShadow="false" Size="Size.Small"
+                       StartIcon="@Icons.Material.Filled.Download"
+                       Disabled="@(_loading || _rows.Count == 0)" OnClick="ExportExcelAsync">
+                Excel
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_loading)
+{
+    <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+}
+
+@if (_rows.Count > 0)
+{
+    @* Per-page totals — sum each column. Used both as a header card strip
+       and as the bottom row of the table. Computed once into locals for
+       readability. (Inside an @if block already, so no leading @ on the
+       code-only sub-block.) *@
+    var totHo       = _rows.Sum(r => r.HoStock);
+    var totWh       = _rows.Sum(r => r.WhStock);
+    var totVar      = _rows.Sum(r => r.Variance);
+    var totReserved = _rows.Sum(r => r.ReservedStock);
+    var totSeasonal = _rows.Sum(r => r.SeasonalStock);
+    var totOnHold   = _rows.Sum(r => r.OnHoldStock);
+    var totEligible = _rows.Sum(r => r.EligibleStock);
+    var totNonLpm   = _rows.Sum(r => r.NonLpmStock);
+    var totLpm      = _rows.Sum(r => r.LpmStock);
+
+    <MudGrid Spacing="2" Class="mb-3">
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
+            <div class="lpm-metric-label">Divisions</div>
+            <div class="lpm-metric-value">@_rows.Count.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-purple">
+            <div class="lpm-metric-label">HO Stock (total)</div>
+            <div class="lpm-metric-value">@totHo.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-green">
+            <div class="lpm-metric-label">WH Stock (total)</div>
+            <div class="lpm-metric-value">@totWh.ToString("N0")</div>
+        </div></MudItem>
+        <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber">
+            <div class="lpm-metric-label">Variance (total)</div>
+            <div class="lpm-metric-value">@totVar.ToString("N0")</div>
+        </div></MudItem>
+    </MudGrid>
+
+    <MudTable Items="_rows" Dense="true" Striped="true" Hover="true" Bordered="true"
+              SortLabel="Sort" Class="lpm-table">
+        <HeaderContent>
+            <MudTh><MudTableSortLabel T="WhHoStockRow" InitialDirection="SortDirection.Ascending"
+                                       SortBy="r => r.Division">Division</MudTableSortLabel></MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.HoStock">HO Stock</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.WhStock">WH Stock</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.Variance">Variance</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.ReservedStock">Reserved</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.SeasonalStock">Seasonal</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.OnHoldStock">On Hold</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.EligibleStock">Eligible</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.NonLpmStock">Non-LPM</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.LpmStock">LPM</MudTableSortLabel>
+            </MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd>@context.Division</MudTd>
+            <MudTd Style="text-align:right;">@context.HoStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.WhStock.ToString("N0")</MudTd>
+            @* Variance: red text when negative (WH > HO — over-stocked) so
+               it stands out from the rest of the row. *@
+            <MudTd Style="@($"text-align:right;{(context.Variance < 0 ? "color:#b91c1c;font-weight:600;" : "")}")">
+                @context.Variance.ToString("N0")
+            </MudTd>
+            <MudTd Style="text-align:right;">@context.ReservedStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.SeasonalStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.OnHoldStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.EligibleStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.NonLpmStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.LpmStock.ToString("N0")</MudTd>
+        </RowTemplate>
+        <FooterContent>
+            @* Bold totals row — mirrors the metric cards so the planner
+               can scan the table bottom and the cards interchangeably. *@
+            <MudTd Style="font-weight:700;">TOTAL</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totHo.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totWh.ToString("N0")</MudTd>
+            <MudTd Style="@($"text-align:right;font-weight:700;{(totVar < 0 ? "color:#b91c1c;" : "")}")">
+                @totVar.ToString("N0")
+            </MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totReserved.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totSeasonal.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totOnHold.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totEligible.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totNonLpm.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totLpm.ToString("N0")</MudTd>
+        </FooterContent>
+    </MudTable>
+}
+else if (_loadedOnce)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mt-2">
+        No rows for the current filter combination.
+    </MudAlert>
+}
+else
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Class="mt-2">
+        Pick filters and click <b>Load</b> to run the report.
+    </MudAlert>
+}
+
+@code {
+    // ─── State ──────────────────────────────────────────────────────────
+    // Dropdown source lists (populated in OnInitializedAsync).
+    private List<string> _countries = new() { "UAE" };
+    private List<string> _divisions = new();
+
+    // Filter values.
+    private string                  _country           = "UAE";
+    private HashSet<string>         _selectedDivisions = new(StringComparer.OrdinalIgnoreCase);
+    private WhHoSeason              _season            = WhHoSeason.All;
+
+    // Result + UI state.
+    private List<WhHoStockRow> _rows       = new();
+    private bool               _loading;
+    private bool               _loadedOnce;
+
+    protected override async Task OnInitializedAsync()
+    {
+        // Two short queries in parallel — both hit different DBs/tables
+        // so the wait is dominated by the slower one.
+        var countriesTask = Warehouse.GetCountriesAsync();
+        var divisionsTask = Warehouse.GetDistinctDivisionsAsync();
+        try
+        {
+            _countries = await countriesTask;
+            _divisions = await divisionsTask;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Could not load filter lists: {ex.Message}", Severity.Error);
+        }
+    }
+
+    /// <summary>
+    /// Country dropdown handler. Named method so the "UAE" literal in the
+    /// Class binding doesn't need Razor attribute-escape gymnastics.
+    /// </summary>
+    private void OnCountryChanged(string? v)
+    {
+        _country = string.IsNullOrWhiteSpace(v) ? "UAE" : v;
+        // Division list is global (subclassmaster, not country-scoped), so
+        // the selection survives a country switch. Nothing to clear here.
+        StateHasChanged();
+    }
+
+    private async Task LoadAsync()
+    {
+        _loading = true; StateHasChanged();
+        var started = DateTime.Now;
+        _rows.Clear();
+        var filter = new WhHoStockFilter(
+            Country:   _country,
+            Divisions: _selectedDivisions.Count == 0 ? null : _selectedDivisions.ToList(),
+            Season:    _season);
+        try
+        {
+            _rows = await Report.GetAsync(filter);
+            _loadedOnce = true;
+            await ActionLog.LogAsync(
+                "Reports.WhHoStock.Load",
+                $"{started:yyyyMMddHHmmss}",
+                new { filter = filter, rows = _rows.Count, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load failed: {ex.Message}", Severity.Error);
+            await ActionLog.LogAsync(
+                "Reports.WhHoStock.Load",
+                $"{started:yyyyMMddHHmmss}-error",
+                new { filter = filter, error = ex.Message });
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    /// <summary>
+    /// Build a single-sheet workbook of the current result rows and trigger
+    /// a browser download. Columns mirror the on-screen table; a bold
+    /// TOTAL row caps the bottom.
+    /// </summary>
+    private async Task ExportExcelAsync()
+    {
+        if (_rows.Count == 0)
+        {
+            Snackbar.Add("Nothing to export — Load a result first.", Severity.Info);
+            return;
+        }
+        try
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("WH-HO Stock");
+            string[] headers = {
+                "Division", "HO Stock", "WH Stock", "Variance",
+                "Reserved", "Seasonal", "On Hold", "Eligible",
+                "Non-LPM", "LPM"
+            };
+            for (int i = 0; i < headers.Length; i++) ws.Cell(1, i + 1).Value = headers[i];
+            ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
+
+            int row = 2;
+            foreach (var r in _rows)
+            {
+                ws.Cell(row, 1).Value  = r.Division;
+                ws.Cell(row, 2).Value  = r.HoStock;
+                ws.Cell(row, 3).Value  = r.WhStock;
+                ws.Cell(row, 4).Value  = r.Variance;
+                ws.Cell(row, 5).Value  = r.ReservedStock;
+                ws.Cell(row, 6).Value  = r.SeasonalStock;
+                ws.Cell(row, 7).Value  = r.OnHoldStock;
+                ws.Cell(row, 8).Value  = r.EligibleStock;
+                ws.Cell(row, 9).Value  = r.NonLpmStock;
+                ws.Cell(row, 10).Value = r.LpmStock;
+                row++;
+            }
+            // Totals row.
+            ws.Cell(row, 1).Value  = "TOTAL";
+            ws.Cell(row, 2).Value  = _rows.Sum(r => r.HoStock);
+            ws.Cell(row, 3).Value  = _rows.Sum(r => r.WhStock);
+            ws.Cell(row, 4).Value  = _rows.Sum(r => r.Variance);
+            ws.Cell(row, 5).Value  = _rows.Sum(r => r.ReservedStock);
+            ws.Cell(row, 6).Value  = _rows.Sum(r => r.SeasonalStock);
+            ws.Cell(row, 7).Value  = _rows.Sum(r => r.OnHoldStock);
+            ws.Cell(row, 8).Value  = _rows.Sum(r => r.EligibleStock);
+            ws.Cell(row, 9).Value  = _rows.Sum(r => r.NonLpmStock);
+            ws.Cell(row, 10).Value = _rows.Sum(r => r.LpmStock);
+            ws.Range(row, 1, row, headers.Length).Style.Font.Bold = true;
+            ws.Columns().AdjustToContents();
+
+            var fileName = $"WhHoStock_{_country}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            await UploadHelpers.DownloadAsync(JS, wb, fileName);
+            Snackbar.Add($"Exported {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+    }
+}

@@ -3,6 +3,7 @@ using LpmSim.Data;
 using LpmSim.Data.Auditing;
 using LpmSim.Data.Eom;
 using LpmSim.Data.LpmSim;
+using LpmSim.Data.Reports;
 using LpmSim.Data.Warehouse;
 using LpmSim.Web.Auth;
 using LpmSim.Web.Components;
@@ -99,6 +100,7 @@ public class Program
         builder.Services.AddScoped<ProductionScheduler>();
         builder.Services.AddScoped<LpmAdmService>();
         builder.Services.AddScoped<WarehouseQueryService>();
+        builder.Services.AddScoped<WhHoStockService>();
 
         // SKU Max background job manager — Singleton so a Build can survive
         // the user navigating away from the SIM Generate page. Builds run on
