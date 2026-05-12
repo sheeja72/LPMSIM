@@ -159,25 +159,45 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
     /// <summary>Reads previously generated/saved rows from LPM_EOM_Output for a given (Country, Year, Month).</summary>
     public async Task<(List<EomRow> rows, DateTime? lastGeneratedTS)> GetSavedAsync(string country, int year, int month, CancellationToken ct = default)
     {
-        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.3 perf: the 3 queries below are independent. Run them in
+        // parallel via Task.WhenAll with separate DbContexts (EF Core's
+        // DbContext is not thread-safe). Same pattern as CheckAsync.
+        async Task<Dictionary<string, string>> LoadStoreNames()
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(ct);
+            var stores = await db.DataSettings.AsNoTracking()
+                .Where(s => s.Country == country && s.StoreID != null)
+                .Select(s => new { s.StoreID, s.PBFullname })
+                .Distinct()
+                .ToListAsync(ct);
+            return stores
+                .Where(s => s.StoreID != null)
+                .GroupBy(s => s.StoreID!)
+                .ToDictionary(g => g.Key, g => g.First().PBFullname ?? "");
+        }
+        async Task<Dictionary<int, string>> LoadDivNames()
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(ct);
+            return await db.Divisions.AsNoTracking()
+                .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? "", ct);
+        }
+        async Task<List<LpmEomOutput>> LoadSaved()
+        {
+            await using var db = await dbFactory.CreateDbContextAsync(ct);
+            return await db.LpmEomOutputs.AsNoTracking()
+                .Where(e => e.Country == country && e.Year1 == year && e.Month1 == month)
+                .OrderBy(e => e.DivCode).ThenBy(e => e.StoreID)
+                .ToListAsync(ct);
+        }
 
-        var stores = await db.DataSettings.AsNoTracking()
-            .Where(s => s.Country == country && s.StoreID != null)
-            .Select(s => new { s.StoreID, s.PBFullname })
-            .Distinct()
-            .ToListAsync(ct);
-        var storeName = stores
-            .Where(s => s.StoreID != null)
-            .GroupBy(s => s.StoreID!)
-            .ToDictionary(g => g.Key, g => g.First().PBFullname ?? "");
+        var storeNamesTask = LoadStoreNames();
+        var divNamesTask   = LoadDivNames();
+        var savedTask      = LoadSaved();
+        await Task.WhenAll(storeNamesTask, divNamesTask, savedTask);
 
-        var divNames = await db.Divisions.AsNoTracking()
-            .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? "", ct);
-
-        var saved = await db.LpmEomOutputs.AsNoTracking()
-            .Where(e => e.Country == country && e.Year1 == year && e.Month1 == month)
-            .OrderBy(e => e.DivCode).ThenBy(e => e.StoreID)
-            .ToListAsync(ct);
+        var storeName = await storeNamesTask;
+        var divNames  = await divNamesTask;
+        var saved     = await savedTask;
 
         var rows = saved.Select(e => new EomRow
         {

@@ -1161,20 +1161,22 @@
         _running = true; StateHasChanged();
         try
         {
-            _readiness = await Eom.CheckAsync(_country, _year, _month);
-            // Auto-load any saved EOM output for this scope so user sees it immediately.
-            var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
+            // 1.14.3 perf: readiness check and saved-output fetch share no
+            // data — fire both in parallel so page-open time drops to
+            // max(check, saved) instead of sum-of-both.
+            var checkTask = Eom.CheckAsync(_country, _year, _month);
+            var savedTask = Eom.GetSavedAsync(_country, _year, _month);
+            await Task.WhenAll(checkTask, savedTask);
+            _readiness = await checkTask;
+            var (rows, last) = await savedTask;
             if (rows.Count > 0)
             {
                 _preview = rows;
                 _savedAt = last;
                 _previewLabel = "Saved Output";
-                // 1.13.2 perf: do NOT load the stock breakdown here. It runs
-                // a heavy multi-CTE query that easily adds 3–10 s to the
-                // page-open time on a busy DB. Instead we lazy-load it the
-                // first time the planner clicks the Division Summary tab
-                // (see OnTabChanged below). Clear the cached values so a
-                // country/year/month change forces a refresh on next view.
+                // 1.13.2 perf: stock breakdown lazy-loads on Division Summary
+                // tab click — see OnTabChanged. Clear cached values so a
+                // country/year/month change triggers a refetch.
                 _divStock = new();
                 _divStockLoadedForScope = null;
             }

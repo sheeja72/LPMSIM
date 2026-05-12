@@ -23,6 +23,19 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.3 — EOM Generate: more parallelism (2026-05-12)
+
+### Performance
+- **Two further EOM Generate perf wins on top of 1.13.2.** The page-open path was still spending real time inside `GetSavedAsync` (the saved-output fetch) — that work now runs concurrently with the readiness check and is itself parallelised internally.
+  1. **`CheckAsync` and `GetSavedAsync` now run in parallel** on the Razor side via `Task.WhenAll`. They share no state, so the page-open wait is now `max(check, saved)` instead of `check + saved`.
+  2. **The 3 independent queries inside `GetSavedAsync`** — DataSettings (store names), Divisions (division names), and LpmEomOutputs (saved rows) — also run in parallel, each with its own DbContext. Same pattern as `CheckAsync` from 1.13.2.
+
+### Notes
+- No SQL change, no schema change. Just reshapes the await-graph.
+- All three GetSavedAsync callers (page open / View Saved button / post-Approve refresh) benefit.
+
+---
+
 ## 1.14.2 — Variance Report: split Itemmaster lookup, fix 0-rows bug (2026-05-12)
 
 ### Fixed
