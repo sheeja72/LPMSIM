@@ -35,10 +35,10 @@
            via OnCountryChanged below. Master-table-driven dropdowns (Type
            Name, Pallet Category, Division, Department) stay global. *@
         <MudItem xs="12" sm="6" md="2">
-            <MudSelect T="string" Label="Country" Value="_filter.Country"
+            <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="@OnCountryChanged"
                        Variant="Variant.Outlined" Margin="Margin.Dense"
-                       Class="@(string.Equals(_filter.Country, "UAE", StringComparison.OrdinalIgnoreCase) ? "" : "lpm-filter-active")">
+                       Class="@(string.Equals(_country, "UAE", StringComparison.OrdinalIgnoreCase) ? "" : "lpm-filter-active")">
                 @foreach (var c in _countries)
                 {
                     <MudSelectItem T="string" Value="@c">@c</MudSelectItem>
@@ -46,34 +46,28 @@
             </MudSelect>
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="Warehouse" Value="_filter.Warehouse"
-                             ValueChanged="v => { _filter = _filter with { Warehouse = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_warehouses, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.Warehouse)" />
+            <MultiSelectFilter Label="Warehouse"
+                               Items="_warehouses"
+                               Selected="_selectedWarehouses"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedWarehouses = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="Type Name" Value="_filter.TypeName"
-                             ValueChanged="v => { _filter = _filter with { TypeName = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_typeNames, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.TypeName)" />
+            <MultiSelectFilter Label="Type Name"
+                               Items="_typeNames"
+                               Selected="_selectedTypeNames"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedTypeNames = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="Pallet Category" Value="_filter.PalletCategory"
-                             ValueChanged="v => { _filter = _filter with { PalletCategory = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_palletCategories, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.PalletCategory)" />
+            <MultiSelectFilter Label="Pallet Category"
+                               Items="_palletCategories"
+                               Selected="_selectedPalletCategories"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedPalletCategories = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
-            <MudSelect T="LpmPresence" Label="LPM Status" Value="_filter.LpmStatus"
-                       ValueChanged="v => { _filter = _filter with { LpmStatus = v }; StateHasChanged(); }"
+            <MudSelect T="LpmPresence" Label="LPM Status" Value="_lpmStatus"
+                       ValueChanged="v => { _lpmStatus = v; StateHasChanged(); }"
                        Variant="Variant.Outlined" Margin="Margin.Dense"
-                       Class="@(_filter.LpmStatus == LpmPresence.Any ? "" : "lpm-filter-active")">
+                       Class="@(_lpmStatus == LpmPresence.Any ? "" : "lpm-filter-active")">
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.Any">Any</MudSelectItem>
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.HasLpm">Has LPM</MudSelectItem>
                 <MudSelectItem T="LpmPresence" Value="LpmPresence.NoLpm">No LPM (blank)</MudSelectItem>
@@ -83,20 +77,18 @@
            racks.dbo.whboxitems.LPM. Different from "LPM Status" above which
            only filters on presence (Any / Has / No). Empty = no filter. *@
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="LPM (month)" Value="_filter.Lpm"
-                             ValueChanged="v => { _filter = _filter with { Lpm = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_lpms, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.Lpm)" />
+            <MultiSelectFilter Label="LPM (month)"
+                               Items="_lpms"
+                               Selected="_selectedLpms"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedLpms = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="8" md="2">
             <MudTextField T="string" Label="Pallet / Box contains"
-                          Value="_filter.Search"
-                          ValueChanged="v => { _filter = _filter with { Search = v }; StateHasChanged(); }"
+                          Value="_search"
+                          ValueChanged="v => { _search = v; StateHasChanged(); }"
                           Variant="Variant.Outlined" Margin="Margin.Dense" Clearable="true"
                           Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search"
-                          Class="@ActiveCls(_filter.Search)" />
+                          Class="@ActiveCls(_search)" />
         </MudItem>
         <MudItem xs="12" sm="4" md="2">
             <MudSelect T="WhGroupBy" Label="Group By" Value="_groupBy"
@@ -110,41 +102,32 @@
             </MudSelect>
         </MudItem>
 
-        @* Row 2 — Division / Department / Brand filters + Non-Purchased toggle + Load + Export *@
+        @* Row 2 — Division / Department / Brand / ContNo filters (all multi-select),
+           Non-Purchased toggle, Load + Export. *@
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="Division" Value="_filter.Division"
-                             ValueChanged="v => { _filter = _filter with { Division = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_divisions, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.Division)" />
+            <MultiSelectFilter Label="Division"
+                               Items="_divisions"
+                               Selected="_selectedDivisions"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDivisions = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="Department" Value="_filter.Department"
-                             ValueChanged="v => { _filter = _filter with { Department = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_departments, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.Department)" />
+            <MultiSelectFilter Label="Department"
+                               Items="_departments"
+                               Selected="_selectedDepartments"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDepartments = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="Brand" Value="_filter.Brand"
-                             ValueChanged="v => { _filter = _filter with { Brand = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_brands, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.Brand)" />
+            <MultiSelectFilter Label="Brand"
+                               Items="_brands"
+                               Selected="_selectedBrands"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedBrands = s; StateHasChanged(); })" />
         </MudItem>
-        @* Container No (whboxitems.ContNo). Moved from row 1 to row 2 to make
-           space for the new Country dropdown — row 1 now holds Country +
-           Warehouse + TypeName + PalletCategory + LPM Status + LPM (month). *@
+        @* Container No (whboxitems.ContNo). *@
         <MudItem xs="12" sm="6" md="2">
-            <MudAutocomplete T="string" Label="ContNo" Value="_filter.ContNo"
-                             ValueChanged="v => { _filter = _filter with { ContNo = v }; StateHasChanged(); }"
-                             SearchFunc="@((s, c) => Search(_contNos, s))"
-                             Variant="Variant.Outlined" Margin="Margin.Dense"
-                             CoerceText="true" ResetValueOnEmptyText="true" Clearable="true"
-                             Placeholder="All" Class="@ActiveCls(_filter.ContNo)" />
+            <MultiSelectFilter Label="ContNo"
+                               Items="_contNos"
+                               Selected="_selectedContNos"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedContNos = s; StateHasChanged(); })" />
         </MudItem>
         <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
             @* Default = OFF. When CHECKED, drops the ShopEligible <> 'E' filter
@@ -152,10 +135,10 @@
                ShopEligible='E') in the result. Same semantics as the
                "Include Non-Purchased Boxes" checkbox on SIM Generate.
                Highlighted whenever it's NOT the default of false. *@
-            <MudCheckBox T="bool" Value="_filter.IncludeNonPurchased"
-                         ValueChanged="v => { _filter = _filter with { IncludeNonPurchased = v }; StateHasChanged(); }"
+            <MudCheckBox T="bool" Value="_includeNonPurchased"
+                         ValueChanged="v => { _includeNonPurchased = v; StateHasChanged(); }"
                          Color="Color.Primary"
-                         Class="@(_filter.IncludeNonPurchased ? "lpm-filter-active" : "")"
+                         Class="@(_includeNonPurchased ? "lpm-filter-active" : "")"
                          Label="Include non-Purchased Boxes" />
         </MudItem>
         <MudItem xs="12" md="3" Class="d-flex align-center justify-end gap-2">
@@ -468,24 +451,51 @@ else if (!_loadedOnce)
     private List<string> _brands           = new();
     private List<string> _contNos          = new();
 
+    // Per-filter selection sets — these back the 8 MultiSelectFilter
+    // dropdowns added in 1.11.0. Empty set = no filter (every value passes).
+    // When the planner clicks Load, BuildFilter() packs these into a fresh
+    // WhBoxFilter to hand off to WarehouseQueryService.
+    private HashSet<string> _selectedWarehouses        = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedTypeNames         = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedPalletCategories  = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedLpms              = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedDivisions         = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedDepartments       = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedBrands            = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedContNos           = new(StringComparer.OrdinalIgnoreCase);
+
     // Result sets — only one is populated per Load depending on _groupBy.
     private List<WhBoxRow>        _rows       = new();
     private List<WhDivisionRow>   _divRows    = new();
     private List<WhDepartmentRow> _deptRows   = new();
     private List<WhBrandRow>      _brandRows  = new();
 
-    // IncludeNonPurchased defaults to FALSE — the planner sees only
-    // "available" boxes (ShopEligible <> 'E') by default. Tick the box to
-    // ALSO include the ShopEligible='E' rows (business term: "non-purchased").
-    // Same semantics as the SIM Generate "Include Non-Purchased Boxes" flag.
-    private WhBoxFilter _filter = new(
-        Warehouse: null, TypeName: null, PalletCategory: null,
-        Lpm: null, Search: null,
-        LpmStatus: LpmPresence.Any,
-        Division: null, Department: null, Brand: null,
-        IncludeNonPurchased: false,
-        ContNo: null,
-        Country: "UAE");
+    // Scalar filter state — Country (single), Search (free-text),
+    // LpmStatus (enum), IncludeNonPurchased (checkbox). These stay
+    // single-value by design (see Q1/Q2 in the 1.11.0 spec).
+    private string _country = "UAE";
+    private string? _search = null;
+    private LpmPresence _lpmStatus = LpmPresence.Any;
+    private bool _includeNonPurchased = false;
+
+    /// <summary>
+    /// Pack the current state into a WhBoxFilter for the query service.
+    /// Empty HashSets become null so the IN-clause helper drops the
+    /// filter entirely (no AND col IN () fragment).
+    /// </summary>
+    private WhBoxFilter BuildFilter() => new(
+        Warehouse:           _selectedWarehouses.Count == 0       ? null : _selectedWarehouses.ToList(),
+        TypeName:            _selectedTypeNames.Count == 0        ? null : _selectedTypeNames.ToList(),
+        PalletCategory:      _selectedPalletCategories.Count == 0 ? null : _selectedPalletCategories.ToList(),
+        Lpm:                 _selectedLpms.Count == 0             ? null : _selectedLpms.ToList(),
+        Search:              _search,
+        LpmStatus:           _lpmStatus,
+        Division:            _selectedDivisions.Count == 0        ? null : _selectedDivisions.ToList(),
+        Department:          _selectedDepartments.Count == 0      ? null : _selectedDepartments.ToList(),
+        Brand:               _selectedBrands.Count == 0           ? null : _selectedBrands.ToList(),
+        IncludeNonPurchased: _includeNonPurchased,
+        ContNo:              _selectedContNos.Count == 0          ? null : _selectedContNos.ToList(),
+        Country:             _country);
 
     /// <summary>
     /// Country dropdown handler — kept as a named method (instead of inline in
@@ -505,28 +515,23 @@ else if (!_loadedOnce)
     /// </summary>
     private async Task OnCountryChanged(string? v)
     {
-        var c = string.IsNullOrWhiteSpace(v) ? "UAE" : v;
-        // Reset country-specific filter values — the previously-selected
-        // warehouse/LPM/ContNo/Brand may not exist in the new country's data,
-        // and silently keeping a stale value would return zero rows on Load.
-        _filter = _filter with
-        {
-            Country   = c,
-            Warehouse = null,
-            Lpm       = null,
-            ContNo    = null,
-            Brand     = null,
-        };
+        _country = string.IsNullOrWhiteSpace(v) ? "UAE" : v;
+        // Reset country-specific filter selections — the previously-selected
+        // warehouse/LPM/ContNo/Brand may not exist in the new country's data.
+        _selectedWarehouses.Clear();
+        _selectedLpms.Clear();
+        _selectedContNos.Clear();
+        _selectedBrands.Clear();
         try
         {
-            _warehouses = await Warehouse.GetWarehousesAsync(c);
-            _lpms       = await Warehouse.GetLpmsAsync(c);
-            _contNos    = await Warehouse.GetContNosAsync(c);
-            _brands     = await Warehouse.GetDistinctBrandsAsync(c);
+            _warehouses = await Warehouse.GetWarehousesAsync(_country);
+            _lpms       = await Warehouse.GetLpmsAsync(_country);
+            _contNos    = await Warehouse.GetContNosAsync(_country);
+            _brands     = await Warehouse.GetDistinctBrandsAsync(_country);
         }
         catch (Exception ex)
         {
-            Snackbar.Add($"Could not load filter lists for {c}: {ex.Message}", Severity.Error);
+            Snackbar.Add($"Could not load filter lists for {_country}: {ex.Message}", Severity.Error);
         }
         StateHasChanged();
     }
@@ -730,6 +735,7 @@ else if (!_loadedOnce)
     {
         _loading = true; StateHasChanged();
         var started = DateTime.Now;
+        var filter = BuildFilter();
         // Clear ALL result sets so a previous Group By's rows don't leak into
         // the new view if the user switches mode without re-Loading.
         _rows.Clear(); _divRows.Clear(); _deptRows.Clear(); _brandRows.Clear();
@@ -739,21 +745,21 @@ else if (!_loadedOnce)
             switch (_groupBy)
             {
                 case WhGroupBy.Box:
-                    _rows = await Warehouse.GetBoxesAsync(_filter, _topLimit);
+                    _rows = await Warehouse.GetBoxesAsync(filter, _topLimit);
                     rowCount = _rows.Count;
                     if (rowCount >= _topLimit)
                         Snackbar.Add($"Result capped at {_topLimit:N0} rows. Narrow the filter to see more.", Severity.Warning);
                     break;
                 case WhGroupBy.Division:
-                    _divRows = await Warehouse.GetDivisionSummaryAsync(_filter);
+                    _divRows = await Warehouse.GetDivisionSummaryAsync(filter);
                     rowCount = _divRows.Count;
                     break;
                 case WhGroupBy.Department:
-                    _deptRows = await Warehouse.GetDepartmentSummaryAsync(_filter);
+                    _deptRows = await Warehouse.GetDepartmentSummaryAsync(filter);
                     rowCount = _deptRows.Count;
                     break;
                 case WhGroupBy.Brand:
-                    _brandRows = await Warehouse.GetBrandSummaryAsync(_filter);
+                    _brandRows = await Warehouse.GetBrandSummaryAsync(filter);
                     rowCount = _brandRows.Count;
                     break;
                 default:
@@ -765,7 +771,7 @@ else if (!_loadedOnce)
             await ActionLog.LogAsync(
                 "WarehouseBoxes.Load",
                 $"{started:yyyyMMddHHmmss}",
-                new { groupBy = _groupBy.ToString(), filter = _filter, rows = rowCount, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
+                new { groupBy = _groupBy.ToString(), filter = filter, rows = rowCount, elapsedMs = (int)(DateTime.Now - started).TotalMilliseconds });
         }
         catch (Exception ex)
         {
@@ -773,7 +779,7 @@ else if (!_loadedOnce)
             await ActionLog.LogAsync(
                 "WarehouseBoxes.Load",
                 $"{started:yyyyMMddHHmmss}-error",
-                new { groupBy = _groupBy.ToString(), filter = _filter, error = ex.Message });
+                new { groupBy = _groupBy.ToString(), filter = filter, error = ex.Message });
         }
         finally
         {

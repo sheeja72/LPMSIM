@@ -1,3 +1,4 @@
+using System.Text;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 
@@ -17,23 +18,26 @@ public enum LpmPresence { Any = 0, HasLpm = 1, NoLpm = 2 }
 public enum WhGroupBy { Box = 0, Division = 1, Department = 2, Brand = 3 }
 
 public record WhBoxFilter(
-    string? Warehouse,
-    string? TypeName,
-    string? PalletCategory,
-    string? Lpm,                                       // LPM month tag (whboxitems.LPM) — separate from Brand
+    // The 8 list-shaped filters below moved from single nullable string to
+    // IReadOnlyList<string>? in 1.11.0. Each one is rendered as a
+    // MultiSelectFilter checkbox dropdown on the Warehouse Boxes page; the
+    // SQL queries build an IN (@p0, @p1, …) clause per non-empty list.
+    // null OR empty list = no filter (every value passes).
+    IReadOnlyList<string>? Warehouse,
+    IReadOnlyList<string>? TypeName,
+    IReadOnlyList<string>? PalletCategory,
+    IReadOnlyList<string>? Lpm,                        // LPM month tag (whboxitems.LPM) — separate from Brand
     string? Search,
     LpmPresence LpmStatus = LpmPresence.Any,
-    string? Division = null,
-    string? Department = null,
-    string? Brand = null,                              // whboxitems.Brand (the real brand)
+    IReadOnlyList<string>? Division = null,
+    IReadOnlyList<string>? Department = null,
+    IReadOnlyList<string>? Brand = null,               // whboxitems.Brand (the real brand)
     // Default OFF — same default behaviour as before (filter ShopEligible='E'
     // out of the result). When the planner checks the box, the
     // `ShopEligible <> 'E'` filter is dropped and "non-purchased" boxes
     // (the business term for ShopEligible='E') are also included.
-    // Renamed from `NonPurchasedOnly` (which had inverted semantics — was
-    // TRUE meaning "apply the filter") to match the SIM Generate flag.
     bool IncludeNonPurchased = false,
-    string? ContNo  = null,                            // racks.dbo.whboxitems.ContNo — container number filter
+    IReadOnlyList<string>? ContNo = null,              // racks.dbo.whboxitems.ContNo — container number filter
     string? Country = "UAE");                          // SIMCountry — drives data source: UAE→racks, others→<DataName>.dbo.WHBoxItemsExport
 
 public record WhBoxRow(
@@ -244,6 +248,13 @@ public class WarehouseQueryService(IConfiguration cfg)
         var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
         var country = string.IsNullOrWhiteSpace(filter.Country) ? "UAE" : filter.Country!;
 
+        // Build dynamic filter fragments — each non-empty list filter becomes
+        // an AND col IN (@p0, @p1, ...) clause; the scalar filters (search,
+        // lpmStatus, includeNonPurchased) are still single parameters.
+        // Division / Department go into HAVING here because the per-box
+        // aggregate uses MAX(scm.Division) / MAX(scm.Department).
+        var (whereExtra, havingExtra, filterParams) = BuildFilterClauses(filter, divDeptInHaving: true);
+
         var sql = $@"
             SELECT TOP (@top)
                    @country AS Country,
@@ -270,12 +281,8 @@ public class WarehouseQueryService(IConfiguration cfg)
                    WHERE u.itemcode = w.ItemCode
                    ORDER BY sm.Division
               ) scm
-             WHERE (@warehouse IS NULL OR w.Warehouse = @warehouse)
-               AND (@typeName IS NULL OR pt.TypeName = @typeName)
-               AND (@palletCategory IS NULL OR pt.PalletCategory = @palletCategory)
-               AND (@lpm IS NULL OR w.LPM = @lpm)
-               AND (@brand IS NULL OR w.Brand = @brand)
-               AND (@contNo IS NULL OR w.ContNo = @contNo)
+             WHERE 1 = 1
+               {whereExtra}
                AND (@lpmStatus = 0
                     OR (@lpmStatus = 1 AND w.LPMDt IS NOT NULL)
                     OR (@lpmStatus = 2 AND w.LPMDt IS NULL))
@@ -290,12 +297,11 @@ public class WarehouseQueryService(IConfiguration cfg)
                     OR w.ShopEligible IS NULL
                     OR w.ShopEligible <> 'E')
              GROUP BY w.Warehouse, w.PalletNo, w.BoxNo, w.PalletType, pt.TypeName, pt.PalletCategory
-            HAVING (@division   IS NULL OR MAX(scm.Division)   = @division)
-               AND (@department IS NULL OR MAX(scm.Department) = @department)
+            HAVING 1 = 1 {havingExtra}
              ORDER BY w.Warehouse, w.PalletNo, w.BoxNo;";
 
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 180 };
-        AddFilterParams(cmd, filter);
+        foreach (var p in filterParams) cmd.Parameters.Add(p);
         cmd.Parameters.Add(new SqlParameter("@top",     top));
         cmd.Parameters.Add(new SqlParameter("@country", country));
 
@@ -333,14 +339,16 @@ public class WarehouseQueryService(IConfiguration cfg)
         await conn.OpenAsync(ct);
         var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
 
+        var (whereExtra, _, filterParams) = BuildFilterClauses(filter, divDeptInHaving: false);
+
         var sql = $@"
             DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
-            {SummarySelect(level: "div", src: src)}
+            {SummarySelect(level: "div", src: src, whereExtra: whereExtra)}
              GROUP BY sm.Division
              ORDER BY sm.Division;";
 
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 240 };
-        AddFilterParams(cmd, filter);
+        foreach (var p in filterParams) cmd.Parameters.Add(p);
 
         var rows = new List<WhDivisionRow>();
         using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -361,14 +369,16 @@ public class WarehouseQueryService(IConfiguration cfg)
         await conn.OpenAsync(ct);
         var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
 
+        var (whereExtra, _, filterParams) = BuildFilterClauses(filter, divDeptInHaving: false);
+
         var sql = $@"
             DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
-            {SummarySelect(level: "dept", src: src)}
+            {SummarySelect(level: "dept", src: src, whereExtra: whereExtra)}
              GROUP BY sm.Division, sm.Department
              ORDER BY sm.Division, sm.Department;";
 
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 240 };
-        AddFilterParams(cmd, filter);
+        foreach (var p in filterParams) cmd.Parameters.Add(p);
 
         var rows = new List<WhDepartmentRow>();
         using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -390,14 +400,16 @@ public class WarehouseQueryService(IConfiguration cfg)
         await conn.OpenAsync(ct);
         var src = await WhBoxItemsSource.ResolveAsync(conn, filter.Country, ct);
 
+        var (whereExtra, _, filterParams) = BuildFilterClauses(filter, divDeptInHaving: false);
+
         var sql = $@"
             DECLARE @nextMonthStart date = DATEADD(MONTH, 1, DATEFROMPARTS(YEAR(GETDATE()), MONTH(GETDATE()), 1));
-            {SummarySelect(level: "brand", src: src)}
+            {SummarySelect(level: "brand", src: src, whereExtra: whereExtra)}
              GROUP BY sm.Division, sm.Department, w.Brand
              ORDER BY sm.Division, sm.Department, w.Brand;";
 
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 240 };
-        AddFilterParams(cmd, filter);
+        foreach (var p in filterParams) cmd.Parameters.Add(p);
 
         var rows = new List<WhBrandRow>();
         using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -421,11 +433,17 @@ public class WarehouseQueryService(IConfiguration cfg)
     /// (<paramref name="src"/>) is resolved by the caller per-country (UAE
     /// → racks.dbo.whboxitems; other → [&lt;DataName&gt;].dbo.WHBoxItemsExport).
     /// </summary>
-    private static string SummarySelect(string level, string src)
+    private static string SummarySelect(string level, string src, string whereExtra)
     {
         // Per-level SELECT prefix: division/department/brand columns shown
         // depend on which level the user picked. The 3 qty columns
         // (LPM Current / LPM Future / Non-LPM) are identical in every mode.
+        //
+        // <paramref name="whereExtra"/> comes from BuildFilterClauses — it
+        // contains the dynamic IN (@p0, @p1, ...) clauses for the 8
+        // list-shaped filters. Division/Department are included in
+        // whereExtra here (not HAVING) because the summary GROUP BY is on
+        // sm.Division / sm.Department directly, not on MAX(scm.Division).
         string selectCols = level switch
         {
             "div"   => "sm.Division",
@@ -443,12 +461,8 @@ public class WarehouseQueryService(IConfiguration cfg)
               INNER JOIN bfldata.dbo.pallettype          pt ON pt.PalletType = w.PalletType
               INNER JOIN Datareporting.dbo.upc_subclass    u ON u.itemcode    = w.ItemCode
               INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID      = u.MH4ID
-             WHERE (@warehouse IS NULL OR w.Warehouse = @warehouse)
-               AND (@typeName IS NULL OR pt.TypeName = @typeName)
-               AND (@palletCategory IS NULL OR pt.PalletCategory = @palletCategory)
-               AND (@lpm IS NULL OR w.LPM = @lpm)
-               AND (@brand IS NULL OR w.Brand = @brand)
-               AND (@contNo IS NULL OR w.ContNo = @contNo)
+             WHERE 1 = 1
+               {whereExtra}
                AND (@lpmStatus = 0
                     OR (@lpmStatus = 1 AND w.LPMDt IS NOT NULL)
                     OR (@lpmStatus = 2 AND w.LPMDt IS NULL))
@@ -461,28 +475,99 @@ public class WarehouseQueryService(IConfiguration cfg)
                -- boxes — same behaviour as before).
                AND (@includeNonPurchased = 1
                     OR w.ShopEligible IS NULL
-                    OR w.ShopEligible <> 'E')
-               AND (@division   IS NULL OR sm.Division   = @division)
-               AND (@department IS NULL OR sm.Department = @department)";
+                    OR w.ShopEligible <> 'E')";
     }
 
-    /// <summary>Attach all filter parameters once — both the detail and summary queries
-    /// accept the same filter shape so we share the binding code.</summary>
-    private static void AddFilterParams(SqlCommand cmd, WhBoxFilter filter)
+    /// <summary>
+    /// Build an <c>AND col IN (@p0, @p1, ...)</c> fragment from a list of
+    /// values. Returns empty fragment + empty params when the list is null
+    /// / empty / contains only blanks. Each parameter gets a unique name
+    /// using <paramref name="prefix"/> so multiple IN-clauses can share the
+    /// same command without colliding.
+    /// </summary>
+    private static (string fragment, List<SqlParameter> parameters)
+        BuildInClause(string colExpr, IReadOnlyList<string>? values, string prefix)
     {
-        cmd.Parameters.Add(new SqlParameter("@warehouse",      (object?)filter.Warehouse      ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@typeName",       (object?)filter.TypeName       ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@palletCategory", (object?)filter.PalletCategory ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@lpm",            (object?)filter.Lpm            ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@lpmStatus",      (int)filter.LpmStatus));
-        cmd.Parameters.Add(new SqlParameter("@search",         (object?)filter.Search         ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@searchLike",
+        if (values is null || values.Count == 0) return ("", new List<SqlParameter>());
+        var distinct = values
+            .Where(v => !string.IsNullOrWhiteSpace(v))
+            .Select(v => v.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (distinct.Count == 0) return ("", new List<SqlParameter>());
+
+        var paramNames = new List<string>(distinct.Count);
+        var parms      = new List<SqlParameter>(distinct.Count);
+        for (int i = 0; i < distinct.Count; i++)
+        {
+            var name = $"@{prefix}{i}";
+            paramNames.Add(name);
+            parms.Add(new SqlParameter(name, distinct[i]));
+        }
+        return ($" AND {colExpr} IN ({string.Join(", ", paramNames)})", parms);
+    }
+
+    /// <summary>
+    /// Builds the per-filter SQL fragments + parameters for a WhBoxFilter.
+    /// Multi-value filters become IN-clauses; single-value fields stay as
+    /// scalar parameters (search, lpmStatus, includeNonPurchased).
+    ///
+    /// <para>
+    /// Division and Department go into DIFFERENT clauses depending on the
+    /// caller: the per-Box detail query (GetBoxesAsync) aggregates per box
+    /// and filters Division/Department in HAVING using MAX(...). The
+    /// summary queries (GetDivisionSummaryAsync etc.) join row-by-row and
+    /// filter in WHERE on sm.Division / sm.Department. The
+    /// <paramref name="divDeptInHaving"/> flag picks which clause receives
+    /// the Division/Department filters.
+    /// </para>
+    /// </summary>
+    private static (string whereFragment, string havingFragment, List<SqlParameter> parameters)
+        BuildFilterClauses(WhBoxFilter filter, bool divDeptInHaving)
+    {
+        var whereSb  = new StringBuilder();
+        var havingSb = new StringBuilder();
+        var parms    = new List<SqlParameter>();
+
+        void AppendWhere(string colExpr, IReadOnlyList<string>? values, string prefix)
+        {
+            var (frag, p) = BuildInClause(colExpr, values, prefix);
+            whereSb.Append(frag);
+            parms.AddRange(p);
+        }
+
+        // Shared multi-value filters (detail + summary).
+        AppendWhere("w.Warehouse",       filter.Warehouse,      "wh");
+        AppendWhere("pt.TypeName",       filter.TypeName,       "tn");
+        AppendWhere("pt.PalletCategory", filter.PalletCategory, "pc");
+        AppendWhere("w.LPM",             filter.Lpm,            "lpm");
+        AppendWhere("w.Brand",           filter.Brand,          "br");
+        AppendWhere("w.ContNo",          filter.ContNo,         "co");
+
+        // Division / Department — placement depends on caller (see XML doc).
+        if (divDeptInHaving)
+        {
+            var (divFrag, divP)   = BuildInClause("MAX(scm.Division)",   filter.Division,   "div");
+            var (deptFrag, deptP) = BuildInClause("MAX(scm.Department)", filter.Department, "dept");
+            havingSb.Append(divFrag);
+            havingSb.Append(deptFrag);
+            parms.AddRange(divP);
+            parms.AddRange(deptP);
+        }
+        else
+        {
+            AppendWhere("sm.Division",   filter.Division,   "div");
+            AppendWhere("sm.Department", filter.Department, "dept");
+        }
+
+        // Scalar params — shared by both query shapes.
+        parms.Add(new SqlParameter("@lpmStatus",  (int)filter.LpmStatus));
+        parms.Add(new SqlParameter("@search",     (object?)filter.Search ?? DBNull.Value));
+        parms.Add(new SqlParameter("@searchLike",
             string.IsNullOrWhiteSpace(filter.Search) ? DBNull.Value : (object)$"%{filter.Search}%"));
-        cmd.Parameters.Add(new SqlParameter("@division",       (object?)filter.Division       ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@department",     (object?)filter.Department     ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@brand",          (object?)filter.Brand          ?? DBNull.Value));
-        cmd.Parameters.Add(new SqlParameter("@includeNonPurchased", filter.IncludeNonPurchased ? 1 : 0));
-        cmd.Parameters.Add(new SqlParameter("@contNo",         (object?)filter.ContNo         ?? DBNull.Value));
+        parms.Add(new SqlParameter("@includeNonPurchased", filter.IncludeNonPurchased ? 1 : 0));
+
+        return (whereSb.ToString(), havingSb.ToString(), parms);
     }
 
     private async Task<List<string>> ReadStringsAsync(string sql, CancellationToken ct)
