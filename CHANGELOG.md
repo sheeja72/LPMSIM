@@ -23,6 +23,19 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.2 — Variance Report: split Itemmaster lookup, fix 0-rows bug (2026-05-12)
+
+### Fixed
+- **Variance Report was returning 0 rows even when divisions with known variance were selected** (and the load was slow). Root cause: the inline `LEFT JOIN HODATA.dbo.Itemmaster` cross-database join was either confusing the SQL Server query planner OR silently filtering due to an implicit type mismatch between `Itemmaster.Itemcode` and `LPM_LocStock.ItemCode`. Moved the description lookup to a **separate C# round-trip** after the main variance query completes — same end result, much more reliable.
+- Variance query now runs without any cross-DB join; the second query pulls only the descriptions for the distinct itemcodes that came back, with an explicit `CAST(Itemcode AS nvarchar(64))` on both sides of the IN-clause to neutralise any type-mismatch.
+- Description lookup wrapped in a try/catch — if HODATA can't be reached, the page still shows variance numbers with blank descriptions instead of failing outright.
+
+### Notes
+- No schema or business-rule change. Same data, same totals, same ABS(Variance) DESC sort.
+- Expect faster load times in addition to the bug fix — single-DB query plans are simpler than cross-DB ones.
+
+---
+
 ## 1.14.1 — Variance Report: remove 10K row cap (2026-05-12)
 
 ### Changed

@@ -173,13 +173,13 @@ public class VarianceReportService(IConfiguration cfg)
                    {whSearch}
                  GROUP BY w.ItemCode, ISNULL(id.Division, '(no division)')
             )
-            -- 1.14.1: TOP cap removed. The variance-only filter keeps the
-            -- result set bounded in normal use, and capping was making it
-            -- impossible to see every contributor to a large gap. If a
-            -- country grows to truly huge variance row counts, the
-            -- planner can narrow via Division / Itemcode search.
+            -- 1.14.2: cross-DB Itemmaster JOIN moved to a separate C# round-
+            -- trip below. Keeping it inline was either (a) blowing up the
+            -- query plan and causing very slow runs, or (b) silently
+            -- filtering rows when ItemCode types differed across DBs.
+            -- Variance-only filter keeps the result set bounded in normal
+            -- use; planner can narrow via Division / Itemcode search.
             SELECT COALESCE(h.ItemCode, w.ItemCode)        AS ItemCode,
-                   ISNULL(im.description, '')              AS ItemName,
                    COALESCE(h.Division, w.Division)        AS Division,
                    ISNULL(h.HOStock, 0)                    AS HOStock,
                    ISNULL(w.WHStock, 0)                    AS WHStock,
@@ -188,12 +188,6 @@ public class VarianceReportService(IConfiguration cfg)
               FULL OUTER JOIN WHByItem w
                        ON w.ItemCode = h.ItemCode
                       AND w.Division = h.Division
-              -- Item description from HODATA.dbo.Itemmaster. Single global
-              -- source for now — if non-UAE countries have their own
-              -- per-country Itemmaster, switch to [<DataName>].dbo.Itemmaster
-              -- via WhBoxItemsSource.ResolveAsync-like helper.
-              LEFT JOIN HODATA.dbo.Itemmaster im
-                       ON im.Itemcode = COALESCE(h.ItemCode, w.ItemCode)
              WHERE COALESCE(h.ItemCode, w.ItemCode) IS NOT NULL
                -- Per spec: ""only items which has Variance"". Drops items
                -- where HO and WH match exactly (including 0=0 rows).
@@ -205,19 +199,86 @@ public class VarianceReportService(IConfiguration cfg)
         foreach (var p in parms) cmd.Parameters.Add(p);
         cmd.Parameters.Add(new SqlParameter("@season", seasonCode));
 
+        // Pass 1: pull the variance rows without descriptions.
         var rows = new List<VarianceRow>();
+        var itemCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using (var rdr = await cmd.ExecuteReaderAsync(ct))
+        {
+            while (await rdr.ReadAsync(ct))
+            {
+                var ic = rdr.IsDBNull(0) ? "" : rdr.GetString(0);
+                if (!string.IsNullOrEmpty(ic)) itemCodes.Add(ic);
+                rows.Add(new VarianceRow(
+                    ItemCode: ic,
+                    ItemName: "",                                       // filled in pass 2
+                    Division: rdr.IsDBNull(1) ? "" : rdr.GetString(1),
+                    HoStock:  rdr.IsDBNull(2) ? 0L : rdr.GetInt64(2),
+                    WhStock:  rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3),
+                    Variance: rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4)));
+            }
+        }
+
+        // Pass 2: fetch descriptions for the distinct itemcodes that came
+        // back. Non-fatal if it fails — empty descriptions are a tolerable
+        // degradation, the variance numbers are the important part.
+        if (itemCodes.Count > 0)
+        {
+            try
+            {
+                var descs = await FetchItemDescriptionsAsync(conn, itemCodes, ct);
+                for (int i = 0; i < rows.Count; i++)
+                {
+                    if (descs.TryGetValue(rows[i].ItemCode, out var d))
+                        rows[i] = rows[i] with { ItemName = d };
+                }
+            }
+            catch
+            {
+                // Swallow — descriptions are nice-to-have, not load-blocking.
+            }
+        }
+        return rows;
+    }
+
+    /// <summary>
+    /// Fetch <c>HODATA.dbo.Itemmaster.description</c> for the given set of
+    /// itemcodes. Uses a parameterised IN-clause and treats itemcode as
+    /// nvarchar to avoid implicit-type-conversion surprises (which is what
+    /// most likely killed the inline JOIN in 1.14.0/1.14.1).
+    /// </summary>
+    private static async Task<Dictionary<string, string>> FetchItemDescriptionsAsync(
+        SqlConnection conn, HashSet<string> itemCodes, CancellationToken ct)
+    {
+        var sb = new StringBuilder();
+        var parms = new List<SqlParameter>();
+        int i = 0;
+        foreach (var ic in itemCodes)
+        {
+            if (i > 0) sb.Append(", ");
+            var name = $"@ic{i}";
+            sb.Append(name);
+            parms.Add(new SqlParameter(name, ic));
+            i++;
+        }
+        var sql = $@"
+            SELECT CAST(Itemcode AS nvarchar(64)) AS Itemcode,
+                   ISNULL(description, '')        AS Description
+              FROM HODATA.dbo.Itemmaster
+             WHERE CAST(Itemcode AS nvarchar(64)) IN ({sb});";
+
+        using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 60 };
+        foreach (var p in parms) cmd.Parameters.Add(p);
+
+        var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var rdr = await cmd.ExecuteReaderAsync(ct);
         while (await rdr.ReadAsync(ct))
         {
-            rows.Add(new VarianceRow(
-                ItemCode: rdr.IsDBNull(0) ? "" : rdr.GetString(0),
-                ItemName: rdr.IsDBNull(1) ? "" : rdr.GetString(1),
-                Division: rdr.IsDBNull(2) ? "" : rdr.GetString(2),
-                HoStock:  rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3),
-                WhStock:  rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4),
-                Variance: rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5)));
+            if (rdr.IsDBNull(0)) continue;
+            var key = rdr.GetString(0);
+            var val = rdr.IsDBNull(1) ? "" : rdr.GetString(1);
+            dict[key] = val;
         }
-        return rows;
+        return dict;
     }
 
     /// <summary>

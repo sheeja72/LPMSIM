@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.1</Version>
-    <AssemblyVersion>1.14.1.0</AssemblyVersion>
-    <FileVersion>1.14.1.0</FileVersion>
-    <InformationalVersion>1.14.1 (Variance Report — remove 10K row cap)</InformationalVersion>
+    <Version>1.14.2</Version>
+    <AssemblyVersion>1.14.2.0</AssemblyVersion>
+    <FileVersion>1.14.2.0</FileVersion>
+    <InformationalVersion>1.14.2 (Variance Report — split Itemmaster lookup)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
