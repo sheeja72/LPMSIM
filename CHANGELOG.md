@@ -23,6 +23,19 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.1 — Variance Report: remove 10K row cap (2026-05-12)
+
+### Changed
+- **The 10,000-row safety cap on the Variance Report is removed.** Real-world prod data has more than 10K items contributing to the total variance, so the cap was hiding rows the planner needs to investigate. Result set is now unbounded — every (Item × Division) row where HO ≠ WH is returned.
+- Removed the "Result capped at 10,000 rows" Snackbar warning and the metric-card subtitle hint.
+
+### Notes
+- `MudTablePager` still paginates the on-screen display (50 / 100 / 200 / 500 per page selectable).
+- Excel export captures the full row set, not just the visible page.
+- If a country's variance grows to very large row counts and the page feels slow, narrow via the Division multi-select or Itemcode contains-search before hitting Load.
+
+---
+
 ## 1.14.0 — Reports → Variance Report (item-level) (2026-05-12)
 
 ### Added

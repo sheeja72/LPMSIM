@@ -96,7 +96,7 @@
         <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
             <div class="lpm-metric-label">Items with variance</div>
             <div class="lpm-metric-value">@_rows.Count.ToString("N0")</div>
-            <div class="lpm-metric-sub">@(_rows.Count >= _topLimit ? "capped at " + _topLimit.ToString("N0") : "result rows")</div>
+            <div class="lpm-metric-sub">result rows</div>
         </div></MudItem>
         <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-purple">
             <div class="lpm-metric-label">HO Stock (total)</div>
@@ -176,7 +176,6 @@ else
     private List<VarianceRow> _rows       = new();
     private bool              _loading;
     private bool              _loadedOnce;
-    private const int         _topLimit   = 10_000;
 
     protected override async Task OnInitializedAsync()
     {
@@ -208,14 +207,11 @@ else
             Country:    _country,
             Divisions:  _selectedDivisions.Count == 0 ? null : _selectedDivisions.ToList(),
             Season:     _season,
-            ItemSearch: string.IsNullOrWhiteSpace(_itemSearch) ? null : _itemSearch,
-            TopLimit:   _topLimit);
+            ItemSearch: string.IsNullOrWhiteSpace(_itemSearch) ? null : _itemSearch);
         try
         {
             _rows = await Report.GetAsync(filter);
             _loadedOnce = true;
-            if (_rows.Count >= _topLimit)
-                Snackbar.Add($"Result capped at {_topLimit:N0} rows. Narrow the filter to see more.", Severity.Warning);
             await ActionLog.LogAsync(
                 "Reports.Variance.Load",
                 $"{started:yyyyMMddHHmmss}",

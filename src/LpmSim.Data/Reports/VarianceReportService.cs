@@ -15,11 +15,7 @@ public record VarianceFilter(
     IReadOnlyList<string>? Divisions,
     WhHoSeason Season,
     /// <summary>Optional Itemcode contains-match (case-insensitive). Free-text narrowing.</summary>
-    string? ItemSearch,
-    /// <summary>Max rows to return — used as a safety cap. Variance-only
-    /// filter usually keeps this well below the cap; the cap is the
-    /// SAME pattern as Warehouse Boxes' _topLimit.</summary>
-    int TopLimit = 10_000);
+    string? ItemSearch);
 
 /// <summary>One row of the Variance Report — one per (Item × Division).</summary>
 /// <param name="ItemCode">Item code (raw key, may have leading zeros).</param>
@@ -177,8 +173,12 @@ public class VarianceReportService(IConfiguration cfg)
                    {whSearch}
                  GROUP BY w.ItemCode, ISNULL(id.Division, '(no division)')
             )
-            SELECT TOP (@top)
-                   COALESCE(h.ItemCode, w.ItemCode)        AS ItemCode,
+            -- 1.14.1: TOP cap removed. The variance-only filter keeps the
+            -- result set bounded in normal use, and capping was making it
+            -- impossible to see every contributor to a large gap. If a
+            -- country grows to truly huge variance row counts, the
+            -- planner can narrow via Division / Itemcode search.
+            SELECT COALESCE(h.ItemCode, w.ItemCode)        AS ItemCode,
                    ISNULL(im.description, '')              AS ItemName,
                    COALESCE(h.Division, w.Division)        AS Division,
                    ISNULL(h.HOStock, 0)                    AS HOStock,
@@ -204,7 +204,6 @@ public class VarianceReportService(IConfiguration cfg)
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 300 };
         foreach (var p in parms) cmd.Parameters.Add(p);
         cmd.Parameters.Add(new SqlParameter("@season", seasonCode));
-        cmd.Parameters.Add(new SqlParameter("@top", filter.TopLimit));
 
         var rows = new List<VarianceRow>();
         using var rdr = await cmd.ExecuteReaderAsync(ct);
