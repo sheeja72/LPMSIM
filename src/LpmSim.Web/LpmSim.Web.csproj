@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.7</Version>
-    <AssemblyVersion>1.14.7.0</AssemblyVersion>
-    <FileVersion>1.14.7.0</FileVersion>
-    <InformationalVersion>1.14.7 (EOM rule unification + revert theme to yellow)</InformationalVersion>
+    <Version>1.14.8</Version>
+    <AssemblyVersion>1.14.8.0</AssemblyVersion>
+    <FileVersion>1.14.8.0</FileVersion>
+    <InformationalVersion>1.14.8 (SKU Max - Shopname bridge for Rules 1-5 + Rule 4 HSCode revert)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

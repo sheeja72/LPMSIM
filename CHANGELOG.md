@@ -23,6 +23,31 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.8 — SKU Max exclusion rules: fix Shopname bridge + revert Rule 4 to HSCode (2026-05-12)
+
+### Fixed
+- **SKU Max Build's exclusion rules 1–5 were silently matching 0 rows** despite the source tables (`ExcludeExport_Planning` 430K, `RemoveItemsFromTransfer` 41K, `ExcludeItemsMFCS` 198, `ExcludeSubclass` 261, `DeptPriceMaxQty_MH4` 380) containing meaningful data. Audit table `LPM_SimItemSkuMaxExcluded` therefore showed only 2 distinct `SourceTable` values (`LPM_StoreDivAccess`, `LPM_StoreDeptAccess`) instead of 7.
+- **Root cause:** the rules joined `<exclusion>.Shopname = snap.StoreID`. LPM's `StoreID` is hyphenated (`BFL-DXD`, `LFL-MCT`); legacy exclusion tables use concatenated `Shopname` (`BFLAVENUES`, `EX2KUWAIT`). They never matched. ItemCode joins direct (confirmed via probe query — same values appear on both sides where present).
+- **Fix:** enriched `#SkuSnap` once with a `Shopname` column resolved via `OUTER APPLY dbo.DataSettings` (uses `(StoreID, SIMCountry)` to pick the country's row, falls back to a SIMCountry-IS-NULL row if any). Every rule below now joins on `snap.Shopname` instead of `snap.StoreID`. Rules 1, 2, 3, 5 just need this single column flip; Rule 4 also reverts to HSCode-based matching (see below).
+- **Rule 4 reverted to HSCode + upcbarcodes bridge** per `034_lpm_sim_skumax_exclusions.sql` original spec. The previous "direct Itemcode" join produced 0 matches because `ExcludeItemsMFCS.Itemcode` is sparse — the table is keyed by `HSCode`. Re-applies the HSCode bridge from `usa.dbo.upcbarcodes` BUT pre-filters upcbarcodes to only the HSCodes present in `ExcludeItemsMFCS` (≤198 rows) so the SkuSnap × upcbarcodes join can't blow up to the 282-trillion-row space the 1.9.5 implementation hit.
+- **Reversed XML doc comments** on `DivisionSummaryEom.WHStockPurchased` / `NonPurchased` / `EligibleStock` were already fixed in 1.14.7.
+
+### Behavioural change to expect
+- Next SKU Max Build will start producing **non-zero `excluded`** and **non-zero `price-capped`** counts. Could be large — `ExcludeExport_Planning` has 430K rows.
+- `LPM_SimItemSkuMaxExcluded` audit table will show **7 distinct `SourceTable` values** instead of 2.
+- Many items that were previously left at their per-Vol-Grp computed SKUMax will now drop to 0 (or be capped down).
+- The build's "Applying exclusion rules…" phase will take slightly longer (Rule 4 now has the upcbarcodes lookup). Rule 5's 14-minute timing is unrelated (the `Hodata.SalesPrice` CROSS APPLY) and isn't touched in this release.
+
+### Files
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `BuildItemSkuMaxAsync` only: snapshot enrichment + 5 rule joins + Rule 4 rewrite.
+
+### Notes
+- No schema change. No migration.
+- Other reports / SIM allocation / EOM Generate untouched.
+- If the new build produces TOO MANY exclusions and that surprises you, the migration spec (`034_lpm_sim_skumax_exclusions.sql`) is the authoritative source of which keys each rule matches — review against current data.
+
+---
+
 ## 1.14.7 — EOM rule unification + theme revert to yellow (2026-05-12)
 
 ### Changed — theme

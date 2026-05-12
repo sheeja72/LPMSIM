@@ -2628,10 +2628,27 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- modify SKUMax there, NOT directly on the target.
                     -- Faster (temp-to-temp) and lets us track per-rule
                     -- audit + per-row diff in a single coordinated pass.
-                    SELECT StoreID, ItemCode, Season, DivCode, SKUMax AS OrigSku
+                    --
+                    -- 1.14.8: Shopname column added via OUTER APPLY to
+                    -- DataSettings. LPM's StoreID is hyphenated
+                    -- (BFL-DXD, LFL-MCT) while every legacy exclusion
+                    -- table uses concatenated Shopname (BFLAVENUES,
+                    -- EX2KUWAIT). DataSettings.(StoreID, Shopname)
+                    -- bridges the two — pre-resolving here once means
+                    -- every rule below joins on snap.Shopname directly
+                    -- instead of repeating the lookup.
+                    SELECT n.StoreID, n.ItemCode, n.Season, n.DivCode, n.SKUMax AS OrigSku,
+                           ds.Shopname
                       INTO #SkuSnap
-                      FROM #NewSnap
-                     WHERE SKUMax > 0;
+                      FROM #NewSnap n
+                      OUTER APPLY (
+                          SELECT TOP 1 Shopname
+                            FROM dbo.DataSettings d
+                           WHERE d.StoreID = n.StoreID
+                             AND (d.SIMCountry = @country OR d.SIMCountry IS NULL)
+                           ORDER BY CASE WHEN d.SIMCountry = @country THEN 0 ELSE 1 END
+                      ) ds
+                     WHERE n.SKUMax > 0;
                     CREATE CLUSTERED INDEX IX_SkuSnap ON #SkuSnap (StoreID, ItemCode);
 
                     CREATE TABLE #ExcludeMatches (
@@ -2685,7 +2702,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- so there's no risk of half-applied rules in the apply
                     -- phase below.
 
-                    -- Rule 1 — usa.dbo.ExcludeExport_Planning (ShopName x ItemCode)
+                    -- Rule 1 — usa.dbo.ExcludeExport_Planning (Shopname x ItemCode).
+                    -- 1.14.8: was joining ep.Shopname = snap.StoreID which
+                    -- never matched (StoreID is hyphenated 'BFL-DXD',
+                    -- Shopname is concatenated 'BFLAVENUES'). Joined
+                    -- through snap.Shopname (resolved at snapshot time
+                    -- from DataSettings) so the IDs are in the right
+                    -- format. ItemCode matches directly (confirmed via
+                    -- probe — see 1.14.8 CHANGELOG).
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #ExcludeMatches
@@ -2696,8 +2720,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                NULL
                           FROM #SkuSnap snap
                           INNER JOIN usa.dbo.ExcludeExport_Planning ep
-                                  ON ep.Shopname = snap.StoreID
-                                 AND ep.ItemCode = snap.ItemCode;
+                                  ON ep.Shopname = snap.Shopname
+                                 AND ep.ItemCode = snap.ItemCode
+                         WHERE snap.Shopname IS NOT NULL;
                     END TRY
                     BEGIN CATCH SET @r1Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms1 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
@@ -2707,6 +2732,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- Shopname like the other 3 exclusion tables). Verified
                     -- live schema: USA.dbo.ExcludeSubclass(Subclass, Shop,
                     -- Trndate, Remarks, UserId, Inactive, MH4ID).
+                    -- 1.14.8: now joins es.Shop = snap.Shopname (the
+                    -- DataSettings-bridged value), was snap.StoreID which
+                    -- never matched. MH4ID join unchanged.
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #ExcludeMatches
@@ -2719,14 +2747,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           INNER JOIN Datareporting.dbo.upc_subclass us
                                   ON us.itemcode = snap.ItemCode
                           INNER JOIN usa.dbo.ExcludeSubclass es
-                                  ON es.Shop  = snap.StoreID
+                                  ON es.Shop  = snap.Shopname
                                  AND es.mh4id = us.MH4ID
-                         WHERE es.Inactive = 'N';
+                         WHERE es.Inactive = 'N'
+                           AND snap.Shopname IS NOT NULL;
                     END TRY
                     BEGIN CATCH SET @r2Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms2 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                    -- Rule 3 — bfldata.dbo.RemoveItemsFromTransfer (Itemcode x ShopName; trndate >= 2025-09-01)
+                    -- Rule 3 — bfldata.dbo.RemoveItemsFromTransfer (Itemcode x Shopname; trndate >= 2025-09-01)
+                    -- 1.14.8: was joining rt.shopname = snap.StoreID; flipped
+                    -- to snap.Shopname (DataSettings-bridged).
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #ExcludeMatches
@@ -2738,41 +2769,58 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           FROM #SkuSnap snap
                           INNER JOIN bfldata.dbo.RemoveItemsFromTransfer rt
                                   ON rt.itemcode = snap.ItemCode
-                                 AND rt.shopname = snap.StoreID
-                         WHERE rt.trndate >= '2025-09-01';
+                                 AND rt.shopname = snap.Shopname
+                         WHERE rt.trndate >= '2025-09-01'
+                           AND snap.Shopname IS NOT NULL;
                     END TRY
                     BEGIN CATCH SET @r3Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms3 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
 
-                    -- Rule 4 — usa.dbo.ExcludeItemsMFCS (DIRECT Itemcode x Shopname join)
+                    -- Rule 4 — usa.dbo.ExcludeItemsMFCS (HSCode x Shopname).
                     --
-                    -- The schema of ExcludeItemsMFCS already has Itemcode as a
-                    -- column (alongside HScode), so the natural join is direct:
-                    -- (Itemcode × Shopname) → exclude. The old code went via
-                    -- usa.dbo.upcbarcodes (18M rows) to map ItemCode → HSCode
-                    -- and then filtered ExcludeItemsMFCS by HSCode. That
-                    -- expanded the join space to ~282 trillion potential
-                    -- combinations (15.7M #SkuSnap × 18M upcbarcodes) and was
-                    -- the dominant cost in 1.9.5 builds — hanging the whole
-                    -- 'Applying exclusion rules…' phase for 15+ minutes even
-                    -- with only 198 rows in ExcludeItemsMFCS.
+                    -- 1.14.8: reverted to the HSCode-based join per the
+                    -- original migration spec (034_lpm_sim_skumax_exclusions.sql).
+                    -- A previous refactor switched to a direct Itemcode
+                    -- join for perf, but production data shows
+                    -- ExcludeItemsMFCS is keyed by HSCode — the Itemcode
+                    -- column on the table is sparse / not the canonical
+                    -- match field. Without the HSCode lookup, Rule 4
+                    -- produced 0 audit rows on every build.
                     --
-                    -- Direct join: 15.7M × 198 with index seek on (Itemcode,
-                    -- Shopname) → milliseconds. Matches what the column shape
-                    -- on ExcludeItemsMFCS implies (the Itemcode column would
-                    -- be redundant otherwise).
+                    -- Perf concern: the previous HSCode implementation
+                    -- joined #SkuSnap × all of upcbarcodes (18M rows) and
+                    -- hung for 15+ min. Avoided here by pre-filtering
+                    -- upcbarcodes to ONLY the HSCodes that appear in
+                    -- ExcludeItemsMFCS (≤198 rows). The relevant upc
+                    -- subset is normally tiny, so the SkuSnap × upcbarcodes
+                    -- multiplication never blows up.
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
+                        ;WITH ExclHSCodes AS (
+                            SELECT DISTINCT HSCode
+                              FROM usa.dbo.ExcludeItemsMFCS
+                             WHERE HSCode IS NOT NULL AND LTRIM(RTRIM(HSCode)) <> ''
+                        ),
+                        RelevantUPC AS (
+                            -- Pre-filter upcbarcodes to the (itemcode, HSCode)
+                            -- pairs whose HSCode is actually in the exclusion
+                            -- table. Keeps the upcbarcodes side tiny.
+                            SELECT DISTINCT b.itemcode, b.HSCode
+                              FROM usa.dbo.upcbarcodes b
+                              INNER JOIN ExclHSCodes hs ON hs.HSCode = b.HSCode
+                        )
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
                                'usa.dbo.ExcludeItemsMFCS',
-                               'Itemcode x Shopname excluded in ExcludeItemsMFCS',
-                               NULL
+                               'HSCode x Shopname excluded in ExcludeItemsMFCS',
+                               CONCAT('HSCode=', ru.HSCode)
                           FROM #SkuSnap snap
+                          INNER JOIN RelevantUPC ru ON ru.itemcode = snap.ItemCode
                           INNER JOIN usa.dbo.ExcludeItemsMFCS e
-                                  ON e.Itemcode = snap.ItemCode
-                                 AND e.Shopname = snap.StoreID;
+                                  ON e.HSCode   = ru.HSCode
+                                 AND e.Shopname = snap.Shopname
+                         WHERE snap.Shopname IS NOT NULL;
                     END TRY
                     BEGIN CATCH SET @r4Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms4 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
@@ -2821,14 +2869,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           INNER JOIN ItemAttr  ia ON ia.itemcode = snap.ItemCode
                           INNER JOIN ItemPrice ip ON ip.ItemCode = snap.ItemCode
                           CROSS APPLY (
+                              -- 1.14.8: was dp.shopname = snap.StoreID;
+                              -- flipped to snap.Shopname (DataSettings-bridged).
                               SELECT TOP 1 dp.maxqty, dp.PriceF, dp.PriceT
                                 FROM usa.dbo.DeptPriceMaxQty_MH4 dp
-                               WHERE dp.shopname   = snap.StoreID
+                               WHERE dp.shopname   = snap.Shopname
                                  AND dp.DivCode    = ia.DivCode
                                  AND dp.DEPARTMENT = ia.Department
                                  AND ip.Price BETWEEN dp.PriceF AND dp.PriceT
                                ORDER BY dp.PriceF
-                          ) bnd;
+                          ) bnd
+                         WHERE snap.Shopname IS NOT NULL;
                     END TRY
                     BEGIN CATCH SET @r5Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms5 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
