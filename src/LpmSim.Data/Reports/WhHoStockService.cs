@@ -43,19 +43,24 @@ public record WhHoStockFilter(
 /// <param name="HoStock">Σ <c>LPM_LocStock.SOH</c> for the HO storeids
 ///   resolved for the country, filtered to the page Season via
 ///   <c>UPCBarcodes.Itemtype</c>.</param>
-/// <param name="WhStock">Σ <c>whboxitems.Qty</c> for purchased boxes whose
-///   pallet category is anything OTHER than 'NON ELIGIBLE'.</param>
+/// <param name="WhStock">Σ <c>whboxitems.Qty</c> for boxes that satisfy
+///   the universal WH rule: <c>ShopEligible &lt;&gt; 'E'</c> AND
+///   <c>PalletCategory NOT IN ('NON ELIGIBLE', 'ECOM')</c>.</param>
 /// <param name="Variance"><c>HoStock − WhStock</c>. Pre-computed in SQL so
 ///   sort/export behave consistently.</param>
-/// <param name="ReservedStock">Σ Qty where PalletCategory='RESERVED' AND purchased.</param>
-/// <param name="SeasonalStock">Σ Qty where PalletCategory='SEASONAL' AND purchased.</param>
-/// <param name="OnHoldStock">Σ Qty where PalletCategory='ON HOLD' AND purchased.</param>
-/// <param name="EligibleStock">Σ Qty where PalletCategory='ELIGIBLE' AND purchased.</param>
-/// <param name="NonLpmStock">Σ Qty where LPM is NULL or empty — pure
-///   LPM-column check, no pallet category or ShopEligible restriction
-///   (per user spec).</param>
-/// <param name="LpmStock">Σ Qty where LPM is set — pure LPM-column check,
-///   no pallet category or ShopEligible restriction.</param>
+/// <param name="ReservedStock">Σ Qty where PalletCategory='RESERVED' AND
+///   <c>ShopEligible &lt;&gt; 'E'</c>.</param>
+/// <param name="SeasonalStock">Σ Qty where PalletCategory='SEASONAL' AND
+///   <c>ShopEligible &lt;&gt; 'E'</c>.</param>
+/// <param name="OnHoldStock">Σ Qty where PalletCategory='ON HOLD' AND
+///   <c>ShopEligible &lt;&gt; 'E'</c>.</param>
+/// <param name="EligibleStock">Σ Qty where PalletCategory='ELIGIBLE' AND
+///   <c>ShopEligible &lt;&gt; 'E'</c>.</param>
+/// <param name="NonLpmStock">Σ Qty where LPM is NULL or empty AND
+///   satisfies the universal WH rule (1.13.2 — was previously
+///   unrestricted; tightened so reconcile with raw SSMS query works).</param>
+/// <param name="LpmStock">Σ Qty where LPM is set AND satisfies the
+///   universal WH rule.</param>
 public record WhHoStockRow(
     string Division,
     long HoStock,
@@ -123,32 +128,28 @@ public class WhHoStockService(IConfiguration cfg)
             hoParms.Add(new SqlParameter(name, hoStoreIds[i]));
         }
 
-        // Optional Division filter (multi-select). Two near-identical
-        // fragments — one per CTE — because each side now references its
-        // own division-name expression (HO uses id.Division; WH uses
-        // sm.Division from the OUTER APPLY). Both default to '(no division)'
-        // for unmapped items via ISNULL, and since the planner never picks
-        // '(no division)' from the dropdown, the filter naturally excludes
-        // the unmapped bucket when specific divisions are chosen.
+        // Optional Division filter (multi-select). Single fragment now —
+        // both CTEs reference the same id.Division alias from the
+        // LEFT JOIN ItemDiv (1.13.2 simplified the WH side to match the HO
+        // side, dropping the per-row OUTER APPLY in favour of a JOIN to
+        // the pre-aggregated CTE). Filter never picks the '(no division)'
+        // bucket, so it's naturally excluded when specific divisions are
+        // chosen — the unmapped row only appears when no Division filter
+        // is active.
         var hoDivFilterFrag = "";
-        var whDivFilterFrag = "";
         var divParms = new List<SqlParameter>();
         if (filter.Divisions is { Count: > 0 })
         {
-            var hoDivSb = new StringBuilder(" AND (");
-            var whDivSb = new StringBuilder(" AND (");
+            var divSb = new StringBuilder(" AND (");
             for (int i = 0; i < filter.Divisions.Count; i++)
             {
-                if (i > 0) { hoDivSb.Append(" OR "); whDivSb.Append(" OR "); }
+                if (i > 0) divSb.Append(" OR ");
                 var name = $"@div{i}";
-                hoDivSb.Append("id.Division = ").Append(name);
-                whDivSb.Append("sm.Division = ").Append(name);
+                divSb.Append("id.Division = ").Append(name);
                 divParms.Add(new SqlParameter(name, filter.Divisions[i]));
             }
-            hoDivSb.Append(')');
-            whDivSb.Append(')');
-            hoDivFilterFrag = hoDivSb.ToString();
-            whDivFilterFrag = whDivSb.ToString();
+            divSb.Append(')');
+            hoDivFilterFrag = divSb.ToString();
         }
 
         // Season filter — encoded as a single @season param the SQL inspects.
@@ -208,52 +209,54 @@ public class WhHoStockService(IConfiguration cfg)
                  GROUP BY ISNULL(id.Division, '(no division)')
             ),
             WHByDiv AS (
-                -- WH side. Season filter reads w.Season directly (per user
-                -- spec — values follow the same 'W' / else convention).
-                -- All category columns require purchased = ShopEligible
-                -- IS NULL OR <> 'E'. WH Stock excludes 'NON ELIGIBLE'.
-                -- Non-LPM / LPM Stock have NO category or purchased
-                -- restriction — pure LPM-column check.
-                SELECT sm.Division,
-                       SUM(CASE WHEN UPPER(ISNULL(pt.PalletCategory, '')) <> 'NON ELIGIBLE'
-                                 AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+                -- WH side. Season filter reads w.Season directly (per spec).
+                -- 1.13.2 perf: the previous OUTER APPLY ran a per-row subquery
+                -- against upc_subclass × subclassmaster to find each box's
+                -- division — N+1 against a multi-million-row whboxitems
+                -- scanned every page Load. Replaced with a single LEFT JOIN
+                -- to the ItemDiv CTE (already aggregated to one row per
+                -- itemcode above). Same semantics, much faster — the
+                -- planner now waits seconds instead of tens of seconds.
+                -- 1.13.2 rule: ALL whboxitems-sourced columns now apply
+                -- the same eligibility rule as raw SSMS queries:
+                --     ShopEligible <> 'E'    (excludes 'E' AND NULL — matches the planner's reference query)
+                --     AND PalletCategory NOT IN ('NON ELIGIBLE', 'ECOM')
+                -- Reserved / Seasonal / On Hold / Eligible already implicitly
+                -- satisfy the category clause (they match a specific cat),
+                -- so only the ShopEligible piece is added on those columns.
+                -- LPM / Non-LPM now respect the rule too (previously had no
+                -- restrictions).
+                SELECT ISNULL(id.Division, '(no division)') AS Division,
+                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStock,
-                       SUM(CASE WHEN UPPER(ISNULL(pt.PalletCategory, '')) = 'RESERVED'
-                                 AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'RESERVED'
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS ReservedStock,
-                       SUM(CASE WHEN UPPER(ISNULL(pt.PalletCategory, '')) = 'SEASONAL'
-                                 AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'SEASONAL'
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS SeasonalStock,
-                       SUM(CASE WHEN UPPER(ISNULL(pt.PalletCategory, '')) = 'ON HOLD'
-                                 AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'ON HOLD'
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS OnHoldStock,
-                       SUM(CASE WHEN UPPER(ISNULL(pt.PalletCategory, '')) = 'ELIGIBLE'
-                                 AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS EligibleStock,
-                       SUM(CASE WHEN w.LPM IS NULL OR w.LPM = ''
+                       SUM(CASE WHEN (w.LPM IS NULL OR w.LPM = '')
+                                 AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS NonLpmStock,
                        SUM(CASE WHEN w.LPM IS NOT NULL AND w.LPM <> ''
+                                 AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
+                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmStock
                   FROM {whSrc} w
-                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-                  OUTER APPLY (
-                      -- 1.13.1 fix: wrap in ISNULL so unmapped items bucket
-                      -- as '(no division)' instead of being dropped by the
-                      -- previous WHERE sm.Division IS NOT NULL filter. Keeps
-                      -- WH totals reconcilable against a raw SUM(Qty).
-                      SELECT ISNULL(
-                          (SELECT TOP 1 sm0.Division
-                             FROM Datareporting.dbo.upc_subclass    u
-                             INNER JOIN Datareporting.dbo.subclassmaster sm0 ON sm0.MH4ID = u.MH4ID
-                            WHERE u.itemcode = w.ItemCode
-                            ORDER BY sm0.Division),
-                          '(no division)') AS Division
-                  ) sm
+                  LEFT JOIN ItemDiv id ON id.itemcode = w.ItemCode
                  WHERE (@season = 'A'
                         OR (@season = 'W' AND UPPER(ISNULL(w.Season, '')) = 'W')
                         OR (@season = 'S' AND UPPER(ISNULL(w.Season, '')) <> 'W'))
-                   {whDivFilterFrag}
-                 GROUP BY sm.Division
+                   {hoDivFilterFrag}
+                 GROUP BY ISNULL(id.Division, '(no division)')
             )
             SELECT
                 COALESCE(h.Division, w.Division)   AS Division,

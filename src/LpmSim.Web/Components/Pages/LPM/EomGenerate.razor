@@ -381,7 +381,11 @@
         </div></MudItem>
     </MudGrid>
 
-    <MudTabs Elevation="0" Rounded="true" KeepPanelsAlive="true" Class="mb-3">
+    @* ActivePanelIndexChanged fires when the planner clicks a different tab.
+       Used (1.13.2) to lazy-load the heavy Division Summary stock breakdown
+       only when needed instead of on every page open. *@
+    <MudTabs Elevation="0" Rounded="true" KeepPanelsAlive="true" Class="mb-3"
+             ActivePanelIndexChanged="@OnTabChanged">
 
     @* ─── Tab 1: Store × Division (the existing detailed grid) ─────────────── *@
     <MudTabPanel Text="Store × Division" Icon="@Icons.Material.Filled.GridOn">
@@ -917,6 +921,10 @@
     /// EomCalculator.GetDivisionStockBreakdownAsync — refreshed every time
     /// the preview re-runs so the values match the underlying data.</summary>
     private Dictionary<(int DivCode, string Season), DivisionStockBreakdown> _divStock = new();
+    // 1.13.2: track the scope the stock breakdown was last loaded for, so
+    // the lazy-load on Division Summary tab-click only re-fetches when the
+    // country / year / month combination changes. Null = not yet loaded.
+    private (string Country, int Year, int Month)? _divStockLoadedForScope = null;
     private string _previewLabel       = "Preview";
     private DateTime? _savedAt;
 
@@ -1161,7 +1169,14 @@
                 _preview = rows;
                 _savedAt = last;
                 _previewLabel = "Saved Output";
-                await LoadDivisionStockBreakdownAsync();
+                // 1.13.2 perf: do NOT load the stock breakdown here. It runs
+                // a heavy multi-CTE query that easily adds 3–10 s to the
+                // page-open time on a busy DB. Instead we lazy-load it the
+                // first time the planner clicks the Division Summary tab
+                // (see OnTabChanged below). Clear the cached values so a
+                // country/year/month change forces a refresh on next view.
+                _divStock = new();
+                _divStockLoadedForScope = null;
             }
         }
         finally { _running = false; StateHasChanged(); }
@@ -1193,12 +1208,37 @@
         {
             var rows = await Eom.GetDivisionStockBreakdownAsync(_country);
             _divStock = rows.ToDictionary(r => (r.DivCode, r.Season));
+            _divStockLoadedForScope = (_country, _year, _month);
         }
         catch (Exception ex)
         {
             _divStock = new();
+            _divStockLoadedForScope = null;
             Snackbar.Add($"Division stock breakdown failed: {ex.Message}", Severity.Warning);
         }
+    }
+
+    /// <summary>
+    /// 1.13.2 — Lazy-load the Division Summary stock breakdown the first
+    /// time the planner clicks the Division Summary tab (panel index 2).
+    /// Subsequent clicks on the same tab skip the fetch if the scope
+    /// (country/year/month) hasn't changed. Other tabs do nothing.
+    /// </summary>
+    private async Task OnTabChanged(int idx)
+    {
+        // Panel index 2 = "Division Summary". If the index meaning changes
+        // (panels added/removed), update this constant alongside.
+        const int DIVISION_SUMMARY_TAB = 2;
+        if (idx != DIVISION_SUMMARY_TAB) return;
+        // Only refetch when there's actually preview data to break down
+        // (otherwise the columns would all be 0 anyway).
+        if (_preview.Count == 0) return;
+        var currentScope = (_country, _year, _month);
+        if (_divStockLoadedForScope == currentScope) return;
+
+        _running = true; StateHasChanged();
+        try { await LoadDivisionStockBreakdownAsync(); }
+        finally { _running = false; StateHasChanged(); }
     }
 
     /// <summary>

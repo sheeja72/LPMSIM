@@ -126,6 +126,12 @@
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.WhStock">WH Stock</MudTableSortLabel>
+                @* 1.13.2: surface the WH Stock filter rule directly in the
+                   header so the planner can see at a glance why the total
+                   differs from a raw SUM(qty) on whboxitems. *@
+                <div style="font-size:0.72rem;font-weight:400;color:#cbd5e1;line-height:1;margin-top:0.15rem;">
+                    excl. NON ELIGIBLE, ECOM
+                </div>
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.Variance">Variance</MudTableSortLabel>
