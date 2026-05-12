@@ -129,6 +129,23 @@
                                Selected="_selectedContNos"
                                SelectedChanged="@((HashSet<string> s) => { _selectedContNos = s; StateHasChanged(); })" />
         </MudItem>
+        @* TrnDate From / To (1.12.0). Both empty by default = no date filter.
+           TrnDate is a date-only column so the DateRange is inclusive on both
+           ends. Highlighted when set so the planner can spot an active filter. *@
+        <MudItem xs="12" sm="6" md="2">
+            <MudDatePicker Label="TrnDate From" Date="_trnDateFrom"
+                           DateChanged="@((DateTime? d) => { _trnDateFrom = d; StateHasChanged(); })"
+                           Variant="Variant.Outlined" Margin="Margin.Dense"
+                           DateFormat="yyyy-MM-dd" Clearable="true"
+                           Class="@(_trnDateFrom is not null ? "lpm-filter-active" : "")" />
+        </MudItem>
+        <MudItem xs="12" sm="6" md="2">
+            <MudDatePicker Label="TrnDate To" Date="_trnDateTo"
+                           DateChanged="@((DateTime? d) => { _trnDateTo = d; StateHasChanged(); })"
+                           Variant="Variant.Outlined" Margin="Margin.Dense"
+                           DateFormat="yyyy-MM-dd" Clearable="true"
+                           Class="@(_trnDateTo is not null ? "lpm-filter-active" : "")" />
+        </MudItem>
         <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
             @* Default = OFF. When CHECKED, drops the ShopEligible <> 'E' filter
                and INCLUDES "non-purchased" boxes (the business term for
@@ -243,6 +260,10 @@
             <MudTh>Purchased
                 <span class="lpm-th-total is-count">@_rows.Count(r => r.Purchased == "N").ToString("N0") = N</span>
             </MudTh>
+            @* TrnDate / CurrDate (1.12.0) — last two columns. TrnDate is
+               date-only, CurrDate is datetime; render with the formats below. *@
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.TrnDate ?? DateTime.MinValue">TrnDate</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.CurrDate ?? DateTime.MinValue">CurrDate</MudTableSortLabel></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>@context.Country</MudTd>
@@ -260,6 +281,8 @@
             <MudTd>@context.Brand</MudTd>
             <MudTd>@context.Rack</MudTd>
             <MudTd>@context.Purchased</MudTd>
+            <MudTd>@(context.TrnDate?.ToString("yyyy-MM-dd") ?? "")</MudTd>
+            <MudTd>@(context.CurrDate?.ToString("yyyy-MM-dd HH:mm") ?? "")</MudTd>
         </RowTemplate>
         <PagerContent>
             <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -477,6 +500,10 @@ else if (!_loadedOnce)
     private string? _search = null;
     private LpmPresence _lpmStatus = LpmPresence.Any;
     private bool _includeNonPurchased = false;
+    // TrnDate range filter (1.12.0). Both nullable; null = no bound.
+    // Not country-scoped, so OnCountryChanged leaves these alone.
+    private DateTime? _trnDateFrom = null;
+    private DateTime? _trnDateTo   = null;
 
     /// <summary>
     /// Pack the current state into a WhBoxFilter for the query service.
@@ -495,7 +522,9 @@ else if (!_loadedOnce)
         Brand:               _selectedBrands.Count == 0           ? null : _selectedBrands.ToList(),
         IncludeNonPurchased: _includeNonPurchased,
         ContNo:              _selectedContNos.Count == 0          ? null : _selectedContNos.ToList(),
-        Country:             _country);
+        Country:             _country,
+        TrnDateFrom:         _trnDateFrom,
+        TrnDateTo:           _trnDateTo);
 
     /// <summary>
     /// Country dropdown handler — kept as a named method (instead of inline in
@@ -605,7 +634,8 @@ else if (!_loadedOnce)
                     string[] headers = { "Country", "Warehouse", "ContNo", "LPM",
                         "Pallet No", "Box No", "Qty",
                         "Pallet Type", "Type Name", "Pallet Category", "Division",
-                        "Department", "Brand", "Rack", "Purchased" };
+                        "Department", "Brand", "Rack", "Purchased",
+                        "TrnDate", "CurrDate" };
                     for (int i = 0; i < headers.Length; i++)
                         ws.Cell(1, i + 1).Value = headers[i];
                     ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
@@ -627,6 +657,19 @@ else if (!_loadedOnce)
                         ws.Cell(row, 13).Value = r.Brand ?? "";
                         ws.Cell(row, 14).Value = r.Rack ?? "";
                         ws.Cell(row, 15).Value = r.Purchased ?? "";
+                        // TrnDate (date) + CurrDate (datetime). Excel will
+                        // render with its default number format; cell format
+                        // strings keep them readable as dates.
+                        if (r.TrnDate is DateTime td)
+                        {
+                            ws.Cell(row, 16).Value = td;
+                            ws.Cell(row, 16).Style.DateFormat.Format = "yyyy-MM-dd";
+                        }
+                        if (r.CurrDate is DateTime cd)
+                        {
+                            ws.Cell(row, 17).Value = cd;
+                            ws.Cell(row, 17).Style.DateFormat.Format = "yyyy-MM-dd HH:mm";
+                        }
                         row++;
                     }
                     ws.Columns().AdjustToContents();

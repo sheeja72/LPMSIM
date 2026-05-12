@@ -38,7 +38,12 @@ public record WhBoxFilter(
     // (the business term for ShopEligible='E') are also included.
     bool IncludeNonPurchased = false,
     IReadOnlyList<string>? ContNo = null,              // racks.dbo.whboxitems.ContNo — container number filter
-    string? Country = "UAE");                          // SIMCountry — drives data source: UAE→racks, others→<DataName>.dbo.WHBoxItemsExport
+    string? Country = "UAE",                           // SIMCountry — drives data source: UAE→racks, others→<DataName>.dbo.WHBoxItemsExport
+    // TrnDate range filter (1.12.0). Both nullable; null = no bound on that
+    // side. Applied as w.TrnDate >= @trnDateFrom AND w.TrnDate <= @trnDateTo.
+    // TrnDate is a date-only column so direct <= comparison is fine.
+    DateTime? TrnDateFrom = null,
+    DateTime? TrnDateTo = null);
 
 public record WhBoxRow(
     string Country,
@@ -55,7 +60,13 @@ public record WhBoxRow(
     string? Brand,                                     // alias for LPM under business naming
     string? Rack,
     string? Purchased,                                 // "N" when ShopEligible='E', else NULL
-    string? ContNo);                                   // racks.dbo.whboxitems.ContNo — container number
+    string? ContNo,                                    // racks.dbo.whboxitems.ContNo — container number
+    // TrnDate (date) + CurrDate (datetime) — last two columns on the Box
+    // detail report. Aggregated as MAX(...) since GetBoxesAsync groups per
+    // box and one box can in theory have multiple source rows with
+    // different dates (we surface the latest).
+    DateTime? TrnDate,
+    DateTime? CurrDate);
 
 /// <summary>Division-level summary row: one per Division.</summary>
 public record WhDivisionRow(
@@ -271,7 +282,9 @@ public class WarehouseQueryService(IConfiguration cfg)
                    MAX(w.Brand)                                                            AS Brand,
                    MAX(w.Rack)                                                             AS Rack,
                    MAX(CASE WHEN w.ShopEligible = 'E' THEN 'N' ELSE NULL END)              AS Purchased,
-                   MAX(w.ContNo)                                                           AS ContNo
+                   MAX(w.ContNo)                                                           AS ContNo,
+                   MAX(w.TrnDate)                                                          AS TrnDate,
+                   MAX(w.CurrDate)                                                         AS CurrDate
               FROM {src} w
               LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               OUTER APPLY (
@@ -324,7 +337,9 @@ public class WarehouseQueryService(IConfiguration cfg)
                 Brand:          reader.IsDBNull(11) ? null : reader.GetString(11),
                 Rack:           reader.IsDBNull(12) ? null : reader.GetString(12),
                 Purchased:      reader.IsDBNull(13) ? null : reader.GetString(13),
-                ContNo:         reader.IsDBNull(14) ? null : reader.GetString(14)));
+                ContNo:         reader.IsDBNull(14) ? null : reader.GetString(14),
+                TrnDate:        reader.IsDBNull(15) ? null : reader.GetDateTime(15),
+                CurrDate:       reader.IsDBNull(16) ? null : reader.GetDateTime(16)));
         }
         return rows;
     }
@@ -558,6 +573,20 @@ public class WarehouseQueryService(IConfiguration cfg)
         {
             AppendWhere("sm.Division",   filter.Division,   "div");
             AppendWhere("sm.Department", filter.Department, "dept");
+        }
+
+        // TrnDate range — applied in WHERE on the source table column.
+        // Null on either side = no bound on that side. TrnDate is date-only
+        // so <= works without a "next day" adjustment.
+        if (filter.TrnDateFrom is not null)
+        {
+            whereSb.Append(" AND w.TrnDate >= @trnDateFrom");
+            parms.Add(new SqlParameter("@trnDateFrom", filter.TrnDateFrom.Value.Date));
+        }
+        if (filter.TrnDateTo is not null)
+        {
+            whereSb.Append(" AND w.TrnDate <= @trnDateTo");
+            parms.Add(new SqlParameter("@trnDateTo", filter.TrnDateTo.Value.Date));
         }
 
         // Scalar params — shared by both query shapes.
