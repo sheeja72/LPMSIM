@@ -2837,32 +2837,63 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- CostCode='001') + subclassmaster (Department) + Division.
                     -- Most external joins of any rule, so the most likely to
                     -- fail when a downstream DB is unavailable.
+                    -- 1.14.10 perf: previous implementation was ~14 minutes
+                    -- because (a) Hodata.dbo.SalesPrice was scanned twice (once
+                    -- in LatestPriceDt, once in ItemPrice) over its full size,
+                    -- and (b) ItemAttr/ItemPrice CTEs got expanded against the
+                    -- 15.7M-row #SkuSnap rather than being pre-aggregated.
+                    -- Materialised into indexed temp tables filtered to ONLY
+                    -- items in #SkuSnap, with a single ROW_NUMBER() pass for
+                    -- the latest price per item. Expected: 14m → 1-3m.
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
-                        WITH ItemAttr AS (
-                            SELECT u.itemcode,
-                                   MIN(d.DivCode) AS DivCode,
-                                   MAX(sm.Department) AS Department
-                              FROM Datareporting.dbo.upc_subclass    u
-                              INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
-                              INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
-                             GROUP BY u.itemcode
-                        ),
-                        LatestPriceDt AS (
-                            SELECT sp.ItemCode, MAX(sp.TrnDate) AS LatestDt
-                              FROM Hodata.dbo.SalesPrice sp
-                             WHERE sp.CostCode = '001'
-                             GROUP BY sp.ItemCode
-                        ),
-                        ItemPrice AS (
-                            SELECT sp.ItemCode,
-                                   CAST(sp.SalesRate AS int) AS Price
-                              FROM Hodata.dbo.SalesPrice sp
-                              INNER JOIN LatestPriceDt lp
-                                      ON lp.ItemCode = sp.ItemCode
-                                     AND lp.LatestDt = sp.TrnDate
-                             WHERE sp.CostCode = '001'
-                        )
+                        IF OBJECT_ID('tempdb..#SkuItemsR5')  IS NOT NULL DROP TABLE #SkuItemsR5;
+                        IF OBJECT_ID('tempdb..#ItemAttrR5')  IS NOT NULL DROP TABLE #ItemAttrR5;
+                        IF OBJECT_ID('tempdb..#ItemPriceR5') IS NOT NULL DROP TABLE #ItemPriceR5;
+
+                        -- (1) Distinct items in #SkuSnap — the universe Rule 5
+                        --     needs lookups for. Anything outside this set can
+                        --     be safely ignored from the heavy joins below.
+                        SELECT DISTINCT ItemCode
+                          INTO #SkuItemsR5
+                          FROM #SkuSnap;
+                        CREATE CLUSTERED INDEX IX_SkuItemsR5 ON #SkuItemsR5 (ItemCode);
+
+                        -- (2) Item Div + Dept attributes — same logic as the
+                        --     old ItemAttr CTE, but joined to #SkuItemsR5 so
+                        --     upc_subclass × subclassmaster × Division only
+                        --     processes the items we'll actually use.
+                        SELECT u.itemcode AS ItemCode,
+                               MIN(d.DivCode)      AS DivCode,
+                               MAX(sm.Department)  AS Department
+                          INTO #ItemAttrR5
+                          FROM #SkuItemsR5 si
+                          INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = si.ItemCode
+                          INNER JOIN Datareporting.dbo.subclassmaster  sm ON sm.MH4ID  = u.MH4ID
+                          INNER JOIN dbo.Division                     d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                         GROUP BY u.itemcode;
+                        CREATE CLUSTERED INDEX IX_ItemAttrR5 ON #ItemAttrR5 (ItemCode);
+
+                        -- (3) Latest price per item — one pass of SalesPrice
+                        --     with ROW_NUMBER() instead of the old two-pass
+                        --     MAX-then-rejoin pattern. Pre-filtered to
+                        --     #SkuItemsR5 so the SalesPrice scan only touches
+                        --     rows we care about.
+                        SELECT ItemCode, Price
+                          INTO #ItemPriceR5
+                          FROM (
+                              SELECT sp.ItemCode,
+                                     CAST(sp.SalesRate AS int) AS Price,
+                                     ROW_NUMBER() OVER (PARTITION BY sp.ItemCode ORDER BY sp.TrnDate DESC) AS rn
+                                FROM Hodata.dbo.SalesPrice sp
+                                INNER JOIN #SkuItemsR5 si ON si.ItemCode = sp.ItemCode
+                               WHERE sp.CostCode = '001'
+                          ) x
+                         WHERE x.rn = 1;
+                        CREATE CLUSTERED INDEX IX_ItemPriceR5 ON #ItemPriceR5 (ItemCode);
+
+                        -- (4) Main rule body — now joins against tiny indexed
+                        --     temp tables instead of CTE expansions.
                         INSERT INTO #PriceCapMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, NewSku, MatchedKey)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
@@ -2873,8 +2904,8 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                       ' (band ', bnd.PriceF, '-', bnd.PriceT, ')',
                                       ' / maxqty=', bnd.maxqty)
                           FROM #SkuSnap snap
-                          INNER JOIN ItemAttr  ia ON ia.itemcode = snap.ItemCode
-                          INNER JOIN ItemPrice ip ON ip.ItemCode = snap.ItemCode
+                          INNER JOIN #ItemAttrR5  ia ON ia.ItemCode = snap.ItemCode
+                          INNER JOIN #ItemPriceR5 ip ON ip.ItemCode = snap.ItemCode
                           CROSS APPLY (
                               -- 1.14.8: was dp.shopname = snap.StoreID;
                               -- flipped to snap.Shopname (DataSettings-bridged).

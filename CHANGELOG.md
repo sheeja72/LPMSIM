@@ -23,6 +23,23 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.10 — SKU Max Rule 5: materialize lookups, single-pass SalesPrice (2026-05-13)
+
+### Performance
+- **Rule 5 (`DeptPriceMaxQty_MH4` price-band cap) sped up from ~14 minutes to an expected 1–3 minutes** by pre-aggregating the heavy lookups into indexed temp tables before the main join:
+  - `#SkuItemsR5` — distinct itemcodes in `#SkuSnap` (the universe Rule 5 touches).
+  - `#ItemAttrR5` — `(DivCode, Department)` per itemcode from `upc_subclass × subclassmaster × Division`, filtered to `#SkuItemsR5`.
+  - `#ItemPriceR5` — latest `SalesRate` per itemcode from `Hodata.dbo.SalesPrice` using a **single `ROW_NUMBER()` pass** (was two passes — `LatestPriceDt` MAX + `ItemPrice` rejoin). Also filtered to `#SkuItemsR5` so the SalesPrice scan only touches relevant rows.
+  - All three temp tables get a clustered index on `ItemCode`.
+- **Main rule body unchanged behaviour-wise** — same `CROSS APPLY` to `usa.dbo.DeptPriceMaxQty_MH4` with the same join keys (DivCode, Department, Price band) and `snap.Shopname` from the 1.14.8 bridge.
+
+### Notes
+- No data semantics change. Same `#PriceCapMatches` content; just faster to compute.
+- Other rules untouched. Rule 7 (LPM_StoreDeptAccess, ~2 min for 617K rows) and the 18-min Insert phase are separate concerns — if they're still too slow after this lands, they're the next targets.
+- No schema change.
+
+---
+
 ## 1.14.9 — SKU Max Build: read Season from whboxitems direct (2026-05-13)
 
 ### Changed
