@@ -2300,6 +2300,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             // T-SQL syntax: a CTE (WITH) must come BEFORE the INSERT keyword,
             // not between INSERT and SELECT. Leading semicolon defends against
             // any prior statement in the batch needing termination.
+            // 1.14.9: Season now read from whboxitems.Season directly.
+            // Was pt.Season via INNER JOIN to bfldata.dbo.pallettype, which
+            // (a) silently dropped boxes whose PalletType has no master row,
+            // and (b) could differ from w.Season when the master's Season
+            // was stale. Aligns the SKU Max Build with WH Stock Position +
+            // Variance Report + EOM Generate Division Summary (all use
+            // w.Season since 1.13.2 / 1.14.7). UPPER() added for case-
+            // insensitive matching, same convention as the other rules.
             pop.CommandText = $@"
                 ;WITH ItemDiv AS (
                     SELECT u.itemcode, MIN(d.DivCode) AS DivCode
@@ -2311,15 +2319,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 INSERT INTO #ItemWh (ItemCode, DivCode, Season, WHBoxQty)
                 SELECT w.ItemCode,
                        id.DivCode,
-                       CASE WHEN ISNULL(pt.Season,'') = 'W' THEN 'W' ELSE 'S' END,
+                       CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'W' ELSE 'S' END,
                        SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
                   FROM {whSrc} w
-                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-                  INNER JOIN ItemDiv id               ON id.itemcode    = w.ItemCode
+                  INNER JOIN ItemDiv id ON id.itemcode = w.ItemCode
                  WHERE 1 = 1
                    {scopeWhere}
                  GROUP BY w.ItemCode, id.DivCode,
-                          CASE WHEN ISNULL(pt.Season,'') = 'W' THEN 'W' ELSE 'S' END;";
+                          CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN 'W' ELSE 'S' END;";
             pop.CommandTimeout = 1200;
             await pop.ExecuteNonQueryAsync(ct);
         }

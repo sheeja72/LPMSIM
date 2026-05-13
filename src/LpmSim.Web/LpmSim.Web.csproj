@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.8</Version>
-    <AssemblyVersion>1.14.8.0</AssemblyVersion>
-    <FileVersion>1.14.8.0</FileVersion>
-    <InformationalVersion>1.14.8 (SKU Max - Shopname bridge for Rules 1-5 + Rule 4 HSCode revert)</InformationalVersion>
+    <Version>1.14.9</Version>
+    <AssemblyVersion>1.14.9.0</AssemblyVersion>
+    <FileVersion>1.14.9.0</FileVersion>
+    <InformationalVersion>1.14.9 (SKU Max Build - Season from whboxitems direct)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -23,6 +23,26 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.9 — SKU Max Build: read Season from whboxitems direct (2026-05-13)
+
+### Changed
+- **`BuildItemSkuMaxAsync`'s `#ItemWh` population now reads `Season` from `whboxitems.Season` directly**, not from `bfldata.dbo.pallettype.Season` via INNER JOIN. Same change pattern as 1.13.2 (WH Stock Position / Variance Report) and 1.14.7 (EOM Generate Division Summary) — keeps the rule consistent across every place we bucket boxes into Summer / Winter.
+- Pallettype INNER JOIN dropped (was only used for `pt.Season`). Boxes whose `PalletType` had no row in the pallettype master are no longer silently lost from the per-`(Item, Div, Season)` WHBoxQty calculation.
+- Added `UPPER()` for case-insensitive matching, consistent with the other rules.
+
+### Affects
+- `LPM_SimItemSkuMax` table contents: per-item `WHBoxQty` per `Season` may shift slightly:
+  - Items whose PalletType is missing from `pallettype` master are now included.
+  - Items where `w.Season` differs from `pt.Season` move to whichever season `w.Season` reports.
+- Downstream effect: SKU Max rule band lookup may yield different `SKUMax` values for these items → SIM Generate may allocate them differently in subsequent runs.
+
+### Notes
+- Only `BuildItemSkuMaxAsync` is changed. Other queries in `LpmSimGenerator.cs` that still read `pt.Season` (snapshot building, allocation flow) are NOT touched — separate concerns.
+- Run `Build SKU Max` to apply. Existing `LPM_SimItemSkuMax` rows won't change until the next rebuild.
+- No schema change. No migrations.
+
+---
+
 ## 1.14.8 — SKU Max exclusion rules: fix Shopname bridge + revert Rule 4 to HSCode (2026-05-12)
 
 ### Fixed
