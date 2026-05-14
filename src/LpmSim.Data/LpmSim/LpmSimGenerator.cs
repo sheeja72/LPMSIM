@@ -2886,27 +2886,67 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- so there's no risk of half-applied rules in the apply
                     -- phase below.
 
-                    -- Rule 1 — usa.dbo.ExcludeExport_Planning (Shopname x ItemCode).
-                    -- 1.14.8: was joining ep.Shopname = snap.StoreID which
-                    -- never matched (StoreID is hyphenated 'BFL-DXD',
-                    -- Shopname is concatenated 'BFLAVENUES'). Joined
-                    -- through snap.Shopname (resolved at snapshot time
-                    -- from DataSettings) so the IDs are in the right
-                    -- format. ItemCode matches directly (confirmed via
-                    -- probe — see 1.14.8 CHANGELOG).
+                    -- Rule 1 — usa.dbo.ExcludeExport_Planning.
+                    -- 1.14.8: snap.Shopname (DataSettings-bridged) joins ep.Shopname,
+                    -- not snap.StoreID (hyphenated 'BFL-DXD' vs concatenated 'BFLAVENUES').
+                    -- 1.14.19: business rules layered on top of the join:
+                    --   • Only rows with Active = 'Y' contribute.
+                    --   • Duration = 'Temporary' ⇒ today must fall between
+                    --     BlockFrom and BlockTo (inclusive, date-only compare so
+                    --     time-of-day on smalldatetime doesn't trip us up).
+                    --     Anything else (Permanent / empty / NULL) ⇒ no date check.
+                    --   • ItemCode set ⇒ block that specific item (rule 1a).
+                    --   • GroupCode set + ItemCode empty ⇒ block every item whose
+                    --     Hodata.dbo.ItemMaster.GroupCode matches (rule 1b).
+                    --   • Business convention: a row has ItemCode XOR GroupCode,
+                    --     never both. 1b is gated on ItemCode being empty so that
+                    --     if a row ever does carry both, the item-level rule wins
+                    --     (item-level is more specific).
+                    --   • NULL BlockFrom or NULL BlockTo on a Temporary row ⇒
+                    --     BETWEEN evaluates UNKNOWN ⇒ block does not apply (fail-safe).
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
+                        ;WITH ActiveExcludes AS (
+                            SELECT ep.Shopname, ep.ItemCode, ep.GroupCode
+                              FROM usa.dbo.ExcludeExport_Planning ep
+                             WHERE UPPER(ISNULL(ep.Active, '')) = 'Y'
+                               AND ( UPPER(ISNULL(ep.Duration, '')) <> 'TEMPORARY'
+                                  OR (    UPPER(ISNULL(ep.Duration, '')) = 'TEMPORARY'
+                                      AND CAST(GETDATE() AS date)
+                                          BETWEEN CAST(ep.BlockFrom AS date)
+                                              AND CAST(ep.BlockTo   AS date)) )
+                        )
                         INSERT INTO #ExcludeMatches
                                (StoreID, ItemCode, Season, DivCode, OrigSku, SourceTable, Reason, MatchedKey)
+                        -- 1a: item-level block (row carries a non-empty ItemCode)
                         SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
                                'usa.dbo.ExcludeExport_Planning',
-                               'Shopname x ItemCode listed in ExcludeExport_Planning',
+                               'Active item-level block (Shopname x ItemCode)',
                                NULL
                           FROM #SkuSnap snap
-                          INNER JOIN usa.dbo.ExcludeExport_Planning ep
-                                  ON ep.Shopname = snap.Shopname
-                                 AND ep.ItemCode = snap.ItemCode
-                         WHERE snap.Shopname IS NOT NULL;
+                          INNER JOIN ActiveExcludes ae
+                                  ON ae.Shopname = snap.Shopname
+                                 AND ae.ItemCode = snap.ItemCode
+                         WHERE snap.Shopname IS NOT NULL
+                           AND LTRIM(RTRIM(ISNULL(ae.ItemCode, ''))) <> ''
+
+                        UNION ALL
+
+                        -- 1b: group-level block — row carries non-empty GroupCode
+                        -- with empty ItemCode; items resolved via Hodata.dbo.ItemMaster.
+                        SELECT snap.StoreID, snap.ItemCode, snap.Season, snap.DivCode, snap.OrigSku,
+                               'usa.dbo.ExcludeExport_Planning',
+                               'Active group-level block (Shopname x GroupCode via Hodata.dbo.ItemMaster)',
+                               CONCAT('GroupCode=', ae.GroupCode)
+                          FROM #SkuSnap snap
+                          INNER JOIN ActiveExcludes ae
+                                  ON ae.Shopname = snap.Shopname
+                          INNER JOIN Hodata.dbo.ItemMaster im
+                                  ON im.GroupCode = ae.GroupCode
+                                 AND im.ItemCode  = snap.ItemCode
+                         WHERE snap.Shopname IS NOT NULL
+                           AND LTRIM(RTRIM(ISNULL(ae.GroupCode, ''))) <> ''
+                           AND LTRIM(RTRIM(ISNULL(ae.ItemCode,  ''))) =  '';
                     END TRY
                     BEGIN CATCH SET @r1Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms1 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());

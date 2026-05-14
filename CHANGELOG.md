@@ -23,6 +23,36 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.19 — SKU Max Rule 1 (ExcludeExport_Planning): Active + Duration + GroupCode (2026-05-14)
+
+### Rule 1 (`usa.dbo.ExcludeExport_Planning`) — new business logic
+Pre-1.14.19 the rule was a plain `Shopname × ItemCode` join: every row in `ExcludeExport_Planning` matched against every snapshot row regardless of status or scope. 1.14.19 layers four business filters on top:
+
+1. **`Active = 'Y'` required** — `Active = 'N'` (or NULL/blank) rows are ignored. Case-insensitive.
+2. **Duration handling** — if `Duration = 'Temporary'` (case-insensitive), `CAST(GETDATE() AS date)` must fall between `BlockFrom` and `BlockTo` inclusive. Anything else (Permanent, empty, NULL) skips the date check.
+   - Date-only compare so a `smalldatetime` value with a time-of-day component doesn't accidentally drop the boundary day.
+   - NULL `BlockFrom` or NULL `BlockTo` on a Temporary row ⇒ `BETWEEN` is UNKNOWN ⇒ block does **not** apply (fail-safe).
+3. **`ItemCode` non-empty ⇒ item-level block (rule 1a)** — same `Shopname × ItemCode` join as before, just gated by the new filters.
+4. **`GroupCode` non-empty ⇒ group-level block (rule 1b)** — resolves group membership via `Hodata.dbo.ItemMaster.GroupCode = ep.GroupCode AND im.ItemCode = snap.ItemCode`. So every item in the group gets blocked for that Shopname.
+
+Business convention is `ItemCode XOR GroupCode` per row — never both. 1b is gated on `ItemCode` being empty so if a malformed row ever has both, the item-level rule (1a) wins (more specific).
+
+### Implementation
+- Single `INSERT INTO #ExcludeMatches` with a `;WITH ActiveExcludes AS (...)` CTE common-filter + `UNION ALL` for 1a and 1b. Keeps both branches in the same TRY block — partial failure semantics unchanged (whole rule fails as one if it throws).
+- `MatchedKey` column now carries `'GroupCode=<x>'` for 1b matches so the trace report can tell item-level from group-level blocks at a glance. 1a stays NULL (matched on ItemCode, no extra info needed).
+- `Reason` column distinguishes "Active item-level block" vs "Active group-level block".
+
+### Behaviour change to watch
+- More rows might be blocked (group-level matches now activate that previously did nothing — the table likely had GroupCode rows before this release that weren't applied).
+- Fewer rows might be blocked (`Active = 'N'` rows and expired Temporary blocks were previously included; now they aren't).
+- Net direction depends on what's in the table; impossible to predict without running the build.
+
+### Notes
+- No DB migration. Pure SQL-text change inside `BuildSkuMaxAsync`.
+- Rules 2-7 (`ExcludeSubclass`, `RemoveItemsFromTransfer`, `ExcludeItemsMFCS`, `DeptPriceMaxQty_MH4`, `LPM_StoreDivAccess`, `LPM_StoreDeptAccess`) unchanged.
+
+---
+
 ## 1.14.18 — LPMSIM_Output extra columns + box/item Season split + SKU Max archive (2026-05-14)
 
 ### Added — 6 new columns on `dbo.LPMSIM_Output` (+ backup table)
