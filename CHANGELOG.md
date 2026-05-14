@@ -23,6 +23,18 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.15 — Production Schedule perf: parallel detail queries (2026-05-14)
+
+### Performance
+- **Production Schedule load** sped up by firing the 3 detail-tab queries (Day summary, Box detail, Division summary) **in parallel** via `Task.WhenAll` instead of sequentially. Total wait is now `max(query)` instead of `sum-of-each`.
+- Safe because `ProductionScheduler` is registered with `IDbContextFactory<LpmDbContext>` — each `Get*` method creates its own `DbContext` and SQL connection inside its `await using`, so concurrent execution doesn't share state. Each call still runs under `READ UNCOMMITTED` and is wrapped in the existing `WithDeadlockRetry` helper per call.
+
+### Notes
+- Behaviour-equivalent change. No schema migration. No UI change.
+- Variant filter handler (`OnDivFilterChanged`) still runs Division Summary on its own — only the initial 3-tab load is parallelized, since filter changes only refresh the one tab.
+
+---
+
 ## 1.14.14 — EOM/SIM nav group + role rename + Store/Div/Dept Access filters (2026-05-14)
 
 ### Sidebar reorganized

@@ -538,13 +538,19 @@ else if (!_busy)
             _loadingDays = true; _loadingBoxes = true; _loadingDivs = true; StateHasChanged();
             try
             {
-                // Each Get* uses READ UNCOMMITTED isolation to avoid taking
-                // shared locks. The retry wrapper is belt-and-braces in case
-                // SQL Server still chooses us as a deadlock victim
-                // (e.g. on temp-table allocations during Build SKU Max).
-                _days  = await WithDeadlockRetry(() => Scheduler.GetDaySummaryAsync(bn));
-                _boxes = await WithDeadlockRetry(() => Scheduler.GetBoxDetailAsync(bn));
-                _divs  = await WithDeadlockRetry(() => Scheduler.GetDivisionSummaryAsync(bn, _divDayFilter, _divStatusFilter));
+                // 1.14.15 perf: the 3 detail queries share no state — fire them
+                // in parallel via Task.WhenAll so total wait = max(query) instead
+                // of sum-of-each. Each Get* uses READ UNCOMMITTED isolation and
+                // its own DbContext from the factory, so concurrent execution
+                // is safe (no shared DbContext). The deadlock-retry wrapper
+                // still applies per call.
+                var daysTask  = WithDeadlockRetry(() => Scheduler.GetDaySummaryAsync(bn));
+                var boxesTask = WithDeadlockRetry(() => Scheduler.GetBoxDetailAsync(bn));
+                var divsTask  = WithDeadlockRetry(() => Scheduler.GetDivisionSummaryAsync(bn, _divDayFilter, _divStatusFilter));
+                await Task.WhenAll(daysTask, boxesTask, divsTask);
+                _days  = await daysTask;
+                _boxes = await boxesTask;
+                _divs  = await divsTask;
             }
             catch (Exception ex)
             {
