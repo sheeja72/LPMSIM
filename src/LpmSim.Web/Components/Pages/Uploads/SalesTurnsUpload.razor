@@ -23,6 +23,14 @@
                        Variant="Variant.Outlined" Color="Color.Primary" DropShadow="false">
                 Download template
             </MudButton>
+            @* 1.14.23 — Download the CURRENT Sales/Turns data in the exact same
+               column shape as the template, so the user can pull existing rows,
+               edit them in Excel, and re-upload through the same workflow. *@
+            <MudButton OnClick="DownloadCurrentDataAsync" StartIcon="@Icons.Material.Filled.FileDownload"
+                       Variant="Variant.Outlined" Color="Color.Success" DropShadow="false"
+                       Disabled="_downloadingCurrent" Class="ml-2">
+                @if (_downloadingCurrent) { <text>Downloading…</text> } else { <text>Download current data</text> }
+            </MudButton>
         </div>
 
         <div class="lpm-section">
@@ -154,6 +162,10 @@
     private List<Row> _rows = new();
     private int _validCount;
     private int _errorCount;
+    // 1.14.23 — guard so the user can't double-click "Download current data"
+    // and trigger two concurrent DB reads + workbook builds. The download
+    // itself is cheap on a few thousand rows but the guard keeps the UX honest.
+    private bool _downloadingCurrent;
 
     private async Task OnFileSelected(IBrowserFile file)
     {
@@ -366,6 +378,77 @@
         var b64 = Convert.ToBase64String(bytes);
         var url = $"data:application/octet-stream;base64,{b64}";
         await JS.InvokeVoidAsync("lpmDownload", url, "SalesTurns_Template.xlsx");
+    }
+
+    /// <summary>
+    /// 1.14.23 — export the entire <c>dbo.LPM_SalesTurns</c> table as an
+    /// XLSX whose header + column shape matches the upload template
+    /// exactly, so the user can edit existing rows in Excel and re-upload
+    /// through the same flow without column-name surgery. Division is
+    /// emitted as the human-readable name (from <c>dbo.Division</c>) when
+    /// available, falling back to the integer DivCode — the upload accepts
+    /// either form, so round-tripping is safe.
+    /// </summary>
+    private async Task DownloadCurrentDataAsync()
+    {
+        _downloadingCurrent = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var rows = await db.LpmSalesTurns.AsNoTracking()
+                .OrderBy(x => x.StoreID)
+                .ThenBy(x => x.DivCode)
+                .ThenBy(x => x.Year1)
+                .ThenBy(x => x.Month1)
+                .ToListAsync();
+            var divNameByCode = await db.Divisions.AsNoTracking()
+                .Where(d => d.Name != null)
+                .ToDictionaryAsync(d => d.DivCode, d => d.Name!);
+
+            using var wb = new XLWorkbook();
+            var sheet = wb.Worksheets.Add("Sales_Turns");
+            // Header row — same styling as DownloadTemplate.
+            for (int i = 0; i < Header.Length; i++)
+            {
+                sheet.Cell(1, i + 1).Value = Header[i];
+                sheet.Cell(1, i + 1).Style.Font.Bold = true;
+                sheet.Cell(1, i + 1).Style.Fill.BackgroundColor = XLColor.FromHtml("#0f172a");
+                sheet.Cell(1, i + 1).Style.Font.FontColor = XLColor.White;
+            }
+            int r = 2;
+            foreach (var row in rows)
+            {
+                sheet.Cell(r, 1).Value = row.StoreID;
+                // Prefer division name (readable, matches what the planner sees
+                // on other pages); fall back to numeric DivCode when the name is
+                // missing. Upload accepts both representations.
+                sheet.Cell(r, 2).Value = divNameByCode.TryGetValue(row.DivCode, out var name)
+                    ? name
+                    : row.DivCode.ToString();
+                sheet.Cell(r, 3).Value = row.Year1;
+                sheet.Cell(r, 4).Value = row.Month1;
+                if (row.SoldQty.HasValue)  sheet.Cell(r, 5).Value = row.SoldQty.Value;
+                if (row.TurnsQty.HasValue) sheet.Cell(r, 6).Value = row.TurnsQty.Value;
+                r++;
+            }
+            sheet.Columns().AdjustToContents();
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            var bytes = ms.ToArray();
+            var b64 = Convert.ToBase64String(bytes);
+            var url = $"data:application/octet-stream;base64,{b64}";
+            var fileName = $"SalesTurns_{DateTime.Now:yyyy-MM-dd_HHmm}.xlsx";
+            await JS.InvokeVoidAsync("lpmDownload", url, fileName);
+            Snackbar.Add($"Downloaded {rows.Count:N0} row(s) to {fileName}.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Download failed: {ex.Message}", Severity.Error);
+        }
+        finally
+        {
+            _downloadingCurrent = false; StateHasChanged();
+        }
     }
 
     private static string TryString(IXLCell cell)

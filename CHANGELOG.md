@@ -23,6 +23,27 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.23 — Sales/Turns: download current data button (2026-05-14)
+
+### Added
+- **New "Download current data" button** on the Sales/Turns upload page (`Uploads → Sales/Turns`), next to the existing "Download template" button.
+- Exports every row in `dbo.LPM_SalesTurns` as an XLSX whose header and column shape match the upload template **exactly** — `StoreID | Division | Year | Month | SoldQty | Turns`. So the planner can:
+  1. Click **Download current data** → gets `SalesTurns_yyyy-MM-dd_HHmm.xlsx` with all existing rows
+  2. Edit the values in Excel
+  3. Drop the same file back into the **Upload** dropzone above
+  4. **Commit** — the upload's existing upsert logic replaces rows on the same `(StoreID, Division, Year, Month)` key
+- **Division column** is exported as the human-readable name (from `dbo.Division.Name`) when available, falling back to the integer `DivCode` when no name is on file. The upload page already accepts either representation, so the round-trip is non-breaking.
+- Sort order on export: `StoreID → DivCode → Year → Month` — stable + diff-friendly for users comparing two downloads.
+- Snackbar feedback: `"Downloaded 4,230 row(s) to SalesTurns_2026-05-14_1530.xlsx."` (or an error toast if the read fails).
+- `_downloadingCurrent` busy flag on the button prevents double-click triggering two concurrent reads.
+
+### Notes
+- No DB migration. No schema change.
+- Pure code change in `SalesTurnsUpload.razor`.
+- Other upload pages (Monthly Weights, Planned Inputs, SKU Max Rules, etc.) only have "Download template" today — same pattern can be added to those if you want; flag and I'll do the next release.
+
+---
+
 ## 1.14.22 — SIM Generate UX fix + audit logger foundation for 'X' (eXecute) action code (2026-05-14)
 
 ### SIM Generate — one-click overwrite of a Draft with an attached Production Schedule
