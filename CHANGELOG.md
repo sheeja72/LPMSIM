@@ -23,6 +23,32 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.17 — SIM Generate: drop pallettype JOIN, use w.Season + w.PalletCategory (2026-05-14)
+
+### Performance + correctness
+- **Input Readiness query** (the LPM/Non-LPM × Summer/Winter eligibility grid on the SIM Generate page) — dropped the `INNER JOIN bfldata.dbo.pallettype pt`. Season now read from `w.Season` (whboxitems / WHBoxItemsExport); PalletCategory filter now reads `w.PalletCategory`.
+- **SIM Generate box enumeration** (`ReadBoxesAsync`) — same change. The per-row Season already represents item-level seasonality, so a mixed box (Summer-marked box containing some Winter items) gets each item tagged with its own Season exactly as the planner asked.
+- **Input Freshness "last WH Box load" timestamp** — same change.
+- **`BuildPalletCategoryClause`** helper now emits `AND w.PalletCategory IN (...)` (was `pt.PalletCategory`). Two callers updated.
+- **`seasonClause`** now uses `UPPER(ISNULL(w.Season, ''))` — was `pt.Season`, would have errored at runtime after the JOIN drop without this fix.
+
+### Why
+Same rationale as 1.14.9's SKU Max Build switch (documented in `LpmSimGenerator.cs:2400`):
+1. `INNER JOIN bfldata.dbo.pallettype pt` silently dropped boxes whose `PalletType` had no master row (latent data-integrity hole — those boxes vanished from the counts).
+2. `pt.Season` / `pt.PalletCategory` could differ from `w.Season` / `w.PalletCategory` when the master was stale (e.g. box re-tagged in whboxitems but pallettype not updated).
+3. WH Stock Position, Variance Report, EOM Calculator, and SKU Max Build all moved off `pt.*` in 1.13.2–1.14.9. SIM Generate is now consistent with the rest.
+4. Removes a multi-million-row hash/merge JOIN per call — expected sub-second speedup on the Input Readiness panel and a meaningful chunk off SIM Generate's box-enumeration step.
+
+### Behaviour change
+- Boxes with no row in `bfldata.dbo.pallettype` (rare; usually a data-load timing artefact) are no longer silently excluded. They will now appear with their `w.Season` / `w.PalletCategory` as-is. Same trade-off 1.14.9 accepted.
+- `UPPER()` added around `w.Season` matches makes the filter case-insensitive (`'w'` and `'W'` both treated as Winter), matching the 1.14.9 convention.
+
+### Notes
+- No DB migration. No schema change. No UI change.
+- Reports (`WhHoStockService`, `VarianceReportService`, `LpmSimReports`) were already on `w.Season` / `w.PalletCategory` — not touched.
+
+---
+
 ## 1.14.16 — Rename Viewer role label to Reports (2026-05-14)
 
 ### Role display labels renamed

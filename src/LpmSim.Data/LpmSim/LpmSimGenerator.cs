@@ -116,45 +116,51 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             //     into Purchased + Non-Purchased buckets. The "selBoxes"
             //     downstream logic still respects the includePurchasedBoxes
             //     toggle; only the SQL changes.
+            // 1.14.17: Season now read from whboxitems (w.Season) instead
+            // of pallettype master (pt.Season). pallettype JOIN dropped
+            // entirely; PalletCategory filter in {palletClause} now uses
+            // w.PalletCategory (see BuildPalletCategoryClause). Same
+            // rationale as 1.14.9's SKU Max Build switch — see comment
+            // at the bottom of BuildPalletCategoryClause. UPPER() makes
+            // the Season match case-insensitive.
             cmd.CommandText = $@"
                 SELECT
                     -- LPM × Summer × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmSummerLines,
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmSummerBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmSummerLines,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmSummerBoxes,
 
                     -- Non-LPM × Summer × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmSummerLines,
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmSummerBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmSummerLines,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmSummerBoxes,
 
                     -- LPM × Winter × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmWinterLines,
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmWinterBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmWinterLines,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmWinterBoxes,
 
                     -- Non-LPM × Winter × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmWinterLines,
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmWinterBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmWinterLines,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmWinterBoxes,
 
                     -- LPM × Summer × Non-Purchased  (new 1.14.11)
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmSummerNpBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmSummerNpBoxes,
 
                     -- Non-LPM × Summer × Non-Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmSummerNpBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmSummerNpBoxes,
 
                     -- LPM × Winter × Non-Purchased
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmWinterNpBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmWinterNpBoxes,
 
                     -- Non-LPM × Winter × Non-Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
+                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
                   FROM {whSrc} w
-                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE 1 = 1
                    {palletClause}
                    {lpmDtClause}
@@ -374,10 +380,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
     }
 
     /// <summary>
-    /// Builds a parameterised <c>AND pt.PalletCategory IN (@pc0, @pc1, ...)</c>
+    /// Builds a parameterised <c>AND w.PalletCategory IN (@pc0, @pc1, ...)</c>
     /// fragment from the planner-supplied list. Empty/null → no filter (every
     /// category included). Default selection on the page is just "ELIGIBLE",
     /// which produces the legacy single-category clause.
+    /// 1.14.17: switched from <c>pt.PalletCategory</c> to <c>w.PalletCategory</c>
+    /// when the pallettype JOIN was removed from all SIM Generate queries.
     /// </summary>
     private static (string clause, List<SqlParameter> parameters) BuildPalletCategoryClause(IReadOnlyList<string>? categories)
     {
@@ -399,7 +407,16 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             paramNames.Add(name);
             parms.Add(new SqlParameter(name, distinct[i]));
         }
-        return ($"AND pt.PalletCategory IN ({string.Join(", ", paramNames)})", parms);
+        // 1.14.17: clause now references w.PalletCategory (column on
+        // whboxitems / WHBoxItemsExport) instead of pt.PalletCategory.
+        // The pallettype master JOIN has been dropped from every SIM
+        // Generate query — Season + PalletCategory come from whboxitems
+        // directly. Same rationale as 1.14.9's SKU Max Build switch:
+        //   • avoids silently dropping boxes whose PalletType has no
+        //     master row (INNER JOIN side-effect),
+        //   • avoids stale-master mismatches between w.* and pt.*,
+        //   • removes a multi-million-row hash/merge JOIN per call.
+        return ($"AND w.PalletCategory IN ({string.Join(", ", paramNames)})", parms);
     }
 
     /// <summary>
@@ -595,10 +612,15 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         }
 
         // ---------------- Inputs ----------------
+        // 1.14.17: Season filter now uses w.Season (whboxitems) instead of
+        // pt.Season (pallettype). The pallettype JOIN was dropped from
+        // ReadBoxesAsync's SELECT, so any pt.* reference here would fail
+        // with "multi-part identifier could not be bound". UPPER() makes
+        // the match case-insensitive, same convention as the new SELECT.
         var seasonClause = req.Seasons switch
         {
-            LpmSimSeasonFlags.Summer                          => "AND ISNULL(pt.Season, '') <> 'W'",
-            LpmSimSeasonFlags.Winter                          => "AND ISNULL(pt.Season, '') = 'W'",
+            LpmSimSeasonFlags.Summer                          => "AND UPPER(ISNULL(w.Season, '')) <> 'W'",
+            LpmSimSeasonFlags.Winter                          => "AND UPPER(ISNULL(w.Season, '')) = 'W'",
             LpmSimSeasonFlags.Both                            => "",
             _                                                 => "",
         };
@@ -1676,12 +1698,19 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // 1.14.12: w.PalletNo added to the projection so the allocator can
         // persist it on each LpmSimOutput row (LPMSIM_Output.PalletNo column,
         // migration 041). Doesn't affect ordering, grouping, or filtering.
+        // 1.14.17: Season now read from whboxitems (w.Season) instead of
+        // pallettype master. pallettype JOIN dropped entirely; the
+        // PalletCategory filter in {palletClause} now uses w.PalletCategory
+        // (see BuildPalletCategoryClause comment). Per-item Season means
+        // a mixed box (Summer-marked box containing some Winter items)
+        // gets one row per item with that item's own Season — the
+        // allocator already groups per-(BoxNo, ItemCode), so this
+        // preserves the item-level seasonality the planner wants.
         cmd.CommandText = $@"
             SELECT w.BoxNo, w.PalletNo, w.LPMDt, w.ItemCode, w.Qty,
-                   Season = CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END,
+                   Season = CASE WHEN UPPER(ISNULL(w.Season, '')) = 'W' THEN 'W' ELSE 'S' END,
                    BoxQty = SUM(w.Qty) OVER (PARTITION BY w.BoxNo)
               FROM {whSrc} w
-              INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               LEFT  JOIN dbo.LPM_WarehousePriority wp
                      ON wp.Country   = @whCountry
                     AND wp.Warehouse = w.Warehouse
@@ -1964,11 +1993,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         var freshSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
         using (var cmd = conn.CreateCommand())
         {
+            // 1.14.17: PalletCategory now read from whboxitems (w.PalletCategory)
+            // instead of pallettype master (pt.PalletCategory). pallettype
+            // JOIN dropped to align this query with the other two SIM
+            // Generate queries. Same rationale as 1.14.9 / BuildPalletCategoryClause.
             cmd.CommandText = $@"
                 SELECT MAX(w.LPMDt)
                   FROM {freshSrc} w
-                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-                 WHERE pt.PalletCategory = 'ELIGIBLE'
+                 WHERE w.PalletCategory = 'ELIGIBLE'
                    AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
                    AND w.LPMDt IS NOT NULL
                    AND w.LPMDt < @endExclusive;";

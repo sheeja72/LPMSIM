@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.16</Version>
-    <AssemblyVersion>1.14.16.0</AssemblyVersion>
-    <FileVersion>1.14.16.0</FileVersion>
-    <InformationalVersion>1.14.16 (Rename Viewer role label to Reports)</InformationalVersion>
+    <Version>1.14.17</Version>
+    <AssemblyVersion>1.14.17.0</AssemblyVersion>
+    <FileVersion>1.14.17.0</FileVersion>
+    <InformationalVersion>1.14.17 (SIM Generate: drop pallettype JOIN, use w.Season + w.PalletCategory)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
