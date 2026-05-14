@@ -23,6 +23,39 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.14 — EOM/SIM nav group + role rename + Store/Div/Dept Access filters (2026-05-14)
+
+### Sidebar reorganized
+- New **EOM/SIM** collapsible MudNavGroup at the top (replaces the flat "LPM Variables" section header). Contains: EOM Generate, LPM SIM Generate, Production Schedule, ADM (Allocation), LPM SIM Reports.
+- **Warehouse Boxes** moved from the top-level into the existing **Reports** group (now: WH Stock Position, Variance Report, Warehouse Boxes).
+- "Planning Config" and "Admin" sections unchanged.
+
+### Role display labels renamed
+- **Editor** → **EOM/SIM** (matches the new menu group name)
+- **PlanningManager** → **Planning Config** (matches the section name)
+- Migration **042** updates `dbo.LPMRole.RoleName` for both codes. **`RoleCode` is unchanged** — every `[Authorize(Roles = Roles.Editor)]` and `[Authorize(Roles = Roles.PlanningManager)]` keeps working untouched. Existing `LpmUserRole` rows continue to bind via `RoleCode`.
+- UI updates (display-only):
+  - `Users.razor` chip now shows `RoleName` (with `RoleCode` fallback) via a new in-memory lookup.
+  - `UserEditDialog.razor` checkbox labels show `RoleName` instead of `RoleCode`.
+  - `MainLayout.razor` sidebar role badge maps `IsInRole("Editor")` → "EOM/SIM" and `IsInRole("PlanningManager")` → "Planning Config".
+
+### New filters on Store / Division Access and Store / Department Access pages
+- **Store / Division Access**: added Store + Division multi-select filters with type-ahead search (reuses the existing `MultiSelectFilter` component from Warehouse Boxes / WH Stock Position).
+- **Store / Department Access**: added Store + Division + Department multi-select filters.
+- Both default to empty (= no filter). Option lists are derived from the currently-loaded rows so the dropdowns stay in sync with what's displayable.
+
+### Searchable Division / Department dropdowns
+- **`Admin → SKU Max Rules`** — Division dropdown converted from `MudSelect` to `MudAutocomplete` (type-ahead, retains the "All divisions" option as the empty value).
+- **`SIM Generate → Division Summary tab`** — multi-Division filter converted from `MudSelect MultiSelection=true` to `MultiSelectFilter` (gives type-ahead + Select-all button).
+- The rest of the app's Division / Department pickers were already on `MudAutocomplete` or `MultiSelectFilter` — no change needed.
+
+### Notes
+- **Migration 042 must be applied to prod DB before deploy** so the renamed role labels appear immediately. If not applied, the UI falls back to showing `RoleCode` (still functional, just doesn't say "EOM/SIM" yet).
+- No authorization model change. Permissions stay 1:1 with previous releases.
+- No schema migration beyond the `RoleName` UPDATE.
+
+---
+
 ## 1.14.13 — Sidebar version badge readability on yellow (2026-05-14)
 
 ### Fixed

@@ -26,10 +26,13 @@
             <MudStack Row="true" Spacing="4">
                 @foreach (var role in Roles)
                 {
+                    @* 1.14.14: label shows RoleName (e.g. "EOM/SIM") instead of
+                       RoleCode ("Editor"). RoleCode still drives the toggle —
+                       only the label is user-friendly. *@
                     <MudCheckBox T="bool"
                                  Value="@Model.SelectedRoles.Contains(role.RoleCode)"
                                  ValueChanged="(bool v) => ToggleRole(role.RoleCode, v)"
-                                 Label="@role.RoleCode"
+                                 Label="@(string.IsNullOrEmpty(role.RoleName) ? role.RoleCode : role.RoleName)"
                                  Color="Color.Primary" />
                 }
             </MudStack>

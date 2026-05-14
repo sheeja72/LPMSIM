@@ -43,9 +43,15 @@
                        ValueChanged="(bool v) => ToggleActiveAsync(context, v)" />
         </MudTd>
         <MudTd DataLabel="Roles">
+            @* 1.14.14: chip shows RoleName (e.g. "EOM/SIM") instead of
+               RoleCode ("Editor"). Authorization still uses RoleCode
+               internally; this is display-only via the _roleNames lookup
+               built in ReloadAsync. *@
             @foreach (var r in context.UserRoles.OrderBy(r => r.RoleCode))
             {
-                <MudChip T="string" Size="Size.Small" Color="Color.Primary" Class="mr-1">@r.RoleCode</MudChip>
+                <MudChip T="string" Size="Size.Small" Color="Color.Primary" Class="mr-1">
+                    @(_roleNames.TryGetValue(r.RoleCode, out var rn) && !string.IsNullOrEmpty(rn) ? rn : r.RoleCode)
+                </MudChip>
             }
         </MudTd>
         <MudTd>
@@ -63,6 +69,8 @@
 @code {
     private List<LpmUser> _users = new();
     private List<LpmRole> _roles = new();
+    // 1.14.14: RoleCode -> RoleName lookup for chip display.
+    private Dictionary<string, string> _roleNames = new(StringComparer.OrdinalIgnoreCase);
     private string _search = "";
     private bool _loading;
 
@@ -86,6 +94,7 @@
                 .OrderBy(u => u.Username)
                 .ToListAsync();
             _roles = await db.LpmRoles.AsNoTracking().OrderBy(r => r.RoleCode).ToListAsync();
+            _roleNames = _roles.ToDictionary(r => r.RoleCode, r => r.RoleName, StringComparer.OrdinalIgnoreCase);
         }
         finally
         {

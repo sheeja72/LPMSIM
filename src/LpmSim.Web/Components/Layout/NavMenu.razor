@@ -1,31 +1,37 @@
 <MudNavMenu Class="lpm-nav">
     <MudNavLink Href="" Match="NavLinkMatch.All" Icon="@Icons.Material.Filled.Dashboard">Home</MudNavLink>
 
-    <div class="lpm-nav-section">LPM Variables</div>
-    @* Division Max Entry hidden — superseded by SKU Max Rules + EOM Output. *@
-    @* <MudNavLink Href="lpm/div-max" Icon="@Icons.Material.Filled.GridOn">Division Max Entry</MudNavLink> *@
-    <MudNavLink Href="lpm/eom/generate"     Icon="@Icons.Material.Filled.PlayCircle">EOM Generate</MudNavLink>
-    <MudNavLink Href="lpm/lpm-sim/generate"             Icon="@Icons.Material.Filled.AutoFixHigh">LPM SIM Generate</MudNavLink>
-    <MudNavLink Href="lpm/lpm-sim/production-schedule"  Icon="@Icons.Material.Filled.CalendarMonth">Production Schedule</MudNavLink>
-    <MudNavLink Href="lpm/adm"                          Icon="@Icons.Material.Filled.CalendarViewWeek">ADM (Allocation)</MudNavLink>
-    <MudNavLink Href="lpm/lpm-sim/reports"              Icon="@Icons.Material.Filled.Assessment">LPM SIM Reports</MudNavLink>
-    <MudNavLink Href="lpm/warehouse-boxes"  Icon="@Icons.Material.Filled.Warehouse">Warehouse Boxes</MudNavLink>
+    @* 1.14.14: top-level "LPM Variables" flat section replaced with an
+       "EOM/SIM" collapsible MudNavGroup. The 5 allocation/reporting pages
+       (EOM Generate, LPM SIM Generate, Production Schedule, ADM, LPM SIM
+       Reports) live here. Warehouse Boxes moved into Reports (below).
+       The grouping matches the corresponding "EOM/SIM" role label
+       (formerly "Editor") so admins can map permissions to menu sections
+       at a glance. *@
+    <MudNavGroup Title="EOM/SIM" Icon="@Icons.Material.Filled.PlayCircle" Expanded="false">
+        <MudNavLink Href="lpm/eom/generate"                Icon="@Icons.Material.Filled.PlayCircle">EOM Generate</MudNavLink>
+        <MudNavLink Href="lpm/lpm-sim/generate"            Icon="@Icons.Material.Filled.AutoFixHigh">LPM SIM Generate</MudNavLink>
+        <MudNavLink Href="lpm/lpm-sim/production-schedule" Icon="@Icons.Material.Filled.CalendarMonth">Production Schedule</MudNavLink>
+        <MudNavLink Href="lpm/adm"                         Icon="@Icons.Material.Filled.CalendarViewWeek">ADM (Allocation)</MudNavLink>
+        <MudNavLink Href="lpm/lpm-sim/reports"             Icon="@Icons.Material.Filled.Assessment">LPM SIM Reports</MudNavLink>
+    </MudNavGroup>
 
-    @* Reports — collapsible group (MudNavGroup). Sub-items only render when
-       the planner expands the header; default is collapsed. Each new report
-       becomes a MudNavLink inside this group. Sits between Warehouse Boxes
-       and Planning Config so it groups visually with the other reporting /
-       allocation pages above it. *@
+    @* Reports — collapsible. 1.14.14: Warehouse Boxes joined this group
+       (was a top-level link in the LPM Variables section). *@
     <MudNavGroup Title="Reports" Icon="@Icons.Material.Filled.Assessment" Expanded="false">
         <MudNavLink Href="lpm/reports/wh-ho-stock" Icon="@Icons.Material.Filled.CompareArrows">WH Stock Position</MudNavLink>
         <MudNavLink Href="lpm/reports/variance"    Icon="@Icons.Material.Filled.ShowChart">Variance Report</MudNavLink>
+        <MudNavLink Href="lpm/warehouse-boxes"     Icon="@Icons.Material.Filled.Warehouse">Warehouse Boxes</MudNavLink>
     </MudNavGroup>
 
     @* Planning Config — operational config (Monthly Weights / Planned Inputs /
        Data Uploads) is visible to all signed-in users; the master-data pages
        below remain gated behind Admin / PlanningManager roles. The section
        header sits OUTSIDE the AuthorizeView so the section name is visible
-       even when only the 3 unrestricted items are shown. *@
+       even when only the 3 unrestricted items are shown.
+       1.14.14: the PlanningManager role's display label is now "Planning
+       Config" (RoleName flipped via migration 042). RoleCode unchanged so
+       this AuthorizeView keeps working without any further edits. *@
     <div class="lpm-nav-section">Planning Config</div>
     <MudNavLink Href="lpm/monthly-weights"  Icon="@Icons.Material.Filled.EventNote">Monthly Weights</MudNavLink>
     <MudNavLink Href="lpm/planned"          Icon="@Icons.Material.Filled.RequestQuote">Planned Inputs</MudNavLink>

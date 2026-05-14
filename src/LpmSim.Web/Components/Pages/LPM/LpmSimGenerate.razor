@@ -1153,27 +1153,19 @@
             }
             <MudGrid Spacing="2" Class="mb-2">
                 <MudItem xs="12" md="3">
-                    @* Multi-select division filter — empty/All shows every row.
-                       Items list is built from the rows currently loaded for
-                       this batch so it always matches what the planner sees. *@
-                    <MudSelect T="string" Label="Divisions"
-                               SelectedValues="_divisionSummaryFilter"
-                               SelectedValuesChanged="(IEnumerable<string> vs) => { _divisionSummaryFilter = vs?.ToHashSet(StringComparer.OrdinalIgnoreCase) ?? new(StringComparer.OrdinalIgnoreCase); StateHasChanged(); }"
-                               MultiSelection="true"
-                               Variant="Variant.Outlined" Margin="Margin.Dense"
-                               Clearable
-                               Placeholder="(All)"
-                               SelectAll="true" SelectAllText="All divisions"
-                               MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedDivisionsText))">
-                        @foreach (var d in _divisionSummary
-                                              .Select(r => r.DivisionName)
-                                              .Where(n => !string.IsNullOrWhiteSpace(n))
-                                              .Distinct(StringComparer.OrdinalIgnoreCase)
-                                              .OrderBy(n => n))
-                        {
-                            <MudSelectItem T="string" Value="d">@d</MudSelectItem>
-                        }
-                    </MudSelect>
+                    @* 1.14.14: MudSelect → MultiSelectFilter so long
+                       division lists are searchable (type-ahead). Empty =
+                       "All". Items list built from the rows currently
+                       loaded for this batch. *@
+                    <MultiSelectFilter Label="Divisions"
+                                       Items="@(_divisionSummary
+                                                    .Select(r => r.DivisionName ?? string.Empty)
+                                                    .Where(n => !string.IsNullOrWhiteSpace(n))
+                                                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                                                    .OrderBy(n => n, StringComparer.OrdinalIgnoreCase)
+                                                    .ToList())"
+                                       Selected="_divisionSummaryFilter"
+                                       SelectedChanged="@((HashSet<string> s) => { _divisionSummaryFilter = s; StateHasChanged(); })" />
                 </MudItem>
                 <MudItem xs="6" md="2">
                     <MudNumericField T="decimal?" Label="Min Box Usability %"

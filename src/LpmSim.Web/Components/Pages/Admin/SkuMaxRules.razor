@@ -24,15 +24,20 @@
             </MudSelect>
         </MudItem>
         <MudItem xs="12" sm="5" md="4">
-            <MudSelect T="int" Label="Division" Value="_divCode"
-                       ValueChanged="async (int v) => { _divCode = v; await LoadAsync(); }"
-                       Variant="Variant.Outlined" Margin="Margin.Dense">
-                <MudSelectItem T="int" Value="0">All divisions</MudSelectItem>
-                @foreach (var d in _divisions)
-                {
-                    <MudSelectItem T="int" Value="d.DivCode">@d.Name</MudSelectItem>
-                }
-            </MudSelect>
+            @* 1.14.14: MudSelect → MudAutocomplete so long Division lists
+               are searchable. T="string" because MudAutocomplete's binding
+               works on the display text; we keep _divCode (int) as the
+               underlying source-of-truth and translate via the helpers
+               below. *@
+            <MudAutocomplete T="string" Label="Division"
+                             Value="@DivisionDisplayText(_divCode)"
+                             ValueChanged="@(async (string v) => { _divCode = DivisionCodeFromText(v); await LoadAsync(); })"
+                             SearchFunc="DivisionSearch"
+                             Variant="Variant.Outlined" Margin="Margin.Dense"
+                             Clearable="false"
+                             ResetValueOnEmptyText="false"
+                             ShowProgressIndicator="false"
+                             Immediate="true" CoerceText="false" />
         </MudItem>
         <MudItem xs="12" sm="3" md="5" Class="d-flex align-center gap-2 justify-end">
             <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
@@ -143,6 +148,36 @@ else
 
     private string DivisionName(int code) =>
         _divisions.FirstOrDefault(d => d.DivCode == code)?.Name ?? code.ToString();
+
+    // 1.14.14: helpers backing the MudAutocomplete Division dropdown.
+    // The label format is "<Name> (<Code>)" with a special "All divisions"
+    // entry for _divCode = 0. SearchFunc filters by substring match on
+    // the display text — case-insensitive, returns ≤50 matches.
+    private const string DivisionAllLabel = "All divisions";
+
+    private string DivisionDisplayText(int code) =>
+        code <= 0
+            ? DivisionAllLabel
+            : $"{DivisionName(code)} ({code})";
+
+    private int DivisionCodeFromText(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.Equals(text, DivisionAllLabel, StringComparison.OrdinalIgnoreCase))
+            return 0;
+        var hit = _divisions.FirstOrDefault(d =>
+            string.Equals(DivisionDisplayText(d.DivCode), text, StringComparison.OrdinalIgnoreCase));
+        return hit?.DivCode ?? 0;
+    }
+
+    private Task<IEnumerable<string>> DivisionSearch(string? value, CancellationToken ct)
+    {
+        var all = Enumerable.Repeat(DivisionAllLabel, 1)
+            .Concat(_divisions.Select(d => DivisionDisplayText(d.DivCode)));
+        if (string.IsNullOrWhiteSpace(value))
+            return Task.FromResult<IEnumerable<string>>(all.Take(50));
+        return Task.FromResult<IEnumerable<string>>(
+            all.Where(s => s.Contains(value, StringComparison.OrdinalIgnoreCase)).Take(50));
+    }
 
     protected override async Task OnInitializedAsync()
     {

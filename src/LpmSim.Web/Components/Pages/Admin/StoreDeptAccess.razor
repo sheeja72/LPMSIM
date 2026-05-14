@@ -32,7 +32,7 @@
                 }
             </MudSelect>
         </MudItem>
-        <MudItem xs="12" md="3">
+        <MudItem xs="12" md="2">
             <MudSelect T="string" Label="Show" Value="_filterMode"
                        ValueChanged="(string v) => { _filterMode = string.IsNullOrEmpty(v) ? InactiveMode : v; StateHasChanged(); }"
                        Variant="Variant.Outlined" Margin="Margin.Dense">
@@ -40,11 +40,35 @@
                 <MudSelectItem T="string" Value="@AllMode">All entries</MudSelectItem>
             </MudSelect>
         </MudItem>
-        <MudItem xs="12" md="6" Class="d-flex justify-end gap-2">
+        @* 1.14.14: Store + Division + Department multi-select filters
+           with type-ahead search (MultiSelectFilter component). Empty = no
+           filter. Option lists derived from _all so dropdowns stay in
+           sync with what's actually loaded. *@
+        <MudItem xs="12" md="2">
+            <MultiSelectFilter Label="Store"
+                               Items="_storeFilterOptions"
+                               Selected="_selectedStores"
+                               LabelOf="@(s => _storeNames.TryGetValue(s, out var n) && !string.IsNullOrEmpty(n) ? $"{s} — {n}" : s)"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedStores = s; StateHasChanged(); })" />
+        </MudItem>
+        <MudItem xs="12" md="2">
+            <MultiSelectFilter Label="Division"
+                               Items="_divisionFilterOptions"
+                               Selected="_selectedDivisions"
+                               LabelOf="@(s => int.TryParse(s, out var dc) && _divisionNames.TryGetValue(dc, out var n) && !string.IsNullOrEmpty(n) ? $"{n} ({dc})" : s)"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDivisions = s; StateHasChanged(); })" />
+        </MudItem>
+        <MudItem xs="12" md="2">
+            <MultiSelectFilter Label="Department"
+                               Items="_departmentFilterOptions"
+                               Selected="_selectedDepartments"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDepartments = s; StateHasChanged(); })" />
+        </MudItem>
+        <MudItem xs="12" md="2" Class="d-flex justify-end gap-2">
             <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
                        StartIcon="@Icons.Material.Filled.Add" OnClick="OpenAddAsync"
                        Disabled="@string.IsNullOrEmpty(_country)">
-                Add Store × Department
+                Add
             </MudButton>
         </MudItem>
     </MudGrid>
@@ -130,8 +154,37 @@
     private string _filterMode = InactiveMode;
 
     private List<LpmStoreDeptAccess> _all = new();
+
+    // 1.14.14: Store + Division + Department multi-select filters.
+    private HashSet<string> _selectedStores      = new(StringComparer.OrdinalIgnoreCase);
+    private HashSet<string> _selectedDivisions   = new(StringComparer.OrdinalIgnoreCase); // DivCode as string
+    private HashSet<string> _selectedDepartments = new(StringComparer.OrdinalIgnoreCase);
+
     private IEnumerable<LpmStoreDeptAccess> _visible
-        => _filterMode == AllMode ? _all : _all.Where(x => !x.IsActive);
+    {
+        get
+        {
+            var src = _filterMode == AllMode ? _all : _all.Where(x => !x.IsActive);
+            if (_selectedStores.Count > 0)
+                src = src.Where(x => _selectedStores.Contains(x.StoreID));
+            if (_selectedDivisions.Count > 0)
+                src = src.Where(x => _selectedDivisions.Contains(x.DivCode.ToString()));
+            if (_selectedDepartments.Count > 0)
+                src = src.Where(x => _selectedDepartments.Contains(x.Department));
+            return src;
+        }
+    }
+
+    // Distinct option lists for each multi-select, derived from _all.
+    private IReadOnlyList<string> _storeFilterOptions =>
+        _all.Select(a => a.StoreID).Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase).ToList();
+    private IReadOnlyList<string> _divisionFilterOptions =>
+        _all.Select(a => a.DivCode.ToString()).Distinct()
+            .OrderBy(d => int.TryParse(d, out var n) ? n : int.MaxValue).ToList();
+    private IReadOnlyList<string> _departmentFilterOptions =>
+        _all.Select(a => a.Department).Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(d => d, StringComparer.OrdinalIgnoreCase).ToList();
 
     private Dictionary<string, string> _storeNames    = new();
     private Dictionary<int, string>    _divisionNames = new();

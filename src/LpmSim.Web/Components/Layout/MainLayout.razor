@@ -14,9 +14,14 @@
             <AuthorizeView>
                 <Authorized>
                     @{
-                        var role = context.User.IsInRole("Admin")  ? "Admin"
-                                 : context.User.IsInRole("Editor") ? "Editor"
-                                 : context.User.IsInRole("Viewer") ? "Viewer"
+                        // 1.14.14: Display labels flipped to match the renamed
+                        // RoleName values (migration 042). RoleCode strings
+                        // ("Editor", "PlanningManager") still drive IsInRole
+                        // — we just display the friendlier label.
+                        var role = context.User.IsInRole("Admin")           ? "Admin"
+                                 : context.User.IsInRole("PlanningManager") ? "Planning Config"
+                                 : context.User.IsInRole("Editor")          ? "EOM/SIM"
+                                 : context.User.IsInRole("Viewer")          ? "Viewer"
                                  : "User";
                     }
                     <div class="lpm-brand-user">
