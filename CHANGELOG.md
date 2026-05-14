@@ -23,6 +23,18 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.13 — Sidebar version badge readability on yellow (2026-05-14)
+
+### Fixed
+- **`v1.14.x` badge next to "Planning Hub"** was light-gray text on a near-transparent white chip — readable on the old blue sidebar but invisible on the 1.14.5+ yellow sidebar. Flipped to **bold near-black (`#0F172A`) on a subtle dark chip** so the version label pops on every sidebar palette.
+- **Drawer footer** ("Planning Hub · v1.14.x" at the bottom) recoloured from light-slate to slate-800 (`#1f2937`) with a dark divider, matching the new yellow contrast.
+
+### Notes
+- Theme colors only. No behaviour change.
+- Other sidebar text (nav links, brand title) was already readable from earlier 1.14.5/1.14.7 changes.
+
+---
+
 ## 1.14.12 — WH Stock + Variance perf + PalletNo on SIM Output (2026-05-13)
 
 ### Performance

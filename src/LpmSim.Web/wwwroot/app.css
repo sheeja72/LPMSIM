@@ -75,10 +75,10 @@ html, body {
 
 .lpm-brand-version {
     font-size: 0.65rem;
-    font-weight: 500;
+    font-weight: 700;                            /* 1.14.13: bold for badge legibility */
     letter-spacing: 0.04em;
-    color: rgba(226, 232, 240, 0.7);
-    background: rgba(255, 255, 255, 0.08);
+    color: #0F172A;                              /* 1.14.13: near-black on yellow */
+    background: rgba(0, 0, 0, 0.1);              /* 1.14.13: subtle dark chip */
     padding: 0.1rem 0.4rem;
     border-radius: 4px;
     cursor: help;
@@ -200,8 +200,8 @@ html, body {
     padding: 0.6rem 1.25rem;
     font-size: 0.7rem;
     letter-spacing: 0.02em;
-    color: rgba(203, 213, 225, 0.5);
-    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    color: #1f2937;                              /* 1.14.13: dark slate on yellow (was light slate for blue) */
+    border-top: 1px solid rgba(0, 0, 0, 0.15);   /* 1.14.13: dark divider */
     cursor: help;
     user-select: none;
 }
