@@ -516,12 +516,26 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         {
             // Lock: refuse to replace a Draft that has a production schedule
             // attached — that's lost work the planner needs to consciously
-            // discard via the schedule's own Delete button first.
+            // discard. 1.14.22: the page can opt-in to cascade-delete the
+            // schedule too via req.DeleteExistingSchedule (set only after
+            // the page shows an explicit confirmation dialog naming the
+            // schedule). When the flag is false (default), we still throw
+            // so other callers, scripts, or future code paths can't lose
+            // schedule work silently.
             var schedExists = await db.LpmSimProductionSchedules.AsNoTracking()
                 .AnyAsync(s => s.LPMBatchNo == latest.LPMBatchNo, ct);
             if (schedExists)
-                throw new InvalidOperationException(
-                    $"A production schedule exists for the existing Draft batch #{latest.LPMBatchNo}. Delete the schedule before re-generating SIM.");
+            {
+                if (!req.DeleteExistingSchedule)
+                    throw new InvalidOperationException(
+                        $"A production schedule exists for the existing Draft batch #{latest.LPMBatchNo}. Delete the schedule before re-generating SIM.");
+
+                // Caller has opted-in to cascade-delete. Drop the schedule
+                // first so the downstream batch-delete (below) doesn't trip
+                // the same row.
+                await db.Database.ExecuteSqlInterpolatedAsync(
+                    $@"DELETE FROM dbo.LPMSIM_ProductionSchedule WHERE LPMBatchNo = {latest.LPMBatchNo};", ct);
+            }
 
             db.Database.SetCommandTimeout(600);
             await ChunkDeleteAsync(db, "dbo.LPMSIM_AllocTrace",       latest.LPMBatchNo, ct);

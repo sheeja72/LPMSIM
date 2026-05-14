@@ -23,6 +23,40 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.22 — SIM Generate UX fix + audit logger foundation for 'X' (eXecute) action code (2026-05-14)
+
+### SIM Generate — one-click overwrite of a Draft with an attached Production Schedule
+Pre-1.14.22, when the planner clicked **Generate** and the current Draft batch already had a Production Schedule attached, `LpmSimGenerator.GenerateAsync` threw a hard error:
+
+> "A production schedule exists for the existing Draft batch #24. Delete the schedule before re-generating SIM."
+
+The planner had to navigate to the Production Schedule page, click Delete, navigate back, and click Generate again — four steps to recover from a single click.
+
+1.14.22 keeps the explicit-confirmation safety net but collapses the recovery into **one extra click on the existing dialog**:
+
+- New `LpmSimGenerateRequest.DeleteExistingSchedule` flag (default `false` — preserves the legacy guard for non-UI callers).
+- `Sim.GenerateAsync` honors the flag at the schedule-exists check: if `true`, it cascade-deletes the row in `dbo.LPMSIM_ProductionSchedule` *before* the existing batch-delete cascade (`LPMSIM_AllocTrace` → `LPMSIM_Output` → `LPMSIM_StoreItemBalance` → `LPMSIM_StoreDivBalance` → `LPMSIM_BoxBalance` → `LPMSIM_Batch`). If `false`, the old `InvalidOperationException` still throws — so any other call site (future scripts, tests, etc.) keeps the safety guard.
+- `LpmSimGenerate.razor`'s `GenerateAsync` peeks at `LpmSimProductionSchedules` when an existing Draft is detected, and substitutes a stronger dialog when a schedule is attached:
+  > "Draft batch #N has an attached Production Schedule. Generate will REPLACE the batch AND DELETE the Production Schedule. Continue?"
+  > **[Generate (delete schedule)] [Cancel]**
+- Confirmation passes `DeleteExistingSchedule = true` to the service. Without the schedule, the existing "Overwrite Draft?" dialog is unchanged.
+- Probe is best-effort wrapped in try/catch — if it fails (transient DB issue), the page falls back to the legacy dialog and the service-side guard still protects schedule data.
+
+**Out of scope (intentional):** Approve and Delete handlers throw similar "schedule exists" errors at `LpmSimGenerator.cs:1862` and `:1894`. Those paths have different semantics (Approve is downstream of Schedule; Delete-batch-with-schedule could be a real planner mistake worth blocking). Left untouched until you ask for the same treatment.
+
+### Audit logger — `'X'` (eXecute) Action code foundation
+Adds the plumbing for the upcoming 1.14.23 audit-instrumentation work without yet calling it from any handler:
+- `IActionLogger.LogAsync(string, string, object?, char action = 'R', CancellationToken)` — new optional `action` parameter, defaults to `'R'` so all existing call sites keep their behaviour unchanged.
+- `Audit.razor` grows a new chip case: rows with `Action = 'X'` render as a yellow "Action" chip, distinct from the existing Insert / Update / Delete / Read chips.
+- No DB schema change. The `Action` column has no CHECK constraint, so writing `'X'` is allowed today.
+- Zero functional change in 1.14.22 — no handler yet writes `'X'`. The 27 button-click instrumentation points ship as **1.14.23**.
+
+### Notes
+- No DB migration in this release.
+- Pure code change.
+
+---
+
 ## 1.14.21 — SKU Max Build: live per-rule progress + human-readable timings (2026-05-14)
 
 ### Live per-rule progress (the main improvement)

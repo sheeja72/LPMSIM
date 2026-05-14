@@ -3148,12 +3148,56 @@
     {
         if (_runDate is null || string.IsNullOrEmpty(_country)) return;
 
+        // 1.14.22 — when an existing Draft batch is present, also peek at
+        // whether it has a Production Schedule attached. If so, the dialog
+        // text below names the schedule that will be deleted and the user's
+        // OK passes DeleteExistingSchedule=true into the service call. The
+        // service throws if the flag is false and a schedule exists, so
+        // skipping the dialog (or saying No) still keeps schedule data safe.
+        bool deleteExistingSchedule = false;
         if (_readiness?.ExistingDraft == true)
         {
-            var ok = await DialogService.ShowMessageBox("Overwrite Draft",
-                "A Draft batch already exists for this country and date. Generate will replace it. Continue?",
-                yesText: "Generate", cancelText: "Cancel");
+            bool hasSchedule = false;
+            long? existingDraftNo = null;
+            try
+            {
+                await using var probeDb = await DbFactory.CreateDbContextAsync();
+                existingDraftNo = await probeDb.LpmSimBatches.AsNoTracking()
+                    .Where(b => b.Country == _country
+                             && b.RunDate == _runDate.Value.Date
+                             && b.Status == "Draft")
+                    .OrderByDescending(b => b.LPMBatchNo)
+                    .Select(b => (long?)b.LPMBatchNo)
+                    .FirstOrDefaultAsync();
+                if (existingDraftNo.HasValue)
+                {
+                    hasSchedule = await probeDb.LpmSimProductionSchedules.AsNoTracking()
+                        .AnyAsync(s => s.LPMBatchNo == existingDraftNo.Value);
+                }
+            }
+            catch
+            {
+                // Probe is best-effort. If it fails, fall back to the
+                // legacy dialog — the service-side guard still throws if
+                // a schedule sneaks in, so we can't accidentally lose it.
+            }
+
+            bool? ok;
+            if (hasSchedule && existingDraftNo.HasValue)
+            {
+                ok = await DialogService.ShowMessageBox("Replace Draft + delete Production Schedule",
+                    $"Draft batch #{existingDraftNo} has an attached Production Schedule. "
+                    + "Generate will REPLACE the batch AND DELETE the Production Schedule. Continue?",
+                    yesText: "Generate (delete schedule)", cancelText: "Cancel");
+            }
+            else
+            {
+                ok = await DialogService.ShowMessageBox("Overwrite Draft",
+                    "A Draft batch already exists for this country and date. Generate will replace it. Continue?",
+                    yesText: "Generate", cancelText: "Cancel");
+            }
             if (ok != true) return;
+            deleteExistingSchedule = hasSchedule;
         }
 
         _lastError = "";
@@ -3182,6 +3226,7 @@
                 PalletCategories     = _selectedPalletCategories.ToList(),
                 LpmMonths            = _selectedLpmMonths.ToList(),
                 WeekNo               = (byte)_runWeek,
+                DeleteExistingSchedule = deleteExistingSchedule,   // 1.14.22 — true only when the user confirmed the schedule-delete dialog
             });
             sw.Stop();
             _lastRunDuration = sw.Elapsed;

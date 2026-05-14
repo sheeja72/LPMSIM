@@ -219,6 +219,16 @@ public class LpmSimGenerateRequest
     /// week the batch was generated for. Default = 1.
     /// </summary>
     public byte WeekNo { get; set; } = 1;
+
+    /// <summary>
+    /// 1.14.22 — opt-in cascade for the rare case where the existing Draft
+    /// batch has an attached <c>LPMSIM_ProductionSchedule</c>. Default
+    /// <c>false</c> keeps the legacy hard-error guard so a planner cannot
+    /// accidentally lose schedule work by calling Generate twice. The page
+    /// sets this to <c>true</c> only after showing the planner an explicit
+    /// confirmation dialog naming the schedule that will be deleted.
+    /// </summary>
+    public bool DeleteExistingSchedule { get; set; } = false;
 }
 
 public class LpmSimGenerateResult

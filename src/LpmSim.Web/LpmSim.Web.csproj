@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.21</Version>
-    <AssemblyVersion>1.14.21.0</AssemblyVersion>
-    <FileVersion>1.14.21.0</FileVersion>
-    <InformationalVersion>1.14.21 (SKU Max Build: live per-rule progress + human-readable timings)</InformationalVersion>
+    <Version>1.14.22</Version>
+    <AssemblyVersion>1.14.22.0</AssemblyVersion>
+    <FileVersion>1.14.22.0</FileVersion>
+    <InformationalVersion>1.14.22 (SIM Generate: one-click overwrite of Draft with attached Production Schedule)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

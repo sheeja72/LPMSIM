@@ -6,18 +6,32 @@ using Microsoft.EntityFrameworkCore;
 namespace LpmSim.Data.Auditing;
 
 /// <summary>
-/// Records user actions (reports opened, filters applied, etc.) into LPMAuditLog
-/// using Action='R' (Read). Data-change audits (I/U/D) continue to flow through
-/// the EF SaveChangesInterceptor automatically.
+/// Records user actions into LPMAuditLog. Three Action codes are used:
+/// <list type="bullet">
+///   <item><c>'R'</c> — Read (report loaded, filter applied). Default for
+///     <see cref="LogAsync"/>. Pre-1.14.22 the only code this class wrote.</item>
+///   <item><c>'X'</c> — eXecute (a button click that initiated a business
+///     action — Generate, Approve, Delete, Build SKU Max, Save, Upload, etc.
+///     Added 1.14.22 so action-button events are filterable separately from
+///     read/view events).</item>
+///   <item><c>'I'/'U'/'D'</c> — Insert / Update / Delete on an EF-tracked
+///     entity. Written automatically by the SaveChangesInterceptor — callers
+///     never set these explicitly.</item>
+/// </list>
 /// </summary>
 public interface IActionLogger
 {
-    Task LogAsync(string entity, string key, object? details = null, CancellationToken ct = default);
+    /// <summary>
+    /// Write one audit row. <paramref name="action"/> defaults to <c>'R'</c>
+    /// so existing 3-argument callers (Read events) keep their previous
+    /// behaviour. Pass <c>action: 'X'</c> from button-click handlers.
+    /// </summary>
+    Task LogAsync(string entity, string key, object? details = null, char action = 'R', CancellationToken ct = default);
 }
 
 public class ActionLogger(IDbContextFactory<LpmDbContext> dbFactory, ICurrentUser currentUser) : IActionLogger
 {
-    public async Task LogAsync(string entity, string key, object? details = null, CancellationToken ct = default)
+    public async Task LogAsync(string entity, string key, object? details = null, char action = 'R', CancellationToken ct = default)
     {
         try
         {
@@ -26,7 +40,7 @@ public class ActionLogger(IDbContextFactory<LpmDbContext> dbFactory, ICurrentUse
             {
                 EntityName  = entity,
                 EntityKey   = key.Length > 200 ? key[..200] : key,
-                Action      = 'R',
+                Action      = action,
                 ChangedBy   = currentUser.Name,
                 ChangedTS   = DateTime.Now,
                 ChangesJson = details is null ? null : JsonSerializer.Serialize(details),

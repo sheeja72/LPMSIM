@@ -130,7 +130,7 @@ public class WeeklySalesTargetSplitService(
             {
                 row.Country, row.Year, row.Month, row.DivCode,
                 row.Wk1, row.Wk2, row.Wk3, row.Wk4,
-            }, ct);
+            }, ct: ct);
     }
 
     /// <summary>
@@ -153,7 +153,7 @@ public class WeeklySalesTargetSplitService(
         await actionLog.LogAsync(
             "WeeklySalesTargetSplit",
             $"{country}/{year}-{month:D2}/Div{divCode}",
-            new { Action = "Delete", Removed = existing.Count }, ct);
+            new { Action = "Delete", Removed = existing.Count }, ct: ct);
     }
 
     /// <summary>

@@ -69,6 +69,15 @@
             {
                 <MudChip T="string" Size="Size.Small" Color="Color.Default">Read</MudChip>
             }
+            else if (context.Action == 'X')
+            {
+                @* 1.14.22 — 'X' (eXecute) = button-click events that
+                   initiated a business action (Generate, Approve, Delete,
+                   Build, Save, Upload, etc.). Distinct from I/U/D so the
+                   admin can filter to "show me only the user-initiated
+                   actions" without the noisy EF row-change trail. *@
+                <MudChip T="string" Size="Size.Small" Color="Color.Warning">Action</MudChip>
+            }
             else
             {
                 <MudChip T="string" Size="Size.Small">@context.Action</MudChip>
