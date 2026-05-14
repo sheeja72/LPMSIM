@@ -23,6 +23,58 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.18 — LPMSIM_Output extra columns + box/item Season split + SKU Max archive (2026-05-14)
+
+### Added — 6 new columns on `dbo.LPMSIM_Output` (+ backup table)
+- **`Season`** `char(1) NULL` — `'S'` or `'W'` from `whboxitems.Season` (per-item, so a mixed pallet can hold both).
+- **`BoxQty`** `bigint NULL` — total qty in the source box (`SUM(whboxitems.Qty) PARTITION BY BoxNo`).
+- **`BoxItemQty`** `int NULL` — source qty of THIS item in the box (distinct from `LPMSIM_Output.Qty`, which is the **allocated** qty to a store).
+- **`UsabilityPct`** `decimal(5,2) NULL` — per-box: `SUM(LPMSIM_Output.Qty for this BoxNo) / BoxQty × 100`, rounded to 2 dp.
+- **`DivCode`** `int NULL` — item's division (`upc_subclass × subclassmaster × Division`).
+- **`SKUMax`** `int NULL` — the SKU Max value the allocator used for this (Store, Item) at allocation time.
+
+### Box-level vs item-level Season — undoing the 1.14.17 Season parts
+After 1.14.17 dropped the `pallettype` JOIN entirely, both **box selection** and **item filtering** went through `w.Season`. 1.14.18 splits the two concerns:
+
+| Level | Source | What it does |
+|---|---|---|
+| Box selection (SQL `seasonClause`) | `pt.Season` (pallettype master) | User picks Summer ⇒ only Summer-tagged **pallets** are returned by `ReadBoxesAsync`. |
+| Item allocation (in-memory filter) | `w.Season` (whboxitems per row) | After read, items whose own `w.Season` doesn't match the user's choice are dropped via `lpmBoxes/nonLpmBoxes.RemoveAll`. A Summer pallet that carries a few Winter items will see those Winter items skipped during allocation. |
+| Input Readiness grid | `pt.Season` | Reverted to box-level counts (matches the box-selection logic the user actually picks against). |
+| `PalletCategory` filter | `w.PalletCategory` | Unchanged from 1.14.17 — category data on `w.*` is identical to `pt.*` and the JOIN is unnecessary for this. |
+
+This restores the original 1.14.16-and-earlier box-level Season behaviour while adding the per-item drop the user asked for. Effect: **boxes containing mixed Summer/Winter items now contribute only their season-matching items to allocation**, rather than dropping the whole box (1.14.17 behaviour) or allocating the wrong-season items (pre-1.14.17 behaviour, since `pt.Season` for the box wouldn't catch them).
+
+### `LPM_SimItemSkuMax` archive-and-purge (migration 045)
+- New table **`dbo.LPM_SimItemSkuMax_Backup`** mirrors `LPM_SimItemSkuMax` + `(BackupTS, BackupBy)`. PK includes `BackupTS` so re-archiving the same period multiple times is non-conflicting.
+- `BuildSkuMaxAsync` now archives all **strictly-older** periods (same Country) into the backup at the end of each successful build, then deletes them from the main table. Production `LPM_SimItemSkuMax` therefore holds **only the latest period per country** going forward — much smaller, faster reads.
+- Archive runs inside its own try/catch so a missing backup table (migration 045 not applied yet) or transient failure doesn't break the build — the snapshot for the just-built period is already committed; archive retries on the next build.
+
+### Migration 044 — output columns + UAE backfill
+- Idempotent `ALTER TABLE` on both `LPMSIM_Output` and `LPMSIM_Output_Backup` for all 6 new columns.
+- Inline backfill for UAE batches via JOIN to `racks.dbo.whboxitems` for `Season` / `BoxItemQty` / `BoxQty`; `DivCode` via the standard `upc_subclass × subclassmaster × Division` chain; `SKUMax` from `LPM_SimItemSkuMax` with `MAX(SKUMax) GROUP BY (StoreID, ItemCode)` for defensive deduplication.
+- `UsabilityPct` backfill runs last so `BoxQty` is already populated.
+- Each backfill is guarded by `WHERE <col> IS NULL` so re-runs are no-ops.
+- Non-UAE backfill stays as a documented manual block at the bottom for the operator to run per country once `DataName` is confirmed in `bfldata.dbo.DataSettings`.
+
+### Migration 045 — `LPM_SimItemSkuMax_Backup`
+- Idempotent `CREATE TABLE`. No data motion in the migration itself — the first Build SKU Max after deploy populates the backup naturally.
+
+### Allocator changes (`LpmSimGenerator.cs`)
+- `BoxItem` record extended with `BoxQty`; `ReadBoxesAsync` reader now consumes the `BoxQty` window column.
+- After `ReadBoxesAsync` returns, items whose `w.Season` doesn't match the user's choice are removed from `lpmBoxes`/`nonLpmBoxes` (the per-item drop). Single point of truth, applies across all phases (P1a, P1b RR, P2a, P2b RR).
+- Both Phase 1 and Phase 2 `new LpmSimOutput { ... }` constructions populate `Season`, `BoxQty`, `BoxItemQty`, `DivCode`, `SKUMax` from per-row state + existing lookups.
+- A pre-bulk-insert pass stamps `UsabilityPct` on every output row using a `Dictionary<BoxNo, totalAllocated>` aggregate.
+- `BulkInsertOutputAsync` DataTable + row population extended for the 6 columns.
+- Backup INSERT (in `BackupAndDeleteAsync`) column list extended.
+
+### Notes
+- All columns are NULL-able and additive — existing batches stay valid pre-migration.
+- **Must apply migrations 044 + 045 to prod DB** before or alongside the deploy. Without 044 the allocator's bulk insert throws on unknown columns; without 045 the archive step silently skips (build still succeeds).
+- 1.14.17 is partially superseded — the box-level Season parts are reverted; the `PalletCategory` cleanup is kept.
+
+---
+
 ## 1.14.17 — SIM Generate: drop pallettype JOIN, use w.Season + w.PalletCategory (2026-05-14)
 
 ### Performance + correctness

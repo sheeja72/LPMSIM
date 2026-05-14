@@ -116,51 +116,49 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             //     into Purchased + Non-Purchased buckets. The "selBoxes"
             //     downstream logic still respects the includePurchasedBoxes
             //     toggle; only the SQL changes.
-            // 1.14.17: Season now read from whboxitems (w.Season) instead
-            // of pallettype master (pt.Season). pallettype JOIN dropped
-            // entirely; PalletCategory filter in {palletClause} now uses
-            // w.PalletCategory (see BuildPalletCategoryClause). Same
-            // rationale as 1.14.9's SKU Max Build switch — see comment
-            // at the bottom of BuildPalletCategoryClause. UPPER() makes
-            // the Season match case-insensitive.
+            // 1.14.18 — pallettype JOIN restored for BOX-level Season counting.
+            // The Input Readiness grid shows boxes/qty/lines bucketed by
+            // BOX-level (pt.Season) — same as the box-selection logic SIM
+            // Generate uses. PalletCategory still uses w.PalletCategory (1.14.17).
             cmd.CommandText = $@"
                 SELECT
                     -- LPM × Summer × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmSummerLines,
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmSummerBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmSummerLines,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmSummerBoxes,
 
                     -- Non-LPM × Summer × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmSummerLines,
-                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmSummerBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmSummerLines,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmSummerBoxes,
 
                     -- LPM × Winter × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmWinterLines,
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmWinterBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmWinterLines,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmWinterBoxes,
 
                     -- Non-LPM × Winter × Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmWinterLines,
-                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmWinterBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmWinterLines,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmWinterBoxes,
 
-                    -- LPM × Summer × Non-Purchased  (new 1.14.11)
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmSummerNpBoxes,
+                    -- LPM × Summer × Non-Purchased  (1.14.11)
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmSummerNpBoxes,
 
                     -- Non-LPM × Summer × Non-Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmSummerNpBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmSummerNpBoxes,
 
                     -- LPM × Winter × Non-Purchased
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmWinterNpBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmWinterNpBoxes,
 
                     -- Non-LPM × Winter × Non-Purchased
-                    SUM(CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND UPPER(ISNULL(w.Season, '')) = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
                   FROM {whSrc} w
+                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE 1 = 1
                    {palletClause}
                    {lpmDtClause}
@@ -612,15 +610,24 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         }
 
         // ---------------- Inputs ----------------
-        // 1.14.17: Season filter now uses w.Season (whboxitems) instead of
-        // pt.Season (pallettype). The pallettype JOIN was dropped from
-        // ReadBoxesAsync's SELECT, so any pt.* reference here would fail
-        // with "multi-part identifier could not be bound". UPPER() makes
-        // the match case-insensitive, same convention as the new SELECT.
+        // 1.14.18 — BOX-level Season filter: revert to pt.Season (pallettype
+        // master) per the new mixed-Season model. The SELECT in ReadBoxesAsync
+        // re-adds the pallettype JOIN to make this work, while still
+        // projecting per-item w.Season as the BoxItem.Season field for the
+        // C# allocator's per-item drop (see "per-item Season filter" comment
+        // above where lpmBoxes/nonLpmBoxes are filtered). This split is
+        // intentional:
+        //   • SQL filters BOXES by pt.Season (Summer pallet = pt.Season != 'W')
+        //   • C# filters ITEMS by w.Season (each item's own seasonality)
+        //
+        // 1.14.17 had swapped both to w.Season; 1.14.18 restores the box-
+        // level filter to pt.Season because the user wants Summer pallets
+        // selected even if they contain a few Winter items (the C# pass
+        // drops those mismatched items).
         var seasonClause = req.Seasons switch
         {
-            LpmSimSeasonFlags.Summer                          => "AND UPPER(ISNULL(w.Season, '')) <> 'W'",
-            LpmSimSeasonFlags.Winter                          => "AND UPPER(ISNULL(w.Season, '')) = 'W'",
+            LpmSimSeasonFlags.Summer                          => "AND ISNULL(pt.Season, '') <> 'W'",
+            LpmSimSeasonFlags.Winter                          => "AND ISNULL(pt.Season, '') = 'W'",
             LpmSimSeasonFlags.Both                            => "",
             _                                                 => "",
         };
@@ -641,6 +648,30 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             await ReadBoxesAsync(conn, false, req.Country, req.RunYear, req.RunMonth, seasonClause, req.Warehouses, req.IncludePurchasedBoxes, req.PalletCategories, null, nonLpmBoxes, ct);
         }
         msReadBoxes = swStep.ElapsedMilliseconds; swStep.Restart();
+
+        // 1.14.18 — per-item Season filter.
+        //
+        // Box selection at SQL time uses BOX-level pt.Season (pallettype master)
+        // via the seasonClause: e.g. user picks Summer ⇒ only boxes whose
+        // pallettype is Summer-tagged are returned. But a Summer-tagged pallet
+        // can contain Winter items (rare, but real). The allocator must drop
+        // those mismatched item rows so the user's season choice flows through
+        // to the per-item allocation level.
+        //
+        // Implementation: filter the in-memory lists immediately after read.
+        // Doing it here (rather than at every per-line site) guarantees one
+        // consistent rule across all phases (P1a, P1b RR, P2a, P2b RR).
+        // "Both Seasons" → no filter.
+        if (req.Seasons == LpmSimSeasonFlags.Summer)
+        {
+            lpmBoxes.RemoveAll(b => string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
+            nonLpmBoxes.RemoveAll(b => string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
+        }
+        else if (req.Seasons == LpmSimSeasonFlags.Winter)
+        {
+            lpmBoxes.RemoveAll(b => !string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
+            nonLpmBoxes.RemoveAll(b => !string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
+        }
 
         // 2 + 3) Read SOH and Item→Div in ONE pass from LPM_LocStock.
         //
@@ -1069,6 +1100,26 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         batch.TotalQty       = totalQty;
         await db.SaveChangesAsync(ct);
 
+        // 1.14.18 — Stamp UsabilityPct on every output row before bulk insert.
+        // Per-box metric: SUM(allocated Qty across all stores for this box)
+        // / BoxQty × 100. Same value repeated on every row of the same box
+        // (the box is shipped as a unit, so usability is box-level). Done
+        // in-process rather than a post-insert UPDATE so the bulk insert
+        // writes the final value in one shot.
+        if (output.Count > 0)
+        {
+            var allocByBox = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            foreach (var o in output)
+                allocByBox[o.BoxNo] = allocByBox.GetValueOrDefault(o.BoxNo, 0L) + o.Qty;
+            foreach (var o in output)
+            {
+                if (o.BoxQty is > 0 && allocByBox.TryGetValue(o.BoxNo, out var alloc))
+                {
+                    o.UsabilityPct = Math.Round((decimal)alloc * 100m / o.BoxQty.Value, 2);
+                }
+            }
+        }
+
         // Bulk-copy everything heavy. EF AddRange + SaveChanges on millions of
         // rows would take many minutes / hours, so we use SqlBulkCopy.
         if (output.Count > 0)
@@ -1386,6 +1437,16 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 CreatedBy    = req.User,
                 Phase        = phaseTag,
                 IsRoundRobin = false, // still NORMAL phase — RR-style is just the fill mechanism
+                // 1.14.18 — migration 044 columns. UsabilityPct is stamped
+                // post-allocation in StampUsabilityPct() (a pre-bulk-insert
+                // pass) once the total allocated qty per box is known.
+                // SKUMax is the value the allocator used for this
+                // (Store, Item) — keyed by (Store, Item) only after mig 045.
+                Season       = line.Season,
+                BoxQty       = line.BoxQty,
+                BoxItemQty   = line.Qty,
+                DivCode      = divCode,
+                SKUMax       = skuMaxArr[i],
             });
             boxAllocByPhase[(line.BoxNo, phaseTag)] = boxAllocByPhase.GetValueOrDefault((line.BoxNo, phaseTag), 0L) + qty;
 
@@ -1546,6 +1607,16 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 Phase        = phaseTag,
                 IsRoundRobin = true,
                 IsOverride   = bypassAllCaps,
+                // 1.14.18 — migration 044 columns. See note at the Phase-1
+                // construction site above re UsabilityPct + SKUMax. The
+                // `skuMax` local from the bypassAllCaps branch isn't in
+                // scope here, so look it up directly — same value, same
+                // (Store, Item) key.
+                Season       = line.Season,
+                BoxQty       = line.BoxQty,
+                BoxItemQty   = line.Qty,
+                DivCode      = divCode,
+                SKUMax       = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0),
             });
             boxAllocByPhase[(line.BoxNo, phaseTag)] = boxAllocByPhase.GetValueOrDefault((line.BoxNo, phaseTag), 0L) + qty;
             trace.Add(new LpmSimAllocTrace
@@ -1698,19 +1769,21 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // 1.14.12: w.PalletNo added to the projection so the allocator can
         // persist it on each LpmSimOutput row (LPMSIM_Output.PalletNo column,
         // migration 041). Doesn't affect ordering, grouping, or filtering.
-        // 1.14.17: Season now read from whboxitems (w.Season) instead of
-        // pallettype master. pallettype JOIN dropped entirely; the
-        // PalletCategory filter in {palletClause} now uses w.PalletCategory
-        // (see BuildPalletCategoryClause comment). Per-item Season means
-        // a mixed box (Summer-marked box containing some Winter items)
-        // gets one row per item with that item's own Season — the
-        // allocator already groups per-(BoxNo, ItemCode), so this
-        // preserves the item-level seasonality the planner wants.
+        // 1.14.18 — pallettype JOIN restored for BOX-level Season filtering
+        // (seasonClause uses pt.Season). The per-row Season column projected
+        // out to BoxItem stays on w.Season — this is what the C# allocator's
+        // per-item Season drop reads. So:
+        //   • seasonClause           ⇒ pt.Season   (box-level filter)
+        //   • Season projection      ⇒ w.Season    (per-item value)
+        //   • PalletCategory filter  ⇒ w.PalletCategory  (unchanged from 1.14.17;
+        //                              category data is identical between pt and w
+        //                              and using w avoids a redundant lookup).
         cmd.CommandText = $@"
             SELECT w.BoxNo, w.PalletNo, w.LPMDt, w.ItemCode, w.Qty,
                    Season = CASE WHEN UPPER(ISNULL(w.Season, '')) = 'W' THEN 'W' ELSE 'S' END,
                    BoxQty = SUM(w.Qty) OVER (PARTITION BY w.BoxNo)
               FROM {whSrc} w
+              INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               LEFT  JOIN dbo.LPM_WarehousePriority wp
                      ON wp.Country   = @whCountry
                     AND wp.Warehouse = w.Warehouse
@@ -1741,7 +1814,11 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 LPMDt:    rdr.IsDBNull(2) ? null : rdr.GetDateTime(2),
                 ItemCode: rdr.IsDBNull(3) ? "" : rdr.GetString(3),
                 Qty:      rdr.IsDBNull(4) ? 0  : rdr.GetInt32(4),
-                Season:   rdr.IsDBNull(5) ? "S" : rdr.GetString(5)));
+                Season:   rdr.IsDBNull(5) ? "S" : rdr.GetString(5),
+                // 1.14.18: read the BoxQty window-function column (was already
+                // projected for ORDER BY in 1.14.x; now consumed by the
+                // allocator too).
+                BoxQty:   rdr.IsDBNull(6) ? 0L : Convert.ToInt64(rdr.GetValue(6))));
         }
     }
 
@@ -1800,13 +1877,15 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
 
         // 1) Backup just the user-visible bits (Output + Batch). Trace + balance
         //    tables can be re-derived; backing them up doubles I/O for no benefit.
-        // 1.14.12: PalletNo column added to both tables (migration 041). Listed
-        // explicitly in the column list so the INSERT works whether the
-        // backup table has the column or not — migration adds it idempotently
-        // and the runtime INSERT will fail loudly if shapes ever drift.
+        // 1.14.12: PalletNo column added to both tables (migration 041).
+        // 1.14.18: Season + BoxQty + BoxItemQty + UsabilityPct + DivCode +
+        // SKUMax added to both tables (migration 044). Listed explicitly in
+        // the column list so the INSERT works whether the backup table has
+        // the columns or not — migrations add them idempotently and the
+        // runtime INSERT will fail loudly if shapes ever drift.
         await db.Database.ExecuteSqlInterpolatedAsync($@"
-INSERT INTO dbo.LPMSIM_Output_Backup (Id, LPMBatchNo, BoxNo, PalletNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], BackupTS)
-SELECT Id, LPMBatchNo, BoxNo, PalletNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], SYSDATETIME()
+INSERT INTO dbo.LPMSIM_Output_Backup (Id, LPMBatchNo, BoxNo, PalletNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], Season, BoxQty, BoxItemQty, UsabilityPct, DivCode, SKUMax, BackupTS)
+SELECT Id, LPMBatchNo, BoxNo, PalletNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], Season, BoxQty, BoxItemQty, UsabilityPct, DivCode, SKUMax, SYSDATETIME()
   FROM dbo.LPMSIM_Output WHERE LPMBatchNo = {batchNo};", ct);
 
         await db.Database.ExecuteSqlInterpolatedAsync($@"
@@ -3368,6 +3447,69 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         }
         msDelta = sw.ElapsedMilliseconds; sw.Restart();
 
+        // 6b) 1.14.18 — Archive-and-purge older periods for this country.
+        //
+        // Keeps dbo.LPM_SimItemSkuMax small (one period per country in
+        // production) while preserving history in dbo.LPM_SimItemSkuMax_Backup.
+        // "Strictly older" (Year1 < @y OR (Year1 = @y AND Month1 < @m)) so a
+        // user rebuilding an OLDER period while a NEWER one already exists
+        // doesn't accidentally demote the newer one to the archive.
+        //
+        // Wrapped in TRY/CATCH so a missing backup table (migration 045 not
+        // applied yet) or transient archive failure doesn't fail the build —
+        // the user-visible SKU Max snapshot for the just-built period is
+        // already committed. Archive will retry on the next build.
+        //
+        // Only runs when the delta apply itself ran (exclusionWarning is null).
+        if (exclusionWarning is null)
+        {
+            progress?.Report("Archiving older periods…");
+            try
+            {
+                using var arch = conn.CreateCommand();
+                arch.CommandText = @"
+                    SET XACT_ABORT ON;
+                    BEGIN TRAN;
+
+                    INSERT INTO dbo.LPM_SimItemSkuMax_Backup
+                           (Country, Year1, Month1, StoreID, ItemCode, Season,
+                            DivCode, WHBoxQty, VolumeGroup, SKUMax,
+                            CreateTS, CreatedBy, BackupTS, BackupBy)
+                    SELECT Country, Year1, Month1, StoreID, ItemCode, Season,
+                           DivCode, WHBoxQty, VolumeGroup, SKUMax,
+                           CreateTS, CreatedBy, SYSDATETIME(), @user
+                      FROM dbo.LPM_SimItemSkuMax
+                     WHERE Country = @c
+                       AND (Year1 < @y OR (Year1 = @y AND Month1 < @m));
+
+                    DELETE FROM dbo.LPM_SimItemSkuMax
+                     WHERE Country = @c
+                       AND (Year1 < @y OR (Year1 = @y AND Month1 < @m));
+
+                    COMMIT;";
+                arch.Parameters.Add(new SqlParameter("@c", country));
+                arch.Parameters.Add(new SqlParameter("@y", year));
+                arch.Parameters.Add(new SqlParameter("@m", month));
+                arch.Parameters.Add(new SqlParameter("@user",
+                    string.IsNullOrEmpty(user) ? (object)DBNull.Value : user));
+                arch.CommandTimeout = 600;
+                await arch.ExecuteNonQueryAsync(ct);
+            }
+            catch (SqlException ex) when (ex.Number == 208 /* invalid object — backup table missing */)
+            {
+                // Non-fatal — migration 045 hasn't been applied yet. Build
+                // succeeded; archive will run on the next build after the
+                // operator applies the migration.
+                progress?.Report("Archive skipped (backup table missing — apply migration 045).");
+            }
+            catch (Exception)
+            {
+                // Non-fatal — archive failure shouldn't undo a successful
+                // build. The next build retries. Log via progress only.
+                progress?.Report("Archive failed (non-fatal — will retry next build).");
+            }
+        }
+
         // 7) Drop temp tables (also auto-released when the session ends, but
         // explicit cleanup keeps tempdb tidy when the same connection runs
         // multiple builds back-to-back from the connection pool).
@@ -3501,7 +3643,11 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         return dict;
     }
 
-    private record BoxItem(string BoxNo, string? PalletNo, DateTime? LPMDt, string ItemCode, int Qty, string Season);
+    // 1.14.18: BoxQty added so the allocator can stamp it on every output row
+    // (LPMSIM_Output.BoxQty column, migration 044). Value comes from
+    // SUM(w.Qty) OVER (PARTITION BY w.BoxNo) which the SELECT already
+    // projects — previously used only for ORDER BY, now also read.
+    private record BoxItem(string BoxNo, string? PalletNo, DateTime? LPMDt, string ItemCode, int Qty, string Season, long BoxQty);
     private record EomStore(string StoreID, int DivCode, int SKUMax, decimal TargetEOM,
                             decimal PriorityRank, decimal WtAvgSold, string VolumeGroup,
                             decimal MerchNeedWeek);
@@ -3571,6 +3717,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         dt.Columns.Add("IsRoundRobin", typeof(bool));
         dt.Columns.Add("IsOverride",   typeof(bool));
         dt.Columns.Add("Day",          typeof(int));
+        // 1.14.18 — migration 044 columns.
+        dt.Columns.Add("Season",       typeof(string));
+        dt.Columns.Add("BoxQty",       typeof(long));
+        dt.Columns.Add("BoxItemQty",   typeof(int));
+        dt.Columns.Add("UsabilityPct", typeof(decimal));
+        dt.Columns.Add("DivCode",      typeof(int));
+        dt.Columns.Add("SKUMax",       typeof(int));
 
         dt.BeginLoadData();
         foreach (var r in rows)
@@ -3588,7 +3741,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 r.Phase,
                 r.IsRoundRobin,
                 r.IsOverride,
-                (object?)r.Day ?? DBNull.Value);
+                (object?)r.Day ?? DBNull.Value,
+                // 1.14.18
+                (object?)r.Season       ?? DBNull.Value,
+                (object?)r.BoxQty       ?? DBNull.Value,
+                (object?)r.BoxItemQty   ?? DBNull.Value,
+                (object?)r.UsabilityPct ?? DBNull.Value,
+                (object?)r.DivCode      ?? DBNull.Value,
+                (object?)r.SKUMax       ?? DBNull.Value);
         }
         dt.EndLoadData();
 

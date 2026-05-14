@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.17</Version>
-    <AssemblyVersion>1.14.17.0</AssemblyVersion>
-    <FileVersion>1.14.17.0</FileVersion>
-    <InformationalVersion>1.14.17 (SIM Generate: drop pallettype JOIN, use w.Season + w.PalletCategory)</InformationalVersion>
+    <Version>1.14.18</Version>
+    <AssemblyVersion>1.14.18.0</AssemblyVersion>
+    <FileVersion>1.14.18.0</FileVersion>
+    <InformationalVersion>1.14.18 (LPMSIM_Output: Season + BoxQty + BoxItemQty + UsabilityPct + DivCode columns)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
