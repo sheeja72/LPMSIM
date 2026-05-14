@@ -23,6 +23,19 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.16 — Rename Viewer role label to Reports (2026-05-14)
+
+### Role display labels renamed
+- **Viewer** → **Reports** on the Admin → Users page (grid chip + Edit User dialog checkbox).
+- `RoleCode` stays `'Viewer'` — every `[Authorize(Roles = Roles.Viewer)]` and every existing `LpmUserRole.RoleCode = 'Viewer'` row keeps working untouched.
+- Migration **043** updates `dbo.LPMRole.RoleName` from `'Viewer'` to `'Reports'`. Idempotent. **Must be applied to prod DB** so the renamed label appears.
+
+### Notes
+- Sidebar role badge (`MainLayout.razor`) was intentionally **not** changed — it uses a separate C# `IsInRole(...)` map and still shows "Viewer" for users in the Viewer role. Flag if you want that flipped too.
+- No code change. UI auto-picks up the new label because both display spots already read `RoleName` from `dbo.LPMRole`.
+
+---
+
 ## 1.14.15 — Production Schedule perf: parallel detail queries (2026-05-14)
 
 ### Performance
