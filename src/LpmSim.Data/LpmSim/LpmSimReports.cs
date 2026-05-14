@@ -120,6 +120,8 @@ public class BoxDetailRow
     public int? DivCode { get; set; }
     public string? DivisionName { get; set; }
     public string BoxNo { get; set; } = "";
+    /// <summary>Pallet number this box belongs to (1.14.12). From whboxitems.PalletNo via JOIN.</summary>
+    public string? PalletNo { get; set; }
     public long? BoxQty { get; set; }
     public long LpmSimQty { get; set; }
     /// <summary>Tag indicating LPM (has LPMDt) or Non-LPM (LPMDt is null) box.</summary>
@@ -178,6 +180,8 @@ public class ItemDetailRow
     public int DivCode { get; set; }
     public string DivisionName { get; set; } = "";
     public string BoxNo { get; set; } = "";
+    /// <summary>Pallet number this box belongs to (1.14.12). From whboxitems.PalletNo via JOIN.</summary>
+    public string? PalletNo { get; set; }
     public string Itemcode { get; set; } = "";
     public long? BoxItemQty { get; set; }
     public int? SKUMax { get; set; }
@@ -758,8 +762,10 @@ WITH BoxAgg AS (
      GROUP BY s.LPMBatchNo, s.BoxNo
 ),
 BoxMeta AS (
+    -- 1.14.12: added MAX(PalletNo) so each (BoxNo) carries its pallet info.
     SELECT BoxNo,
            SUM(CAST(Qty AS bigint)) AS BoxQty,
+           MAX(PalletNo)   AS PalletNo,
            MAX(PalletType) AS PalletType,
            MAX(TrnDate)    AS TrnDate,
            MAX(Warehouse)  AS Warehouse,
@@ -773,6 +779,7 @@ SELECT b.LPMBatchNo,
        NULL AS StoreID, NULL AS StoreName,
        NULL AS DivCode, NULL AS DivisionName,
        b.BoxNo,
+       bm.PalletNo,                                  -- 1.14.12
        bm.BoxQty,
        b.LpmSimQty,
        bm.PalletType,
@@ -818,6 +825,8 @@ SELECT sa.LPMBatchNo,
        sa.DivCode,
        MAX(div.Division)  AS DivisionName,
        sa.BoxNo,
+       -- 1.14.12: PalletNo via the same TOP 1 lookup pattern used for PalletType.
+       (SELECT TOP 1 PalletNo FROM racks.dbo.whboxitems w WHERE w.BoxNo = sa.BoxNo) AS PalletNo,
        (SELECT SUM(CAST(Qty AS bigint)) FROM racks.dbo.whboxitems w WHERE w.BoxNo = sa.BoxNo) AS BoxQty,
        sa.LpmSimQty,
        (SELECT TOP 1 PalletType FROM racks.dbo.whboxitems w WHERE w.BoxNo = sa.BoxNo) AS PalletType,
@@ -1040,7 +1049,8 @@ BatchItems AS (
 -- in the previous version.
 BoxAttrs AS (
     SELECT w.BoxNo, w.ItemCode,
-           BoxItemQty = SUM(CAST(w.Qty AS bigint))
+           BoxItemQty = SUM(CAST(w.Qty AS bigint)),
+           PalletNo   = MAX(w.PalletNo)                       -- 1.14.12
       FROM racks.dbo.whboxitems w
      WHERE w.BoxNo IN (SELECT BoxNo FROM BatchBoxes)
      GROUP BY w.BoxNo, w.ItemCode
@@ -1122,6 +1132,7 @@ SELECT s.LPMBatchNo,
        id.DivCode              AS DivCode,
        div.Division            AS DivisionName,
        s.BoxNo,
+       ba.PalletNo,                                         -- 1.14.12
        s.Itemcode,
        ba.BoxItemQty,
        sk.SKUMax,
@@ -1433,6 +1444,7 @@ SELECT TOP (@top)
         PriorityRank  = r.IsDBNull(11) ? null : r.GetDecimal(11),
     };
 
+    // 1.14.12: PalletNo column added at index 6; every subsequent index shifted by +1.
     private static BoxDetailRow ReadBoxDetail(SqlDataReader r) => new()
     {
         LPMBatchNo     = r.GetInt64(0),
@@ -1441,18 +1453,20 @@ SELECT TOP (@top)
         DivCode        = r.IsDBNull(3) ? null : r.GetInt32(3),
         DivisionName   = r.IsDBNull(4) ? null : r.GetString(4),
         BoxNo          = r.IsDBNull(5) ? "" : r.GetString(5),
-        BoxQty         = r.IsDBNull(6) ? null : r.GetInt64(6),
-        LpmSimQty      = r.IsDBNull(7) ? 0 : r.GetInt64(7),
-        PalletType     = r.IsDBNull(8) ? null : r.GetString(8),
-        TypeName       = r.IsDBNull(9) ? null : r.GetString(9),
-        PalletCategory = r.IsDBNull(10) ? null : r.GetString(10),
-        TrnDate        = r.FieldCount > 11 && !r.IsDBNull(11) ? r.GetDateTime(11) : null,
-        Warehouse      = r.FieldCount > 12 && !r.IsDBNull(12) ? r.GetString(12)   : null,
-        Rack           = r.FieldCount > 13 && !r.IsDBNull(13) ? r.GetString(13)   : null,
-        RoundRobinQty  = r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetInt64(14)    : 0,
-        BoxKind        = r.FieldCount > 15 && !r.IsDBNull(15) ? r.GetString(15)   : null,
+        PalletNo       = r.IsDBNull(6) ? null : r.GetString(6),
+        BoxQty         = r.IsDBNull(7) ? null : r.GetInt64(7),
+        LpmSimQty      = r.IsDBNull(8) ? 0 : r.GetInt64(8),
+        PalletType     = r.IsDBNull(9) ? null : r.GetString(9),
+        TypeName       = r.IsDBNull(10) ? null : r.GetString(10),
+        PalletCategory = r.IsDBNull(11) ? null : r.GetString(11),
+        TrnDate        = r.FieldCount > 12 && !r.IsDBNull(12) ? r.GetDateTime(12) : null,
+        Warehouse      = r.FieldCount > 13 && !r.IsDBNull(13) ? r.GetString(13)   : null,
+        Rack           = r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14)   : null,
+        RoundRobinQty  = r.FieldCount > 15 && !r.IsDBNull(15) ? r.GetInt64(15)    : 0,
+        BoxKind        = r.FieldCount > 16 && !r.IsDBNull(16) ? r.GetString(16)   : null,
     };
 
+    // 1.14.12: PalletNo column added at index 6; every subsequent index shifted by +1.
     private static ItemDetailRow ReadItemDetail(SqlDataReader r) => new()
     {
         LPMBatchNo    = r.GetInt64(0),
@@ -1461,15 +1475,16 @@ SELECT TOP (@top)
         DivCode       = r.IsDBNull(3) ? 0  : r.GetInt32(3),
         DivisionName  = r.IsDBNull(4) ? "" : r.GetString(4),
         BoxNo         = r.IsDBNull(5) ? "" : r.GetString(5),
-        Itemcode      = r.IsDBNull(6) ? "" : r.GetString(6),
-        BoxItemQty    = r.IsDBNull(7) ? null : r.GetInt64(7),
-        SKUMax        = r.IsDBNull(8) ? null : r.GetInt32(8),
-        SOH           = r.IsDBNull(9) ? 0 : Convert.ToInt32(r.GetValue(9)),
-        LpmQty        = r.IsDBNull(10) ? 0 : r.GetInt32(10),
-        RoundRobinQty = r.IsDBNull(11) ? 0 : r.GetInt32(11),
-        Phase         = r.IsDBNull(12) ? null : r.GetString(12),
-        BoxKind       = r.IsDBNull(13) ? "" : r.GetString(13),
-        PriorityRank  = r.IsDBNull(14) ? null : r.GetDecimal(14),
+        PalletNo      = r.IsDBNull(6) ? null : r.GetString(6),
+        Itemcode      = r.IsDBNull(7) ? "" : r.GetString(7),
+        BoxItemQty    = r.IsDBNull(8) ? null : r.GetInt64(8),
+        SKUMax        = r.IsDBNull(9) ? null : r.GetInt32(9),
+        SOH           = r.IsDBNull(10) ? 0 : Convert.ToInt32(r.GetValue(10)),
+        LpmQty        = r.IsDBNull(11) ? 0 : r.GetInt32(11),
+        RoundRobinQty = r.IsDBNull(12) ? 0 : r.GetInt32(12),
+        Phase         = r.IsDBNull(13) ? null : r.GetString(13),
+        BoxKind       = r.IsDBNull(14) ? "" : r.GetString(14),
+        PriorityRank  = r.IsDBNull(15) ? null : r.GetDecimal(15),
     };
 
     private static async Task<List<T>> ExecAsync<T>(

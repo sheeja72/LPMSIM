@@ -96,44 +96,67 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             }
             else
             {
-                lpmDtClause     = "AND (w.LPMDt IS NULL OR w.LPMDt < @endExclusive)";
-                useEndExclusive = true;
+                // 1.14.11: "All months" used to mean "current + elapsed only"
+                // (LPMDt < @endExclusive). The planner asked for the
+                // eligibility view to show LPM across ALL months — including
+                // future-dated LPM tags — so dropping the date filter when
+                // the LPM Months selector is empty. Non-LPM (LPMDt IS NULL)
+                // is unaffected. Specific months still restrict as before.
+                lpmDtClause     = "";
+                useEndExclusive = true;  // kept for the @endExclusive param below
             }
-            // SARGable rewrite (Phase D perf fix):
-            //   • LPMDt cap uses < @endExclusive (= first day of NEXT month) so
-            //     SQL can seek any index on LPMDt instead of evaluating
-            //     YEAR()/MONTH() per row.
-            //   • ShopEligible filter rewritten as IS NULL OR <> 'E' so the
-            //     ISNULL wrapper doesn't kill index usage.
-            //   • Pushing both into the WHERE means future-dated LPM boxes
-            //     (LPMDt > end-of-period) are skipped entirely — they used to
-            //     contribute 0 via CASE WHEN, which still costs a row scan.
-            //     Non-LPM rows (LPMDt IS NULL) are kept regardless.
+            // 1.14.11: Two changes to this query:
+            //   • Dropped the LPMDt date filter from the WHERE when
+            //     lpmMonths is empty ("All months") so the LPM column
+            //     in the eligibility view shows ALL LPM dates including
+            //     future-dated tags. When lpmMonths is specified, the
+            //     specific-months filter still applies.
+            //   • Dropped the WHERE-level ShopEligible filter and moved
+            //     it INTO the CASE statements so each segment splits
+            //     into Purchased + Non-Purchased buckets. The "selBoxes"
+            //     downstream logic still respects the includePurchasedBoxes
+            //     toggle; only the SQL changes.
             cmd.CommandText = $@"
                 SELECT
-                    -- LPM boxes (current/elapsed). All LPM rows in this scan
-                    -- already have LPMDt < @endExclusive thanks to the WHERE,
-                    -- so the CASE only needs to check LPMDt IS NOT NULL + Season.
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' THEN 1 ELSE 0 END) AS LpmSummerLines,
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' THEN w.BoxNo END) AS LpmSummerBoxes,
+                    -- LPM × Summer × Purchased
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmSummerLines,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmSummerBoxes,
 
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' THEN 1 ELSE 0 END) AS NonLpmSummerLines,
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' THEN w.BoxNo END) AS NonLpmSummerBoxes,
+                    -- Non-LPM × Summer × Purchased
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmSummerLines,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmSummerBoxes,
 
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' THEN 1 ELSE 0 END) AS LpmWinterLines,
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' THEN w.BoxNo END) AS LpmWinterBoxes,
+                    -- LPM × Winter × Purchased
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS LpmWinterLines,
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS LpmWinterBoxes,
 
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' THEN 1 ELSE 0 END) AS NonLpmWinterLines,
-                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' THEN w.BoxNo END) AS NonLpmWinterBoxes
+                    -- Non-LPM × Winter × Purchased
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN 1 ELSE 0 END) AS NonLpmWinterLines,
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E') THEN w.BoxNo END) AS NonLpmWinterBoxes,
+
+                    -- LPM × Summer × Non-Purchased  (new 1.14.11)
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmSummerNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmSummerNpBoxes,
+
+                    -- Non-LPM × Summer × Non-Purchased
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmSummerNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') <> 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmSummerNpBoxes,
+
+                    -- LPM × Winter × Non-Purchased
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS LpmWinterNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS LpmWinterNpBoxes,
+
+                    -- Non-LPM × Winter × Non-Purchased
+                    SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
                   FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE 1 = 1
                    {palletClause}
-                   {(includePurchasedBoxes ? "" : "AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')")}
                    {lpmDtClause}
                    {whClause};";
             // First day of the month AFTER the run period — half-open
@@ -146,37 +169,70 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             using var rdr = await cmd.ExecuteReaderAsync(ct);
             if (await rdr.ReadAsync(ct))
             {
-                int  lsB = rdr.IsDBNull(2)  ? 0 : rdr.GetInt32(2);
-                long lsQ = rdr.IsDBNull(1)  ? 0 : rdr.GetInt64(1);
-                int  nsB = rdr.IsDBNull(5)  ? 0 : rdr.GetInt32(5);
-                long nsQ = rdr.IsDBNull(4)  ? 0 : rdr.GetInt64(4);
-                int  lwB = rdr.IsDBNull(8)  ? 0 : rdr.GetInt32(8);
-                long lwQ = rdr.IsDBNull(7)  ? 0 : rdr.GetInt64(7);
-                int  nwB = rdr.IsDBNull(11) ? 0 : rdr.GetInt32(11);
-                long nwQ = rdr.IsDBNull(10) ? 0 : rdr.GetInt64(10);
+                // Indexes 0–11 unchanged (purchased). 12–19 new (non-purchased).
+                int  lsB  = rdr.IsDBNull(2)  ? 0 : rdr.GetInt32(2);
+                long lsQ  = rdr.IsDBNull(1)  ? 0 : rdr.GetInt64(1);
+                int  nsB  = rdr.IsDBNull(5)  ? 0 : rdr.GetInt32(5);
+                long nsQ  = rdr.IsDBNull(4)  ? 0 : rdr.GetInt64(4);
+                int  lwB  = rdr.IsDBNull(8)  ? 0 : rdr.GetInt32(8);
+                long lwQ  = rdr.IsDBNull(7)  ? 0 : rdr.GetInt64(7);
+                int  nwB  = rdr.IsDBNull(11) ? 0 : rdr.GetInt32(11);
+                long nwQ  = rdr.IsDBNull(10) ? 0 : rdr.GetInt64(10);
+                // Non-Purchased buckets (1.14.11)
+                long lsQn = rdr.IsDBNull(12) ? 0 : rdr.GetInt64(12);
+                int  lsBn = rdr.IsDBNull(13) ? 0 : rdr.GetInt32(13);
+                long nsQn = rdr.IsDBNull(14) ? 0 : rdr.GetInt64(14);
+                int  nsBn = rdr.IsDBNull(15) ? 0 : rdr.GetInt32(15);
+                long lwQn = rdr.IsDBNull(16) ? 0 : rdr.GetInt64(16);
+                int  lwBn = rdr.IsDBNull(17) ? 0 : rdr.GetInt32(17);
+                long nwQn = rdr.IsDBNull(18) ? 0 : rdr.GetInt64(18);
+                int  nwBn = rdr.IsDBNull(19) ? 0 : rdr.GetInt32(19);
                 segments = new BoxSegmentCounts(
-                    LpmSummerBoxes: lsB,    LpmSummerQty: lsQ,
-                    NonLpmSummerBoxes: nsB, NonLpmSummerQty: nsQ,
-                    LpmWinterBoxes: lwB,    LpmWinterQty: lwQ,
-                    NonLpmWinterBoxes: nwB, NonLpmWinterQty: nwQ);
+                    LpmSummerBoxes: lsB,      LpmSummerQty: lsQ,
+                    NonLpmSummerBoxes: nsB,   NonLpmSummerQty: nsQ,
+                    LpmWinterBoxes: lwB,      LpmWinterQty: lwQ,
+                    NonLpmWinterBoxes: nwB,   NonLpmWinterQty: nwQ,
+                    LpmSummerNpBoxes: lsBn,   LpmSummerNpQty: lsQn,
+                    NonLpmSummerNpBoxes: nsBn,NonLpmSummerNpQty: nsQn,
+                    LpmWinterNpBoxes: lwBn,   LpmWinterNpQty: lwQn,
+                    NonLpmWinterNpBoxes: nwBn,NonLpmWinterNpQty: nwQn);
             }
         }
         catch { /* leave null */ }
 
         // Sum the requested-segment counts for the readiness check / metric.
+        // 1.14.11: now adds Non-Purchased buckets when the planner has
+        // "Incl. Non-Purchased" checked, preserving the old behaviour
+        // (where the WHERE-level filter used to do this for us).
         int  selBoxes = 0;
         long selQty   = 0;
         if (segments is not null)
         {
             if (sources.HasFlag(LpmSimSourceFlags.LpmBoxes))
             {
-                if (seasons.HasFlag(LpmSimSeasonFlags.Summer)) { selBoxes += segments.LpmSummerBoxes; selQty += segments.LpmSummerQty; }
-                if (seasons.HasFlag(LpmSimSeasonFlags.Winter)) { selBoxes += segments.LpmWinterBoxes; selQty += segments.LpmWinterQty; }
+                if (seasons.HasFlag(LpmSimSeasonFlags.Summer))
+                {
+                    selBoxes += segments.LpmSummerBoxes; selQty += segments.LpmSummerQty;
+                    if (includePurchasedBoxes) { selBoxes += segments.LpmSummerNpBoxes; selQty += segments.LpmSummerNpQty; }
+                }
+                if (seasons.HasFlag(LpmSimSeasonFlags.Winter))
+                {
+                    selBoxes += segments.LpmWinterBoxes; selQty += segments.LpmWinterQty;
+                    if (includePurchasedBoxes) { selBoxes += segments.LpmWinterNpBoxes; selQty += segments.LpmWinterNpQty; }
+                }
             }
             if (sources.HasFlag(LpmSimSourceFlags.NonLpmBoxes))
             {
-                if (seasons.HasFlag(LpmSimSeasonFlags.Summer)) { selBoxes += segments.NonLpmSummerBoxes; selQty += segments.NonLpmSummerQty; }
-                if (seasons.HasFlag(LpmSimSeasonFlags.Winter)) { selBoxes += segments.NonLpmWinterBoxes; selQty += segments.NonLpmWinterQty; }
+                if (seasons.HasFlag(LpmSimSeasonFlags.Summer))
+                {
+                    selBoxes += segments.NonLpmSummerBoxes; selQty += segments.NonLpmSummerQty;
+                    if (includePurchasedBoxes) { selBoxes += segments.NonLpmSummerNpBoxes; selQty += segments.NonLpmSummerNpQty; }
+                }
+                if (seasons.HasFlag(LpmSimSeasonFlags.Winter))
+                {
+                    selBoxes += segments.NonLpmWinterBoxes; selQty += segments.NonLpmWinterQty;
+                    if (includePurchasedBoxes) { selBoxes += segments.NonLpmWinterNpBoxes; selQty += segments.NonLpmWinterNpQty; }
+                }
             }
         }
 
@@ -1299,6 +1355,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             {
                 LPMBatchNo   = batch.LPMBatchNo,
                 BoxNo        = line.BoxNo,
+                PalletNo     = line.PalletNo,        // 1.14.12 — migration 041
                 LPMDt        = line.LPMDt,
                 Itemcode     = line.ItemCode,
                 Qty          = qty,
@@ -1457,6 +1514,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             {
                 LPMBatchNo   = batch.LPMBatchNo,
                 BoxNo        = line.BoxNo,
+                PalletNo     = line.PalletNo,        // 1.14.12 — migration 041
                 LPMDt        = line.LPMDt,
                 Itemcode     = line.ItemCode,
                 Qty          = qty,
@@ -1615,8 +1673,11 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // others use [<DataName>].dbo.WHBoxItemsExport.
         var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
         using var cmd = conn.CreateCommand();
+        // 1.14.12: w.PalletNo added to the projection so the allocator can
+        // persist it on each LpmSimOutput row (LPMSIM_Output.PalletNo column,
+        // migration 041). Doesn't affect ordering, grouping, or filtering.
         cmd.CommandText = $@"
-            SELECT w.BoxNo, w.LPMDt, w.ItemCode, w.Qty,
+            SELECT w.BoxNo, w.PalletNo, w.LPMDt, w.ItemCode, w.Qty,
                    Season = CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END,
                    BoxQty = SUM(w.Qty) OVER (PARTITION BY w.BoxNo)
               FROM {whSrc} w
@@ -1647,10 +1708,11 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         {
             dest.Add(new BoxItem(
                 BoxNo:    rdr.GetString(0),
-                LPMDt:    rdr.IsDBNull(1) ? null : rdr.GetDateTime(1),
-                ItemCode: rdr.IsDBNull(2) ? "" : rdr.GetString(2),
-                Qty:      rdr.IsDBNull(3) ? 0  : rdr.GetInt32(3),
-                Season:   rdr.IsDBNull(4) ? "S" : rdr.GetString(4)));
+                PalletNo: rdr.IsDBNull(1) ? null : rdr.GetString(1),
+                LPMDt:    rdr.IsDBNull(2) ? null : rdr.GetDateTime(2),
+                ItemCode: rdr.IsDBNull(3) ? "" : rdr.GetString(3),
+                Qty:      rdr.IsDBNull(4) ? 0  : rdr.GetInt32(4),
+                Season:   rdr.IsDBNull(5) ? "S" : rdr.GetString(5)));
         }
     }
 
@@ -1709,9 +1771,13 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
 
         // 1) Backup just the user-visible bits (Output + Batch). Trace + balance
         //    tables can be re-derived; backing them up doubles I/O for no benefit.
+        // 1.14.12: PalletNo column added to both tables (migration 041). Listed
+        // explicitly in the column list so the INSERT works whether the
+        // backup table has the column or not — migration adds it idempotently
+        // and the runtime INSERT will fail loudly if shapes ever drift.
         await db.Database.ExecuteSqlInterpolatedAsync($@"
-INSERT INTO dbo.LPMSIM_Output_Backup (Id, LPMBatchNo, BoxNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], BackupTS)
-SELECT Id, LPMBatchNo, BoxNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], SYSDATETIME()
+INSERT INTO dbo.LPMSIM_Output_Backup (Id, LPMBatchNo, BoxNo, PalletNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], BackupTS)
+SELECT Id, LPMBatchNo, BoxNo, PalletNo, LPMDt, Itemcode, Qty, StoreID, CreateTS, CreatedBy, Phase, IsRoundRobin, IsOverride, [Day], SYSDATETIME()
   FROM dbo.LPMSIM_Output WHERE LPMBatchNo = {batchNo};", ct);
 
         await db.Database.ExecuteSqlInterpolatedAsync($@"
@@ -3403,7 +3469,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         return dict;
     }
 
-    private record BoxItem(string BoxNo, DateTime? LPMDt, string ItemCode, int Qty, string Season);
+    private record BoxItem(string BoxNo, string? PalletNo, DateTime? LPMDt, string ItemCode, int Qty, string Season);
     private record EomStore(string StoreID, int DivCode, int SKUMax, decimal TargetEOM,
                             decimal PriorityRank, decimal WtAvgSold, string VolumeGroup,
                             decimal MerchNeedWeek);
@@ -3462,6 +3528,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         using var dt = new System.Data.DataTable();
         dt.Columns.Add("LPMBatchNo",   typeof(long));
         dt.Columns.Add("BoxNo",        typeof(string));
+        dt.Columns.Add("PalletNo",     typeof(string));        // 1.14.12 — migration 041
         dt.Columns.Add("LPMDt",        typeof(DateTime));
         dt.Columns.Add("Itemcode",     typeof(string));
         dt.Columns.Add("Qty",          typeof(int));
@@ -3479,7 +3546,8 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             dt.Rows.Add(
                 r.LPMBatchNo,
                 r.BoxNo,
-                (object?)r.LPMDt ?? DBNull.Value,
+                (object?)r.PalletNo ?? DBNull.Value,        // 1.14.12
+                (object?)r.LPMDt    ?? DBNull.Value,
                 r.Itemcode,
                 r.Qty,
                 r.StoreID,

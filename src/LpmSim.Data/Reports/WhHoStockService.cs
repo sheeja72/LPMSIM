@@ -165,27 +165,38 @@ public class WhHoStockService(IConfiguration cfg)
         };
 
         var sql = $@"
-            ;WITH ItemDiv AS (
-                -- One Division per item. An item that maps to multiple
-                -- subclasses keeps the alphabetically-first Division so
-                -- the join below is single-valued.
-                SELECT u.itemcode, MIN(sm.Division) AS Division
-                  FROM Datareporting.dbo.upc_subclass    u
-                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
-                 WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
-                 GROUP BY u.itemcode
-            ),
-            ItemSeason AS (
-                -- HO season per item: 'W' if any barcode is W, else 'S'.
-                -- Items with no barcode row default to 'S' (via the LEFT
-                -- JOIN + ISNULL in HOByDiv below).
-                SELECT b.itemcode,
-                       MAX(CASE WHEN UPPER(LTRIM(RTRIM(b.Itemtype))) = 'W' THEN 'W' ELSE 'S' END) AS Season
-                  FROM usa.dbo.upcbarcodes b
-                 WHERE b.itemcode IS NOT NULL AND b.itemcode <> ''
-                 GROUP BY b.itemcode
-            ),
-            HOByDiv AS (
+            SET NOCOUNT ON;
+
+            -- 1.14.12 perf: ItemDiv and ItemSeason used to be CTEs; the
+            -- optimizer often re-evaluated them across the HOByDiv/WHByDiv
+            -- joins (especially with whboxitems on the WH side). Now
+            -- materialized into indexed temp tables once, then the main
+            -- query joins them as index seeks. Same data, single
+            -- evaluation, typically 2-5x faster.
+            IF OBJECT_ID('tempdb..#WhRptItemDiv')    IS NOT NULL DROP TABLE #WhRptItemDiv;
+            IF OBJECT_ID('tempdb..#WhRptItemSeason') IS NOT NULL DROP TABLE #WhRptItemSeason;
+
+            -- (1) One Division per item from upc_subclass × subclassmaster.
+            SELECT u.itemcode, MIN(sm.Division) AS Division
+              INTO #WhRptItemDiv
+              FROM Datareporting.dbo.upc_subclass    u
+              INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+             WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
+             GROUP BY u.itemcode;
+            CREATE CLUSTERED INDEX IX_WhRptItemDiv ON #WhRptItemDiv (itemcode);
+
+            -- (2) HO season per item: W if any barcode is W, else S.
+            --     Items with no barcode row default to S (via LEFT JOIN +
+            --     ISNULL in HOByDiv below — no row here = LEFT-join NULL).
+            SELECT b.itemcode,
+                   MAX(CASE WHEN UPPER(LTRIM(RTRIM(b.Itemtype))) = 'W' THEN 'W' ELSE 'S' END) AS Season
+              INTO #WhRptItemSeason
+              FROM usa.dbo.upcbarcodes b
+             WHERE b.itemcode IS NOT NULL AND b.itemcode <> ''
+             GROUP BY b.itemcode;
+            CREATE CLUSTERED INDEX IX_WhRptItemSeason ON #WhRptItemSeason (itemcode);
+
+            ;WITH HOByDiv AS (
                 -- HO Stock per Division. storeid filter is dynamic — UAE
                 -- gets the literal 'HODATA'; other countries get every
                 -- storeid where DataSettings.ExportWH='Y' for the country.
@@ -201,8 +212,8 @@ public class WhHoStockService(IConfiguration cfg)
                 SELECT ISNULL(id.Division, '(no division)') AS Division,
                        SUM(CAST(ISNULL(ls.SOH, 0) AS bigint)) AS HOStock
                   FROM racks.dbo.LPM_LocStock ls
-                  LEFT  JOIN ItemDiv id ON id.itemcode = ls.ItemCode
-                  LEFT  JOIN ItemSeason its ON its.itemcode = ls.ItemCode
+                  LEFT  JOIN #WhRptItemDiv id ON id.itemcode = ls.ItemCode
+                  LEFT  JOIN #WhRptItemSeason its ON its.itemcode = ls.ItemCode
                  WHERE ls.storeid IN ({hoSb})
                    AND (@season = 'A' OR ISNULL(its.Season, 'S') = @season)
                    {hoDivFilterFrag}
@@ -251,7 +262,7 @@ public class WhHoStockService(IConfiguration cfg)
                                  AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmStock
                   FROM {whSrc} w
-                  LEFT JOIN ItemDiv id ON id.itemcode = w.ItemCode
+                  LEFT JOIN #WhRptItemDiv id ON id.itemcode = w.ItemCode
                  WHERE (@season = 'A'
                         OR (@season = 'W' AND UPPER(ISNULL(w.Season, '')) = 'W')
                         OR (@season = 'S' AND UPPER(ISNULL(w.Season, '')) <> 'W'))

@@ -120,24 +120,32 @@ public class VarianceReportService(IConfiguration cfg)
         var whSearch = itemSearchFrag.Replace("ItemCode_Col", "w.ItemCode");
 
         var sql = $@"
-            ;WITH ItemDiv AS (
-                -- One Division per item (MIN to dedupe items mapped to
-                -- multiple subclasses). Same CTE used by WH Stock Position.
-                SELECT u.itemcode, MIN(sm.Division) AS Division
-                  FROM Datareporting.dbo.upc_subclass    u
-                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
-                 WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
-                 GROUP BY u.itemcode
-            ),
-            ItemSeason AS (
-                -- HO season per item ('W' if any barcode is W, else 'S').
-                SELECT b.itemcode,
-                       MAX(CASE WHEN UPPER(LTRIM(RTRIM(b.Itemtype))) = 'W' THEN 'W' ELSE 'S' END) AS Season
-                  FROM usa.dbo.upcbarcodes b
-                 WHERE b.itemcode IS NOT NULL AND b.itemcode <> ''
-                 GROUP BY b.itemcode
-            ),
-            HOByItem AS (
+            SET NOCOUNT ON;
+
+            -- 1.14.12 perf: same materialization pattern as WhHoStockService.
+            -- ItemDiv and ItemSeason go into indexed temp tables once so the
+            -- HO/WH side joins are simple index seeks instead of CTE
+            -- expansions per row.
+            IF OBJECT_ID('tempdb..#VarRptItemDiv')    IS NOT NULL DROP TABLE #VarRptItemDiv;
+            IF OBJECT_ID('tempdb..#VarRptItemSeason') IS NOT NULL DROP TABLE #VarRptItemSeason;
+
+            SELECT u.itemcode, MIN(sm.Division) AS Division
+              INTO #VarRptItemDiv
+              FROM Datareporting.dbo.upc_subclass    u
+              INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+             WHERE u.itemcode IS NOT NULL AND u.itemcode <> ''
+             GROUP BY u.itemcode;
+            CREATE CLUSTERED INDEX IX_VarRptItemDiv ON #VarRptItemDiv (itemcode);
+
+            SELECT b.itemcode,
+                   MAX(CASE WHEN UPPER(LTRIM(RTRIM(b.Itemtype))) = 'W' THEN 'W' ELSE 'S' END) AS Season
+              INTO #VarRptItemSeason
+              FROM usa.dbo.upcbarcodes b
+             WHERE b.itemcode IS NOT NULL AND b.itemcode <> ''
+             GROUP BY b.itemcode;
+            CREATE CLUSTERED INDEX IX_VarRptItemSeason ON #VarRptItemSeason (itemcode);
+
+            ;WITH HOByItem AS (
                 -- HO Stock per (ItemCode × Division). LEFT JOIN ItemDiv
                 -- so items with no subclass mapping still appear and
                 -- bucket as '(no division)' — same pattern as
@@ -146,8 +154,8 @@ public class VarianceReportService(IConfiguration cfg)
                        ISNULL(id.Division, '(no division)') AS Division,
                        SUM(CAST(ISNULL(ls.SOH, 0) AS bigint)) AS HOStock
                   FROM racks.dbo.LPM_LocStock ls
-                  LEFT  JOIN ItemDiv id ON id.itemcode = ls.ItemCode
-                  LEFT  JOIN ItemSeason its ON its.itemcode = ls.ItemCode
+                  LEFT  JOIN #VarRptItemDiv id ON id.itemcode = ls.ItemCode
+                  LEFT  JOIN #VarRptItemSeason its ON its.itemcode = ls.ItemCode
                  WHERE ls.storeid IN ({hoSb})
                    AND (@season = 'A' OR ISNULL(its.Season, 'S') = @season)
                    {divFilterFrag}
@@ -165,7 +173,7 @@ public class VarianceReportService(IConfiguration cfg)
                                  AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStock
                   FROM {whSrc} w
-                  LEFT JOIN ItemDiv id ON id.itemcode = w.ItemCode
+                  LEFT JOIN #VarRptItemDiv id ON id.itemcode = w.ItemCode
                  WHERE (@season = 'A'
                         OR (@season = 'W' AND UPPER(ISNULL(w.Season, '')) = 'W')
                         OR (@season = 'S' AND UPPER(ISNULL(w.Season, '')) <> 'W'))

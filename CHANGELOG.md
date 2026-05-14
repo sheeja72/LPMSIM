@@ -23,6 +23,51 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.12 — WH Stock + Variance perf + PalletNo on SIM Output (2026-05-13)
+
+### Performance
+- **WH Stock Position and Variance Report queries sped up** by materializing the shared `ItemDiv` and `ItemSeason` CTEs into indexed temp tables instead of inline CTEs. Same pattern as 1.14.10's Rule 5 fix.
+  - `#WhRptItemDiv` / `#WhRptItemSeason` — temp tables in `WhHoStockService.GetAsync`
+  - `#VarRptItemDiv` / `#VarRptItemSeason` — temp tables in `VarianceReportService.GetAsync`
+  - Each gets a clustered index on `itemcode` so the downstream `HOByDiv` / `WHByDiv` / `HOByItem` / `WHByItem` joins are simple index seeks instead of CTE expansions over the full `usa.dbo.upcbarcodes` (18M rows) and `upc_subclass × subclassmaster` join.
+- Expected 2-5× speedup on these two reports, especially on the WH side where the previous CTE expansion was joined into the 15.7M-row `whboxitems`.
+
+### Added — PalletNo throughout SIM Output
+- **Migration 041** adds a `PalletNo varchar(50) NULL` column to `dbo.LPMSIM_Output` and its backup table. Idempotent (`COL_LENGTH ... IS NULL` guard). Existing rows stay NULL; new allocations populate from `whboxitems.PalletNo`.
+- **SIM allocator** (`LpmSimGenerator.BuildAsync` + `BulkInsertOutputAsync`) now reads `w.PalletNo` from the source box query, carries it through the `BoxItem` record and the two `LpmSimOutput` creation sites (Phase 1 + Phase 2 RR), and writes it to `LPMSIM_Output.PalletNo` via the bulk-copy DataTable. Allocation logic itself unchanged.
+- **`LpmSimOutput` entity** + **`LpmSimOutput_Backup` INSERT** updated for the new column.
+- **SIM Boxes tab** on SIM Generate page: new "Pallet No" column shown right after "Box No". Sortable, included in Excel export.
+- **Item Details tab** on SIM Generate page: new "Pallet No" column shown right after "Item". Sortable, included in Excel export.
+- **Report data layer** (`LpmSimReports.GetBoxDetailsAsync` + `GetItemDetailsAsync`) surfaces `PalletNo` from `whboxitems` via JOIN, so historical batches (where the persisted column is NULL on `LPMSIM_Output`) still display PalletNo on the report views.
+
+### Notes
+- No data-semantics change for any existing column. Output rows and metric totals are unchanged.
+- Existing historical batches retain `NULL` on `LPMSIM_Output.PalletNo` until re-Approved.
+- Reports JOIN to `whboxitems` regardless, so the UI shows PalletNo for all batches.
+- `SET NOCOUNT ON` added at the top of the WH Stock and Variance batches so row-count messages from temp-table inserts don't surface in the SqlDataReader.
+- EOM Generate uses a separate `EomCalculator.GetDivisionStockBreakdownAsync` query, untouched here.
+
+---
+
+## 1.14.11 — SIM Generate eligibility: all LPM months + LPM Non-Purchased column (2026-05-13)
+
+### Changed
+- **LPM column on the eligibility view now shows ALL LPM months** when "LPM Months = (All months)" is selected. Previously it filtered to `LPMDt < first-day-of-next-month` (current + elapsed only), so future-dated LPM tags (e.g. June 2026 boxes during a May 2026 run) were invisible. Specific-month selections still respect the filter as before.
+- **New "LPM Non-Purchased" column** on the eligibility table — displays LPM boxes where `ShopEligible = 'E'` (still in-process / not yet purchased). The existing "LPM" column now means "LPM AND Purchased". Total column now sums LPM + LPM-NP + Non-LPM for the row.
+- **Caption updated** to reflect the new buckets: *"LPM: LPMDt is set (all months — past, current, and future) · Non-LPM: LPMDt IS NULL · Non-Purchased: ShopEligible = 'E' (still in-process)"*.
+
+### Internal
+- `BoxSegmentCounts` record gained 8 new fields (LPM × Summer/Winter × Boxes/Qty, and Non-LPM × Summer/Winter × Boxes/Qty for the Non-Purchased buckets). Non-LPM-Non-Purchased fields exist for the `selBoxes`/`selQty` computation only — not displayed (per user spec).
+- SQL refactored: dropped the WHERE-level `ShopEligible` filter (now in CASE statements), dropped the LPMDt date filter when `lpmMonths` is empty.
+- `CheckAsync`'s "Eligible Boxes (Selected)" metric card preserves its old semantics — with "Incl. Non-Purchased" checked, the Non-Purchased buckets are added to the selected total; unchecked, only Purchased.
+
+### Notes
+- No schema change. No migration.
+- The Non-LPM column on the table is unchanged behaviourally (still shows Purchased only).
+- Other reports + SIM allocation untouched.
+
+---
+
 ## 1.14.10 — SKU Max Rule 5: materialize lookups, single-pass SalesPrice (2026-05-13)
 
 ### Performance

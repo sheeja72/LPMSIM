@@ -45,13 +45,27 @@ public record LpmSimReadiness(
     public string?   CurrentCreatedBy { get; init; }
 }
 
-/// <summary>Counts and quantities split across LPM/Non-LPM × Summer/Winter.</summary>
+/// <summary>
+/// Counts and quantities split across LPM/Non-LPM × Summer/Winter × Purchased/Non-Purchased.
+/// "Purchased" = <c>ShopEligible IS NULL OR &lt;&gt; 'E'</c>; "Non-Purchased" = <c>ShopEligible = 'E'</c>.
+/// 1.14.11: added the 8 Np fields so the eligibility view can display LPM-NP
+/// separately while CheckAsync's "selBoxes" total still respects the
+/// "Incl. Non-Purchased" toggle. The UI only renders LPM-NP currently;
+/// Non-LPM-NP fields exist for the selBoxes computation only.
+/// </summary>
 public record BoxSegmentCounts(
-    int LpmSummerBoxes,    long LpmSummerQty,
-    int NonLpmSummerBoxes, long NonLpmSummerQty,
-    int LpmWinterBoxes,    long LpmWinterQty,
-    int NonLpmWinterBoxes, long NonLpmWinterQty)
+    int LpmSummerBoxes,      long LpmSummerQty,
+    int NonLpmSummerBoxes,   long NonLpmSummerQty,
+    int LpmWinterBoxes,      long LpmWinterQty,
+    int NonLpmWinterBoxes,   long NonLpmWinterQty,
+    int LpmSummerNpBoxes,    long LpmSummerNpQty,
+    int NonLpmSummerNpBoxes, long NonLpmSummerNpQty,
+    int LpmWinterNpBoxes,    long LpmWinterNpQty,
+    int NonLpmWinterNpBoxes, long NonLpmWinterNpQty)
 {
+    // "Total" properties stay PURCHASED-only — what the eligibility row "Total"
+    // column has always meant. Non-Purchased contributions are surfaced
+    // separately in the LPM-NP column.
     public int  TotalSummerBoxes => LpmSummerBoxes + NonLpmSummerBoxes;
     public long TotalSummerQty   => LpmSummerQty   + NonLpmSummerQty;
     public int  TotalWinterBoxes => LpmWinterBoxes + NonLpmWinterBoxes;

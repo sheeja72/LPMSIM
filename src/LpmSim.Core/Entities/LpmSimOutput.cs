@@ -5,6 +5,13 @@ public class LpmSimOutput
     public long Id { get; set; }
     public long LPMBatchNo { get; set; }
     public string BoxNo { get; set; } = "";
+    /// <summary>
+    /// Pallet number this box belongs to, captured from <c>whboxitems.PalletNo</c>
+    /// at allocation time (1.14.12). Lets direct SSMS queries on LPMSIM_Output
+    /// see pallet info without joining the source table. NULL for historical
+    /// rows that pre-date this column.
+    /// </summary>
+    public string? PalletNo { get; set; }
     public DateTime? LPMDt { get; set; }
     public string Itemcode { get; set; } = "";
     public int Qty { get; set; }

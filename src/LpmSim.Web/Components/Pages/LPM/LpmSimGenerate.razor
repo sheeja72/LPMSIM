@@ -751,9 +751,9 @@
                 Eligible boxes (@CurrentFilterCaption())
             </MudText>
             <MudText Typo="Typo.caption" Style="display:block;color:#64748b;font-size:0.72rem;margin-top:.15rem;">
-                <strong>LPM</strong>: LPMDt is set AND its Year/Month is on or before the run period
-                (current or elapsed) &nbsp;·&nbsp;
-                <strong>Non-LPM</strong>: LPMDt IS NULL.
+                <strong>LPM</strong>: LPMDt is set (all months — past, current, and future) &nbsp;·&nbsp;
+                <strong>Non-LPM</strong>: LPMDt IS NULL &nbsp;·&nbsp;
+                <strong>Non-Purchased</strong>: <code>ShopEligible = 'E'</code> (still in-process).
                 Season is read from <code>pallettype.Season</code> (<code>'W'</code> = Winter, otherwise Summer).
             </MudText>
             <MudSimpleTable Dense Hover Bordered Class="lpm-seg-table mt-1" Style="font-size:0.82rem;">
@@ -761,6 +761,7 @@
                     <tr>
                         <th></th>
                         <th class="text-right">LPM</th>
+                        <th class="text-right">LPM Non-Purchased</th>
                         <th class="text-right">Non-LPM</th>
                         <th class="text-right" style="background:#f1f5f9;font-weight:600;">Total</th>
                     </tr>
@@ -769,27 +770,31 @@
                     <tr>
                         <td><strong>Summer</strong></td>
                         <td class="text-right">@seg.LpmSummerBoxes.ToString("N0") <span class="text-muted">(@seg.LpmSummerQty.ToString("N0"))</span></td>
+                        <td class="text-right">@seg.LpmSummerNpBoxes.ToString("N0") <span class="text-muted">(@seg.LpmSummerNpQty.ToString("N0"))</span></td>
                         <td class="text-right">@seg.NonLpmSummerBoxes.ToString("N0") <span class="text-muted">(@seg.NonLpmSummerQty.ToString("N0"))</span></td>
                         <td class="text-right" style="background:#f1f5f9;">
-                            <strong>@seg.TotalSummerBoxes.ToString("N0")</strong>
-                            <span class="text-muted">(@seg.TotalSummerQty.ToString("N0"))</span>
+                            <strong>@((seg.LpmSummerBoxes + seg.LpmSummerNpBoxes + seg.NonLpmSummerBoxes).ToString("N0"))</strong>
+                            <span class="text-muted">(@((seg.LpmSummerQty + seg.LpmSummerNpQty + seg.NonLpmSummerQty).ToString("N0")))</span>
                         </td>
                     </tr>
                     <tr>
                         <td><strong>Winter</strong></td>
                         <td class="text-right">@seg.LpmWinterBoxes.ToString("N0") <span class="text-muted">(@seg.LpmWinterQty.ToString("N0"))</span></td>
+                        <td class="text-right">@seg.LpmWinterNpBoxes.ToString("N0") <span class="text-muted">(@seg.LpmWinterNpQty.ToString("N0"))</span></td>
                         <td class="text-right">@seg.NonLpmWinterBoxes.ToString("N0") <span class="text-muted">(@seg.NonLpmWinterQty.ToString("N0"))</span></td>
                         <td class="text-right" style="background:#f1f5f9;">
-                            <strong>@seg.TotalWinterBoxes.ToString("N0")</strong>
-                            <span class="text-muted">(@seg.TotalWinterQty.ToString("N0"))</span>
+                            <strong>@((seg.LpmWinterBoxes + seg.LpmWinterNpBoxes + seg.NonLpmWinterBoxes).ToString("N0"))</strong>
+                            <span class="text-muted">(@((seg.LpmWinterQty + seg.LpmWinterNpQty + seg.NonLpmWinterQty).ToString("N0")))</span>
                         </td>
                     </tr>
                     <tr style="background:#f8fafc;font-weight:600;">
                         <td>Total</td>
                         <td class="text-right">@((seg.LpmSummerBoxes + seg.LpmWinterBoxes).ToString("N0")) <span class="text-muted">(@((seg.LpmSummerQty + seg.LpmWinterQty).ToString("N0")))</span></td>
+                        <td class="text-right">@((seg.LpmSummerNpBoxes + seg.LpmWinterNpBoxes).ToString("N0")) <span class="text-muted">(@((seg.LpmSummerNpQty + seg.LpmWinterNpQty).ToString("N0")))</span></td>
                         <td class="text-right">@((seg.NonLpmSummerBoxes + seg.NonLpmWinterBoxes).ToString("N0")) <span class="text-muted">(@((seg.NonLpmSummerQty + seg.NonLpmWinterQty).ToString("N0")))</span></td>
                         <td class="text-right" style="background:#e2e8f0;">
-                            @seg.TotalBoxes.ToString("N0") <span class="text-muted">(@seg.TotalQty.ToString("N0"))</span>
+                            @((seg.LpmSummerBoxes + seg.LpmSummerNpBoxes + seg.NonLpmSummerBoxes + seg.LpmWinterBoxes + seg.LpmWinterNpBoxes + seg.NonLpmWinterBoxes).ToString("N0"))
+                            <span class="text-muted">(@((seg.LpmSummerQty + seg.LpmSummerNpQty + seg.NonLpmSummerQty + seg.LpmWinterQty + seg.LpmWinterNpQty + seg.NonLpmWinterQty).ToString("N0")))</span>
                         </td>
                     </tr>
                 </tbody>
@@ -1331,6 +1336,7 @@
                           FixedHeader Height="55vh" AllowUnsorted="false">
                     <HeaderContent>
                         <MudTh><div class="th-total">@filteredBoxes.Count.ToString("N0") rows</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.PalletNo ?? string.Empty">Pallet No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxKind ?? string.Empty">Kind</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Pallet Type</MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Type Name</MudTh>
@@ -1344,6 +1350,7 @@
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd><code>@context.PalletNo</code></MudTd>
                         <MudTd>
                             @if (context.BoxKind == "LPM")
                             {
@@ -1439,6 +1446,7 @@
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
                         <MudTh Style="text-align:right;"><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.PriorityRank ?? decimal.MaxValue">Rank</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Itemcode">Item</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.PalletNo ?? string.Empty">Pallet No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalItemQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">BoxQty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxKind">LPM</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalSkuMax.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SKUMax ?? 0">SKU Max</MudTableSortLabel></MudTh>
@@ -1456,6 +1464,7 @@
                         <MudTd>@context.DivisionName</MudTd>
                         <MudTd Style="text-align:right;">@(context.PriorityRank?.ToString("0.##") ?? "—")</MudTd>
                         <MudTd><code>@context.Itemcode</code></MudTd>
+                        <MudTd><code>@context.PalletNo</code></MudTd>
                         <MudTd>@(context.BoxItemQty?.ToString("N0"))</MudTd>
                         <MudTd>
                             @if (context.BoxKind == "LPM")
@@ -3913,26 +3922,28 @@
         var bn = _readiness?.CurrentBatchNo ?? 0;
         await SaveExcelAsync($"LPMSIM_Boxes_{bn}.xlsx", "Boxes", sheet =>
         {
-            string[] headers = { "Box No", "Kind", "Pallet Type", "Type Name", "Trn Date", "Warehouse", "Rack", "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
+            // 1.14.12: Pallet No column added after Box No.
+            string[] headers = { "Box No", "Pallet No", "Kind", "Pallet Type", "Type Name", "Trn Date", "Warehouse", "Rack", "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
                 var r = rows[i]; int row = i + 2;
                 sheet.Cell(row, 1).Value  = r.BoxNo;
-                sheet.Cell(row, 2).Value  = r.BoxKind ?? "";
-                sheet.Cell(row, 3).Value  = r.PalletType ?? "";
-                sheet.Cell(row, 4).Value  = r.TypeName ?? "";
-                if (r.TrnDate.HasValue) sheet.Cell(row, 5).Value = r.TrnDate.Value;
-                sheet.Cell(row, 6).Value  = r.Warehouse ?? "";
-                sheet.Cell(row, 7).Value  = r.Rack ?? "";
-                sheet.Cell(row, 8).Value  = r.BoxQty ?? 0;
-                sheet.Cell(row, 9).Value  = r.LpmSimQty;
-                sheet.Cell(row, 10).Value = r.RoundRobinQty;
-                sheet.Cell(row, 11).Value = (double?)r.SkuUsabilityPct;
+                sheet.Cell(row, 2).Value  = r.PalletNo ?? "";
+                sheet.Cell(row, 3).Value  = r.BoxKind ?? "";
+                sheet.Cell(row, 4).Value  = r.PalletType ?? "";
+                sheet.Cell(row, 5).Value  = r.TypeName ?? "";
+                if (r.TrnDate.HasValue) sheet.Cell(row, 6).Value = r.TrnDate.Value;
+                sheet.Cell(row, 7).Value  = r.Warehouse ?? "";
+                sheet.Cell(row, 8).Value  = r.Rack ?? "";
+                sheet.Cell(row, 9).Value  = r.BoxQty ?? 0;
+                sheet.Cell(row, 10).Value = r.LpmSimQty;
+                sheet.Cell(row, 11).Value = r.RoundRobinQty;
+                sheet.Cell(row, 12).Value = (double?)r.SkuUsabilityPct;
             }
-            sheet.Range(2, 5, rows.Count + 1, 5).Style.NumberFormat.Format = "yyyy-mm-dd";
-            FormatNumeric(sheet, rows.Count, new[] { 8, 9, 10 });
-            sheet.Range(2, 11, rows.Count + 1, 11).Style.NumberFormat.Format = "0.0";
+            sheet.Range(2, 6, rows.Count + 1, 6).Style.NumberFormat.Format = "yyyy-mm-dd";
+            FormatNumeric(sheet, rows.Count, new[] { 9, 10, 11 });
+            sheet.Range(2, 12, rows.Count + 1, 12).Style.NumberFormat.Format = "0.0";
         });
     }
 
@@ -3943,10 +3954,9 @@
         var bn = _readiness?.CurrentBatchNo ?? 0;
         await SaveExcelAsync($"LPMSIM_Items_{bn}.xlsx", "Items", sheet =>
         {
-            // Excel columns mirror the on-screen Item Details table:
-            // BoxNo dropped, Qty renamed BoxQty, new LPM column, Rank column
-            // (per Store × Div), LPM Qty renamed SIM Qty.
-            string[] headers = { "Store ID", "Store", "Division", "Rank", "Item", "BoxQty", "LPM", "SKU Max", "SOH", "SIM Qty", "RR Qty", "Phase", "Use %" };
+            // Excel columns mirror the on-screen Item Details table.
+            // 1.14.12: Pallet No column added after Item.
+            string[] headers = { "Store ID", "Store", "Division", "Rank", "Item", "Pallet No", "BoxQty", "LPM", "SKU Max", "SOH", "SIM Qty", "RR Qty", "Phase", "Use %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
@@ -3956,18 +3966,19 @@
                 sheet.Cell(row, 3).Value  = r.DivisionName;
                 if (r.PriorityRank.HasValue) sheet.Cell(row, 4).Value = (double)r.PriorityRank.Value;
                 sheet.Cell(row, 5).Value  = r.Itemcode;
-                sheet.Cell(row, 6).Value  = r.BoxItemQty ?? 0;
-                sheet.Cell(row, 7).Value  = r.BoxKind;
-                sheet.Cell(row, 8).Value  = r.SKUMax ?? 0;
-                sheet.Cell(row, 9).Value  = r.SOH;
-                sheet.Cell(row, 10).Value = r.LpmQty;
-                sheet.Cell(row, 11).Value = r.RoundRobinQty;
-                sheet.Cell(row, 12).Value = r.Phase ?? "";
-                sheet.Cell(row, 13).Value = (double?)ItemUsability(r);
+                sheet.Cell(row, 6).Value  = r.PalletNo ?? "";
+                sheet.Cell(row, 7).Value  = r.BoxItemQty ?? 0;
+                sheet.Cell(row, 8).Value  = r.BoxKind;
+                sheet.Cell(row, 9).Value  = r.SKUMax ?? 0;
+                sheet.Cell(row, 10).Value = r.SOH;
+                sheet.Cell(row, 11).Value = r.LpmQty;
+                sheet.Cell(row, 12).Value = r.RoundRobinQty;
+                sheet.Cell(row, 13).Value = r.Phase ?? "";
+                sheet.Cell(row, 14).Value = (double?)ItemUsability(r);
             }
-            FormatNumeric(sheet, rows.Count, new[] { 6, 8, 9, 10, 11 });
+            FormatNumeric(sheet, rows.Count, new[] { 7, 9, 10, 11, 12 });
             sheet.Range(2, 4,  rows.Count + 1, 4).Style.NumberFormat.Format  = "0.##";
-            sheet.Range(2, 13, rows.Count + 1, 13).Style.NumberFormat.Format = "0.0";
+            sheet.Range(2, 14, rows.Count + 1, 14).Style.NumberFormat.Format = "0.0";
         });
         Snackbar.Add($"Exported {rows.Count:N0} item-detail rows to LPMSIM_Items_{bn}.xlsx",
                      Severity.Success, cfg => cfg.VisibleStateDuration = 4000);
