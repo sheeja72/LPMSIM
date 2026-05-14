@@ -23,6 +23,29 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.20 — Warehouse Boxes: Mixed Season filter + Summer/Winter Qty/% columns (2026-05-14)
+
+### Added on the Box-mode Warehouse Boxes report
+- **"Mixed Season boxes only" checkbox** in the filter bar. Default OFF. When ON, only boxes carrying BOTH at least one Summer item AND at least one Winter item pass the filter. Highlighted yellow when ON (`lpm-filter-active`), matching the convention of other toggle filters.
+- **4 new columns** at the end of the Box detail table — **Summer Qty | Winter Qty | Summer % | Winter %** — always shown regardless of the checkbox so a planner can see the season mix of every box at a glance.
+  - "Summer" = `UPPER(ISNULL(w.Season, '')) <> 'W'`. NULL / empty Season buckets into Summer (matches the 1.14.9+ convention). `Summer Qty + Winter Qty` always equals `Qty` exactly.
+  - Percentages computed in C# at render time (1 dp). Defensive `Qty == 0 ⇒ "—"` so a (theoretical) zero-qty box doesn't divide by zero.
+  - Excel export updated with the same 4 columns; percentages stored as numeric values with `0.0` format so Excel users can sort/filter them numerically.
+- Sort labels on all 4 new columns so the planner can sort by Summer Qty / Winter Qty / Summer % / Winter % directly.
+- Header totals row on Summer Qty + Winter Qty (mirrors the existing Qty total).
+
+### Implementation
+- `WhBoxFilter` gains `MixedSeasonOnly` (default `false`).
+- `WhBoxRow` gains `SummerQty` + `WinterQty` (longs).
+- `GetBoxesAsync` SELECT adds two `SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) = 'W' THEN ... ELSE ... END)` expressions; HAVING gets a `(@mixedSeasonOnly = 0 OR (...))` short-circuit clause.
+- **Perf impact**: near zero. Two extra aggregate expressions over the rows the existing `SUM(w.Qty)` already touches. No new JOINs, no new GROUP BY columns, no extra row reads — the query plan keeps the same shape.
+
+### Scope
+- **Box mode only.** Division/Department/Brand group-by modes are unchanged — "mixed-box" isn't a meaningful concept at those rollups (they aggregate across boxes by definition).
+- No DB migration. Pure code change.
+
+---
+
 ## 1.14.19 — SKU Max Rule 1 (ExcludeExport_Planning): Active + Duration + GroupCode (2026-05-14)
 
 ### Rule 1 (`usa.dbo.ExcludeExport_Planning`) — new business logic

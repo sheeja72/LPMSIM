@@ -158,6 +158,18 @@
                          Class="@(_includeNonPurchased ? "lpm-filter-active" : "")"
                          Label="Include non-Purchased Boxes" />
         </MudItem>
+        @* 1.14.20 — Mixed Season filter. Default OFF. When CHECKED, only
+           boxes carrying BOTH at least one Summer item AND at least one
+           Winter item pass. The Summer/Winter Qty + % columns are ALWAYS
+           shown (whether the checkbox is on or off) so a planner can see
+           the season mix of every box at a glance. *@
+        <MudItem xs="12" sm="6" md="3" Class="d-flex align-center">
+            <MudCheckBox T="bool" Value="_mixedSeasonOnly"
+                         ValueChanged="v => { _mixedSeasonOnly = v; StateHasChanged(); }"
+                         Color="Color.Primary"
+                         Class="@(_mixedSeasonOnly ? "lpm-filter-active" : "")"
+                         Label="Mixed Season boxes only" />
+        </MudItem>
         <MudItem xs="12" md="3" Class="d-flex align-center justify-end gap-2">
             <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
                        StartIcon="@Icons.Material.Filled.PlayArrow"
@@ -260,10 +272,23 @@
             <MudTh>Purchased
                 <span class="lpm-th-total is-count">@_rows.Count(r => r.Purchased == "N").ToString("N0") = N</span>
             </MudTh>
-            @* TrnDate / CurrDate (1.12.0) — last two columns. TrnDate is
+            @* TrnDate / CurrDate (1.12.0) — last two date columns. TrnDate is
                date-only, CurrDate is datetime; render with the formats below. *@
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.TrnDate ?? DateTime.MinValue">TrnDate</MudTableSortLabel></MudTh>
             <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.CurrDate ?? DateTime.MinValue">CurrDate</MudTableSortLabel></MudTh>
+            @* 1.14.20 — per-box Summer / Winter qty + percentage breakdown.
+               Summer + Winter always equals Qty exactly (NULL/empty Season
+               buckets into Summer). Percentages computed in C# to avoid
+               divide-by-zero — render "—" when Qty is 0 (shouldn't happen
+               but defensive). *@
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.SummerQty">Summer Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_rows.Sum(r => r.SummerQty).ToString("N0")</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.WinterQty">Winter Qty</MudTableSortLabel>
+                <span class="lpm-th-total">@_rows.Sum(r => r.WinterQty).ToString("N0")</span>
+            </MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty == 0 ? 0m : (decimal)r.SummerQty * 100m / r.Qty">Summer %</MudTableSortLabel></MudTh>
+            <MudTh><MudTableSortLabel T="WhBoxRow" SortBy="r => r.Qty == 0 ? 0m : (decimal)r.WinterQty * 100m / r.Qty">Winter %</MudTableSortLabel></MudTh>
         </HeaderContent>
         <RowTemplate>
             <MudTd>@context.Country</MudTd>
@@ -283,6 +308,10 @@
             <MudTd>@context.Purchased</MudTd>
             <MudTd>@(context.TrnDate?.ToString("yyyy-MM-dd") ?? "")</MudTd>
             <MudTd>@(context.CurrDate?.ToString("yyyy-MM-dd HH:mm") ?? "")</MudTd>
+            <MudTd Style="text-align:right;">@context.SummerQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.WinterQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@(context.Qty == 0 ? "—" : ((decimal)context.SummerQty * 100m / context.Qty).ToString("F1"))</MudTd>
+            <MudTd Style="text-align:right;">@(context.Qty == 0 ? "—" : ((decimal)context.WinterQty * 100m / context.Qty).ToString("F1"))</MudTd>
         </RowTemplate>
         <PagerContent>
             <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -504,6 +533,10 @@ else if (!_loadedOnce)
     // Not country-scoped, so OnCountryChanged leaves these alone.
     private DateTime? _trnDateFrom = null;
     private DateTime? _trnDateTo   = null;
+    // 1.14.20 — Mixed Season filter for Box mode. When true, only boxes
+    // carrying BOTH at least one Summer item AND at least one Winter item
+    // are returned. No effect on Division/Department/Brand modes.
+    private bool _mixedSeasonOnly = false;
 
     /// <summary>
     /// Pack the current state into a WhBoxFilter for the query service.
@@ -524,7 +557,8 @@ else if (!_loadedOnce)
         ContNo:              _selectedContNos.Count == 0          ? null : _selectedContNos.ToList(),
         Country:             _country,
         TrnDateFrom:         _trnDateFrom,
-        TrnDateTo:           _trnDateTo);
+        TrnDateTo:           _trnDateTo,
+        MixedSeasonOnly:     _mixedSeasonOnly);
 
     /// <summary>
     /// Country dropdown handler — kept as a named method (instead of inline in
@@ -631,11 +665,13 @@ else if (!_loadedOnce)
                     // Column order mirrors the on-screen Box Detail table:
                     //   ContNo + LPM moved to the front (after Warehouse) so
                     //   the row reads container → pallet → box, top-down.
+                    // 1.14.20: Summer/Winter Qty + % appended as last 4 columns.
                     string[] headers = { "Country", "Warehouse", "ContNo", "LPM",
                         "Pallet No", "Box No", "Qty",
                         "Pallet Type", "Type Name", "Pallet Category", "Division",
                         "Department", "Brand", "Rack", "Purchased",
-                        "TrnDate", "CurrDate" };
+                        "TrnDate", "CurrDate",
+                        "Summer Qty", "Winter Qty", "Summer %", "Winter %" };
                     for (int i = 0; i < headers.Length; i++)
                         ws.Cell(1, i + 1).Value = headers[i];
                     ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
@@ -669,6 +705,19 @@ else if (!_loadedOnce)
                         {
                             ws.Cell(row, 17).Value = cd;
                             ws.Cell(row, 17).Style.DateFormat.Format = "yyyy-MM-dd HH:mm";
+                        }
+                        // 1.14.20 — Summer/Winter columns. Percentages stay
+                        // as numeric values (1dp) so Excel can sort + filter
+                        // numerically; format string suppresses trailing
+                        // zeros but keeps a single decimal place.
+                        ws.Cell(row, 18).Value = r.SummerQty;
+                        ws.Cell(row, 19).Value = r.WinterQty;
+                        if (r.Qty > 0)
+                        {
+                            ws.Cell(row, 20).Value = Math.Round((decimal)r.SummerQty * 100m / r.Qty, 1);
+                            ws.Cell(row, 20).Style.NumberFormat.Format = "0.0";
+                            ws.Cell(row, 21).Value = Math.Round((decimal)r.WinterQty * 100m / r.Qty, 1);
+                            ws.Cell(row, 21).Style.NumberFormat.Format = "0.0";
                         }
                         row++;
                     }

@@ -43,7 +43,14 @@ public record WhBoxFilter(
     // side. Applied as w.TrnDate >= @trnDateFrom AND w.TrnDate <= @trnDateTo.
     // TrnDate is a date-only column so direct <= comparison is fine.
     DateTime? TrnDateFrom = null,
-    DateTime? TrnDateTo = null);
+    DateTime? TrnDateTo = null,
+    // 1.14.20: when true, only boxes carrying BOTH at least one Summer
+    // item AND at least one Winter item pass the per-box HAVING filter.
+    // "Summer" = UPPER(ISNULL(w.Season,'')) <> 'W' (NULL / empty default
+    // to Summer, matching the convention 1.14.9+ uses everywhere else).
+    // Box-mode only — Division/Department/Brand modes ignore this flag
+    // because "mixed box" isn't a meaningful concept at those rollups.
+    bool MixedSeasonOnly = false);
 
 public record WhBoxRow(
     string Country,
@@ -66,7 +73,13 @@ public record WhBoxRow(
     // box and one box can in theory have multiple source rows with
     // different dates (we surface the latest).
     DateTime? TrnDate,
-    DateTime? CurrDate);
+    DateTime? CurrDate,
+    // 1.14.20 — per-box Summer / Winter split. Both summed from the same
+    // rows the existing Qty aggregate uses, so Summer + Winter always
+    // equals Qty exactly (no rounding, no missing classification —
+    // NULL/empty Season is bucketed into Summer per convention).
+    long SummerQty,
+    long WinterQty);
 
 /// <summary>Division-level summary row: one per Division.</summary>
 public record WhDivisionRow(
@@ -266,6 +279,12 @@ public class WarehouseQueryService(IConfiguration cfg)
         // aggregate uses MAX(scm.Division) / MAX(scm.Department).
         var (whereExtra, havingExtra, filterParams) = BuildFilterClauses(filter, divDeptInHaving: true);
 
+        // 1.14.20 — SummerQty / WinterQty added to the projection. The
+        // CASE expressions reuse the same source rows the existing Qty SUM
+        // uses, so Summer + Winter always equals Qty exactly. NULL / empty
+        // Season buckets into Summer per the 1.14.9+ convention. The
+        // @mixedSeasonOnly HAVING filter keeps both totals > 0 — only
+        // boxes carrying at least one of each Season pass.
         var sql = $@"
             SELECT TOP (@top)
                    @country AS Country,
@@ -284,7 +303,9 @@ public class WarehouseQueryService(IConfiguration cfg)
                    MAX(CASE WHEN w.ShopEligible = 'E' THEN 'N' ELSE NULL END)              AS Purchased,
                    MAX(w.ContNo)                                                           AS ContNo,
                    MAX(w.TrnDate)                                                          AS TrnDate,
-                   MAX(w.CurrDate)                                                         AS CurrDate
+                   MAX(w.CurrDate)                                                         AS CurrDate,
+                   SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) =  'W' THEN 0 ELSE CAST(w.Qty AS bigint) END) AS SummerQty,
+                   SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) =  'W' THEN CAST(w.Qty AS bigint) ELSE 0 END) AS WinterQty
               FROM {src} w
               LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               OUTER APPLY (
@@ -311,12 +332,19 @@ public class WarehouseQueryService(IConfiguration cfg)
                     OR w.ShopEligible <> 'E')
              GROUP BY w.Warehouse, w.PalletNo, w.BoxNo, w.PalletType, pt.TypeName, pt.PalletCategory
             HAVING 1 = 1 {havingExtra}
+               -- 1.14.20: mixed-season filter — both Summer and Winter
+               -- totals must be > 0 for the box to pass. @mixedSeasonOnly=0
+               -- short-circuits so the filter is no-op when unchecked.
+               AND (@mixedSeasonOnly = 0
+                    OR (SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) =  'W' THEN 0 ELSE CAST(w.Qty AS bigint) END) > 0
+                    AND SUM(CASE WHEN UPPER(ISNULL(w.Season,'')) =  'W' THEN CAST(w.Qty AS bigint) ELSE 0 END) > 0))
              ORDER BY w.Warehouse, w.PalletNo, w.BoxNo;";
 
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 180 };
         foreach (var p in filterParams) cmd.Parameters.Add(p);
-        cmd.Parameters.Add(new SqlParameter("@top",     top));
-        cmd.Parameters.Add(new SqlParameter("@country", country));
+        cmd.Parameters.Add(new SqlParameter("@top",              top));
+        cmd.Parameters.Add(new SqlParameter("@country",          country));
+        cmd.Parameters.Add(new SqlParameter("@mixedSeasonOnly",  filter.MixedSeasonOnly ? 1 : 0));
 
         var rows = new List<WhBoxRow>();
         using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -339,7 +367,9 @@ public class WarehouseQueryService(IConfiguration cfg)
                 Purchased:      reader.IsDBNull(13) ? null : reader.GetString(13),
                 ContNo:         reader.IsDBNull(14) ? null : reader.GetString(14),
                 TrnDate:        reader.IsDBNull(15) ? null : reader.GetDateTime(15),
-                CurrDate:       reader.IsDBNull(16) ? null : reader.GetDateTime(16)));
+                CurrDate:       reader.IsDBNull(16) ? null : reader.GetDateTime(16),
+                SummerQty:      reader.IsDBNull(17) ? 0 : reader.GetInt64(17),
+                WinterQty:      reader.IsDBNull(18) ? 0 : reader.GetInt64(18)));
         }
         return rows;
     }
