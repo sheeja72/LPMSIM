@@ -336,6 +336,28 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
     private static string Truncate(string s, int max)
         => s.Length <= max ? s : s.Substring(0, max - 1) + "…";
 
+    /// <summary>
+    /// 1.14.21 — humanise a millisecond count for the SKU Max Build
+    /// stage detail. Mirrors the convention from
+    /// <c>SkuMaxBuildJobManager.FormatDuration(TimeSpan)</c> but takes
+    /// a long ms count (avoids constructing a TimeSpan in hot stage-
+    /// string building). Examples:
+    ///   • 850         → "850ms"
+    ///   • 4 800       → "4.8s"
+    ///   • 65 200      → "1m 5s"
+    ///   • 319 000     → "5m 19s"
+    /// </summary>
+    private static string FormatMs(long ms)
+    {
+        if (ms < 1_000)   return $"{ms}ms";
+        if (ms < 60_000)  return $"{ms / 1000.0:0.0}s";
+        var totalSec = ms / 1000;
+        var min = totalSec / 60;
+        var sec = totalSec % 60;
+        return $"{min}m {sec}s";
+    }
+    private static string FormatMs(int ms) => FormatMs((long)ms);
+
     private static string SeasonLabel(LpmSimSeasonFlags f)
     {
         if (f == LpmSimSeasonFlags.None || f == LpmSimSeasonFlags.Both) return "All seasons";
@@ -2783,6 +2805,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     DECLARE @t0 datetime2(3);
                     DECLARE @ms1 int = 0, @ms2 int = 0, @ms3 int = 0, @ms4 int = 0,
                             @ms5 int = 0, @ms6 int = 0, @ms7 int = 0;
+                    -- 1.14.21: per-rule rowcount + reusable @msg buffer for
+                    -- mid-batch progress messages. RAISERROR(@msg, 0, 1) WITH
+                    -- NOWAIT fires the InfoMessage event on the client BEFORE
+                    -- the batch finishes — so a 5-min build can stream
+                    -- Rule-N completion messages (e.g. 35200ms, 1250 matches)
+                    -- to the user while subsequent rules are still running.
+                    DECLARE @msg nvarchar(400);
+                    DECLARE @r1Rows int = 0, @r2Rows int = 0, @r3Rows int = 0, @r4Rows int = 0,
+                            @r5Rows int = 0, @r6Rows int = 0, @r7Rows int = 0;
                     -- Per-rule error capture — TRY/CATCH inside each rule writes
                     -- ERROR_MESSAGE() here. Returned to C# alongside the counts
                     -- so the build banner can show e.g. 'R5 SKIPPED (Hodata
@@ -2904,6 +2935,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     --     (item-level is more specific).
                     --   • NULL BlockFrom or NULL BlockTo on a Temporary row ⇒
                     --     BETWEEN evaluates UNKNOWN ⇒ block does not apply (fail-safe).
+                    RAISERROR(N'Rule 1 of 7 (usa.dbo.ExcludeExport_Planning)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         ;WITH ActiveExcludes AS (
@@ -2947,9 +2979,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                          WHERE snap.Shopname IS NOT NULL
                            AND LTRIM(RTRIM(ISNULL(ae.GroupCode, ''))) <> ''
                            AND LTRIM(RTRIM(ISNULL(ae.ItemCode,  ''))) =  '';
+                        SET @r1Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r1Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms1 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 1 done in ', @ms1, N'ms (', @r1Rows, N' matches)',
+                        CASE WHEN @r1Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r1Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
 
                     -- Rule 2 — usa.dbo.ExcludeSubclass (Shop x MH4ID; Inactive='N')
                     -- ExcludeSubclass uses the legacy column name Shop (NOT
@@ -2959,6 +2995,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- 1.14.8: now joins es.Shop = snap.Shopname (the
                     -- DataSettings-bridged value), was snap.StoreID which
                     -- never matched. MH4ID join unchanged.
+                    RAISERROR(N'Rule 2 of 7 (usa.dbo.ExcludeSubclass)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #ExcludeMatches
@@ -2975,13 +3012,18 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                  AND es.mh4id = us.MH4ID
                          WHERE es.Inactive = 'N'
                            AND snap.Shopname IS NOT NULL;
+                        SET @r2Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r2Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms2 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 2 done in ', @ms2, N'ms (', @r2Rows, N' matches)',
+                        CASE WHEN @r2Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r2Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
 
                     -- Rule 3 — bfldata.dbo.RemoveItemsFromTransfer (Itemcode x Shopname; trndate >= 2025-09-01)
                     -- 1.14.8: was joining rt.shopname = snap.StoreID; flipped
                     -- to snap.Shopname (DataSettings-bridged).
+                    RAISERROR(N'Rule 3 of 7 (bfldata.dbo.RemoveItemsFromTransfer)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #ExcludeMatches
@@ -2996,9 +3038,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                  AND rt.shopname = snap.Shopname
                          WHERE rt.trndate >= '2025-09-01'
                            AND snap.Shopname IS NOT NULL;
+                        SET @r3Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r3Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms3 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 3 done in ', @ms3, N'ms (', @r3Rows, N' matches)',
+                        CASE WHEN @r3Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r3Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
 
                     -- Rule 4 — usa.dbo.ExcludeItemsMFCS (HSCode x Shopname).
                     --
@@ -3018,6 +3064,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- ExcludeItemsMFCS (≤198 rows). The relevant upc
                     -- subset is normally tiny, so the SkuSnap × upcbarcodes
                     -- multiplication never blows up.
+                    RAISERROR(N'Rule 4 of 7 (usa.dbo.ExcludeItemsMFCS via upcbarcodes)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         ;WITH ExclHSCodes AS (
@@ -3045,9 +3092,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                   ON e.HSCode   = ru.HSCode
                                  AND e.Shopname = snap.Shopname
                          WHERE snap.Shopname IS NOT NULL;
+                        SET @r4Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r4Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms4 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 4 done in ', @ms4, N'ms (', @r4Rows, N' matches)',
+                        CASE WHEN @r4Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r4Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
 
                     -- Rule 5 — usa.dbo.DeptPriceMaxQty_MH4 (price-band cap → REPLACE)
                     -- Joins Hodata.dbo.SalesPrice (latest SalesRate per item for
@@ -3062,6 +3113,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- Materialised into indexed temp tables filtered to ONLY
                     -- items in #SkuSnap, with a single ROW_NUMBER() pass for
                     -- the latest price per item. Expected: 14m → 1-3m.
+                    RAISERROR(N'Rule 5 of 7 (usa.dbo.DeptPriceMaxQty_MH4 + Hodata.SalesPrice)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         IF OBJECT_ID('tempdb..#SkuItemsR5')  IS NOT NULL DROP TABLE #SkuItemsR5;
@@ -3135,11 +3187,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                ORDER BY dp.PriceF
                           ) bnd
                          WHERE snap.Shopname IS NOT NULL;
+                        SET @r5Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r5Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms5 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 5 done in ', @ms5, N'ms (', @r5Rows, N' price-capped)',
+                        CASE WHEN @r5Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r5Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
 
                     -- Rule 6 — dbo.LPM_StoreDivAccess (deactivation; #Deact already prebuilt)
+                    RAISERROR(N'Rule 6 of 7 (dbo.LPM_StoreDivAccess)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         INSERT INTO #DeactMatches
@@ -3150,11 +3207,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                           INNER JOIN #Deact d
                                   ON d.StoreID = snap.StoreID
                                  AND d.DivCode = snap.DivCode;
+                        SET @r6Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r6Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms6 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 6 done in ', @ms6, N'ms (', @r6Rows, N' div-deactivated)',
+                        CASE WHEN @r6Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r6Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
 
                     -- Rule 7 — dbo.LPM_StoreDeptAccess (Store × Department deactivation)
+                    RAISERROR(N'Rule 7 of 7 (dbo.LPM_StoreDeptAccess)…', 0, 1) WITH NOWAIT;
                     SET @t0 = SYSDATETIME();
                     BEGIN TRY
                         WITH ItemDept AS (
@@ -3178,9 +3240,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                  AND sda.DivCode    = snap.DivCode
                                  AND sda.Department = id.Department
                                  AND sda.IsActive   = 0;
+                        SET @r7Rows = @@ROWCOUNT;
                     END TRY
                     BEGIN CATCH SET @r7Error = ERROR_MESSAGE(); END CATCH;
                     SET @ms7 = DATEDIFF(MILLISECOND, @t0, SYSDATETIME());
+                    SET @msg = CONCAT(N'  ↳ Rule 7 done in ', @ms7, N'ms (', @r7Rows, N' dept-deactivated)',
+                        CASE WHEN @r7Error IS NOT NULL THEN N' — FAILED: ' + LEFT(@r7Error, 120) ELSE N'' END);
+                    RAISERROR(@msg, 0, 1) WITH NOWAIT;
+                    RAISERROR(N'Rules complete — applying audit + UPDATE…', 0, 1) WITH NOWAIT;
 
                     -- ---------- PHASE 3: Apply (atomic) ----------
                     -- Audit + UPDATE wrapped in a single transaction. If this
@@ -3302,27 +3369,49 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 excl.Parameters.Add(new SqlParameter("@y", year));
                 excl.Parameters.Add(new SqlParameter("@m", month));
                 excl.CommandTimeout = 1800;
-                using var rdr2 = await excl.ExecuteReaderAsync(ct);
-                if (await rdr2.ReadAsync(ct))
+                // 1.14.21 — hook InfoMessage to stream per-rule progress.
+                // RAISERROR(@msg, 0, 1) WITH NOWAIT inside the SQL fires
+                // these mid-batch (severity 0 ⇒ Class = 0 on SqlError).
+                // The handler is detached at the end of the using-block
+                // below so it never leaks onto the pooled SqlConnection.
+                SqlInfoMessageEventHandler infoHandler = (sender, e) =>
                 {
-                    excluded         = rdr2.IsDBNull(0)  ? 0L : Convert.ToInt64(rdr2.GetValue(0));
-                    priceCapped      = rdr2.IsDBNull(1)  ? 0L : Convert.ToInt64(rdr2.GetValue(1));
-                    deactivated      = rdr2.IsDBNull(2)  ? 0L : Convert.ToInt64(rdr2.GetValue(2));
-                    deptDeactivated  = rdr2.IsDBNull(3)  ? 0L : Convert.ToInt64(rdr2.GetValue(3));
-                    msRule1          = rdr2.IsDBNull(4)  ? 0  : Convert.ToInt32(rdr2.GetValue(4));
-                    msRule2          = rdr2.IsDBNull(5)  ? 0  : Convert.ToInt32(rdr2.GetValue(5));
-                    msRule3          = rdr2.IsDBNull(6)  ? 0  : Convert.ToInt32(rdr2.GetValue(6));
-                    msRule4          = rdr2.IsDBNull(7)  ? 0  : Convert.ToInt32(rdr2.GetValue(7));
-                    msRule5          = rdr2.IsDBNull(8)  ? 0  : Convert.ToInt32(rdr2.GetValue(8));
-                    msRule6          = rdr2.IsDBNull(9)  ? 0  : Convert.ToInt32(rdr2.GetValue(9));
-                    msRule7          = rdr2.IsDBNull(10) ? 0  : Convert.ToInt32(rdr2.GetValue(10));
-                    ruleErrors[1]    = rdr2.IsDBNull(11) ? null : rdr2.GetString(11);
-                    ruleErrors[2]    = rdr2.IsDBNull(12) ? null : rdr2.GetString(12);
-                    ruleErrors[3]    = rdr2.IsDBNull(13) ? null : rdr2.GetString(13);
-                    ruleErrors[4]    = rdr2.IsDBNull(14) ? null : rdr2.GetString(14);
-                    ruleErrors[5]    = rdr2.IsDBNull(15) ? null : rdr2.GetString(15);
-                    ruleErrors[6]    = rdr2.IsDBNull(16) ? null : rdr2.GetString(16);
-                    ruleErrors[7]    = rdr2.IsDBNull(17) ? null : rdr2.GetString(17);
+                    foreach (SqlError err in e.Errors)
+                    {
+                        if (err.Class == 0 && !string.IsNullOrWhiteSpace(err.Message))
+                            progress?.Report(err.Message);
+                    }
+                };
+                var sqlConn = (SqlConnection)conn;
+                sqlConn.InfoMessage += infoHandler;
+                try
+                {
+                    using var rdr2 = await excl.ExecuteReaderAsync(ct);
+                    if (await rdr2.ReadAsync(ct))
+                    {
+                        excluded         = rdr2.IsDBNull(0)  ? 0L : Convert.ToInt64(rdr2.GetValue(0));
+                        priceCapped      = rdr2.IsDBNull(1)  ? 0L : Convert.ToInt64(rdr2.GetValue(1));
+                        deactivated      = rdr2.IsDBNull(2)  ? 0L : Convert.ToInt64(rdr2.GetValue(2));
+                        deptDeactivated  = rdr2.IsDBNull(3)  ? 0L : Convert.ToInt64(rdr2.GetValue(3));
+                        msRule1          = rdr2.IsDBNull(4)  ? 0  : Convert.ToInt32(rdr2.GetValue(4));
+                        msRule2          = rdr2.IsDBNull(5)  ? 0  : Convert.ToInt32(rdr2.GetValue(5));
+                        msRule3          = rdr2.IsDBNull(6)  ? 0  : Convert.ToInt32(rdr2.GetValue(6));
+                        msRule4          = rdr2.IsDBNull(7)  ? 0  : Convert.ToInt32(rdr2.GetValue(7));
+                        msRule5          = rdr2.IsDBNull(8)  ? 0  : Convert.ToInt32(rdr2.GetValue(8));
+                        msRule6          = rdr2.IsDBNull(9)  ? 0  : Convert.ToInt32(rdr2.GetValue(9));
+                        msRule7          = rdr2.IsDBNull(10) ? 0  : Convert.ToInt32(rdr2.GetValue(10));
+                        ruleErrors[1]    = rdr2.IsDBNull(11) ? null : rdr2.GetString(11);
+                        ruleErrors[2]    = rdr2.IsDBNull(12) ? null : rdr2.GetString(12);
+                        ruleErrors[3]    = rdr2.IsDBNull(13) ? null : rdr2.GetString(13);
+                        ruleErrors[4]    = rdr2.IsDBNull(14) ? null : rdr2.GetString(14);
+                        ruleErrors[5]    = rdr2.IsDBNull(15) ? null : rdr2.GetString(15);
+                        ruleErrors[6]    = rdr2.IsDBNull(16) ? null : rdr2.GetString(16);
+                        ruleErrors[7]    = rdr2.IsDBNull(17) ? null : rdr2.GetString(17);
+                    }
+                }
+                finally
+                {
+                    sqlConn.InfoMessage -= infoHandler;
                 }
             }
         }
@@ -3569,13 +3658,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         // to show "Built in 3m 42s" in the SKU Max status row even after a
         // server restart wipes SkuMaxBuildJobManager's in-memory state.
         var totalMs = msDelete + msItemWh + msInputs + msInsert + msDelta;
-        // Per-rule timings (ms) appear when overrides actually ran. Helps the
-        // planner spot which override source is the bottleneck (typically
-        // Rule 4 — upcbarcodes is the largest external table joined; or
-        // Rule 5 when DeptPriceMaxQty_MH4 has many bands per shop).
-        var ruleBreakdown = (excluded > 0 || priceCapped > 0 || deactivated > 0 || deptDeactivated > 0)
-            ? $" [R1 {msRule1}ms · R2 {msRule2}ms · R3 {msRule3}ms · R4 {msRule4}ms · R5 {msRule5}ms · R6 {msRule6}ms · R7 {msRule7}ms]"
-            : "";
+        // 1.14.21 — per-rule timings are now ALWAYS shown (was previously
+        // hidden when override counts were all zero, which made it hard to
+        // see why the build was slow when most rules contributed 0
+        // matches but each still scanned its source). Helps the planner
+        // spot bottlenecks: usually Rule 4 (upcbarcodes) or Rule 5
+        // (Hodata.SalesPrice + DeptPriceMaxQty_MH4).
+        var ruleBreakdown =
+            $" [R1 {FormatMs(msRule1)} · R2 {FormatMs(msRule2)} · R3 {FormatMs(msRule3)} · "
+          + $"R4 {FormatMs(msRule4)} · R5 {FormatMs(msRule5)} · R6 {FormatMs(msRule6)} · R7 {FormatMs(msRule7)}]";
         // Per-rule failures (e.g. Hodata access denied on Rule 5) are now
         // surfaced rule-by-rule rather than killing the whole batch — only
         // the rules that threw lose their effects; the rest still apply.
@@ -3593,12 +3684,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         // for nothing, but the heavy writes are skipped).
         var unchanged = Math.Max(0L, inserted - deltaInserted - deltaUpdated);
         var deltaTag = exclusionWarning is null
-            ? $"Delta {msDelta}ms · {deltaInserted:N0} ins · {deltaUpdated:N0} upd · {deltaDeleted:N0} del · {unchanged:N0} unchanged"
+            ? $"Delta {FormatMs(msDelta)} · {deltaInserted:N0} ins · {deltaUpdated:N0} upd · {deltaDeleted:N0} del · {unchanged:N0} unchanged"
             : "Delta SKIPPED (exclusions failed — target unchanged)";
+        // 1.14.21 — total time added at the front; phase times use
+        // FormatMs (e.g. "5m 19s" not "319000ms") so the breakdown is
+        // readable at a glance.
         var stageDetail =
-            $"Done · {itemsInScope:N0} items in scope ({droppedNoMaster:N0} no-master) · " +
-            $"Delete {msDelete}ms · ItemWh {msItemWh}ms · Inputs {msInputs}ms · " +
-            $"Insert {msInsert}ms · {inserted:N0} staged · {deltaTag} · {exclusionTag}";
+            $"Done in {FormatMs((int)totalMs)} · {itemsInScope:N0} items in scope ({droppedNoMaster:N0} no-master) · " +
+            $"Setup {FormatMs(msDelete)} · ItemWh {FormatMs(msItemWh)} · Inputs {FormatMs(msInputs)} · " +
+            $"Excl+Insert {FormatMs(msInsert)} · {inserted:N0} staged · {deltaTag} · {exclusionTag}";
         var buildEnd = DateTime.Now;
         var buildStart = buildEnd.AddMilliseconds(-totalMs);
         using (var hdr = conn.CreateCommand())

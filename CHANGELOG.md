@@ -23,6 +23,96 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.21 — SKU Max Build: live per-rule progress + human-readable timings (2026-05-14)
+
+### Live per-rule progress (the main improvement)
+Pre-1.14.21 the user saw `Stage: Applying exclusion rules…` for the entire R1-R7 phase — a single message covering what can be a 4-minute block of work. 1.14.21 streams a per-rule update to the SKU Max Build banner as each rule starts and finishes:
+
+```
+Rule 1 of 7 (usa.dbo.ExcludeExport_Planning)…
+  ↳ Rule 1 done in 850ms (1,250 matches)
+Rule 2 of 7 (usa.dbo.ExcludeSubclass)…
+  ↳ Rule 2 done in 480ms (3,201 matches)
+...
+Rule 5 of 7 (usa.dbo.DeptPriceMaxQty_MH4 + Hodata.SalesPrice)…
+  ↳ Rule 5 done in 35.2s (812 price-capped)
+...
+Rules complete — applying audit + UPDATE…
+```
+
+A failed rule shows in the same line: `  ↳ Rule 5 done in 2.1s (0 matches) — FAILED: <truncated error>`.
+
+### How it works
+- The big exclusions SQL batch keeps its single-command structure (the rules share a `#SkuSnap`/`#ExcludeMatches`/`#PriceCapMatches`/`#DeactMatches`/`#DeptDeactMatches` set of temp tables and benefit from running in one batch).
+- Before / after each rule, the SQL emits `RAISERROR(@msg, 0, 1) WITH NOWAIT` — severity 0 fires the `SqlConnection.InfoMessage` event **immediately**, mid-batch.
+- The C# wrapper subscribes a `SqlInfoMessageEventHandler` for the duration of the `ExecuteReaderAsync` call and forwards each `SqlError` whose `Class == 0` to the existing `IProgress<string>` callback. Detached in a `finally` so the handler never leaks onto the pooled connection.
+- New SQL variables: `@msg nvarchar(400)`, `@r1Rows`…`@r7Rows int` (captured via `@@ROWCOUNT` after each rule's INSERT).
+- Total: ~20 lines of SQL + 15 lines of C#. No new SQL roundtrips, no command splitting.
+
+### Human-readable final stage detail
+- All phase times now go through `FormatMs(long ms)` — `"850ms"`, `"4.8s"`, `"5m 19s"` instead of `"319000ms"`.
+- **Per-rule breakdown is ALWAYS shown** (was previously hidden when all override counts were zero, which made it impossible to see why a build was slow when most rules contributed 0 matches but each still scanned its source).
+- Total time added at the front: `Done in 5m 19s · 48,612 items in scope · Setup 80ms · ItemWh 8.5s · Inputs 2.1s · Excl+Insert 4m 35s · …`
+
+### Index recommendations (operator action, not part of this push)
+Without an `EXPLAIN PLAN` against your prod data I can only recommend — apply selectively, monitor, then roll back if any one hurts. All recommended as **nonclustered, online** so they don't hold the source tables.
+
+**Most likely hot path — `racks.dbo.whboxitems` for the `#ItemWh` build:**
+```sql
+CREATE NONCLUSTERED INDEX IX_whboxitems_Item_Season_Qty
+    ON racks.dbo.whboxitems (ItemCode, Season)
+    INCLUDE (Qty, PalletCategory, LPMDt, ShopEligible, PalletType)
+    WITH (ONLINE = ON);
+```
+Supports the `GROUP BY w.ItemCode, ..., Season` aggregate over a filtered scan; INCLUDE covers the columns the WHERE/projection touches.
+
+**Rule 1 (1.14.19) — `usa.dbo.ExcludeExport_Planning`:**
+```sql
+CREATE NONCLUSTERED INDEX IX_ExcludeExport_Planning_Active_Shopname
+    ON usa.dbo.ExcludeExport_Planning (Active, Shopname)
+    INCLUDE (ItemCode, GroupCode, Duration, BlockFrom, BlockTo)
+    WITH (ONLINE = ON);
+```
+
+**Rule 1b (1.14.19) — `Hodata.dbo.ItemMaster.GroupCode`:**
+```sql
+CREATE NONCLUSTERED INDEX IX_ItemMaster_GroupCode_ItemCode
+    ON Hodata.dbo.ItemMaster (GroupCode, ItemCode)
+    WITH (ONLINE = ON);
+```
+
+**Rule 2 — `usa.dbo.ExcludeSubclass`:**
+```sql
+CREATE NONCLUSTERED INDEX IX_ExcludeSubclass_Inactive_Shop_MH4ID
+    ON usa.dbo.ExcludeSubclass (Inactive, Shop, mh4id)
+    WITH (ONLINE = ON);
+```
+
+**Rule 3 — `bfldata.dbo.RemoveItemsFromTransfer`:**
+```sql
+CREATE NONCLUSTERED INDEX IX_RemoveItemsFromTransfer_Shopname_Item_TrnDate
+    ON bfldata.dbo.RemoveItemsFromTransfer (shopname, itemcode)
+    INCLUDE (trndate)
+    WITH (ONLINE = ON);
+```
+
+**Rule 5 — `Hodata.dbo.SalesPrice` (only hits if not already indexed):**
+```sql
+CREATE NONCLUSTERED INDEX IX_SalesPrice_CostCode_ItemCode_TrnDate
+    ON Hodata.dbo.SalesPrice (CostCode, ItemCode, TrnDate DESC)
+    INCLUDE (SalesRate)
+    WITH (ONLINE = ON);
+```
+
+After applying any of these, run a SKU Max Build and compare per-rule timings against the previous run (now visible live in the banner thanks to this release).
+
+### Notes
+- No DB migration in this release. Index DDL above is operator-applied, optional, and reversible.
+- No behaviour change to which items get blocked — same rules, same outputs. Only visibility changes.
+- The `FormatMs` helper lives on `LpmSimGenerator` (private static) so other callers in the same file can reuse it without crossing the namespace boundary to `SkuMaxBuildJobManager.FormatDuration(TimeSpan)`.
+
+---
+
 ## 1.14.20 — Warehouse Boxes: Mixed Season filter + Summer/Winter Qty/% columns (2026-05-14)
 
 ### Added on the Box-mode Warehouse Boxes report
