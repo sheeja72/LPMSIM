@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.27</Version>
-    <AssemblyVersion>1.14.27.0</AssemblyVersion>
-    <FileVersion>1.14.27.0</FileVersion>
-    <InformationalVersion>1.14.27 (Override RR honors SKUMax=0 exclusion)</InformationalVersion>
+    <Version>1.14.28</Version>
+    <AssemblyVersion>1.14.28.0</AssemblyVersion>
+    <FileVersion>1.14.28.0</FileVersion>
+    <InformationalVersion>1.14.28 (Allocation Gap: EXCLUDED_BY_RULE reason code)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -23,6 +23,48 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.28 — Allocation Gap: EXCLUDED_BY_RULE reason code (2026-05-15)
+
+### Added
+New `EXCLUDED_BY_RULE` value in the Allocation Gap diagnostic's `TopReason` column. Distinguishes boxes whose unallocated qty is attributable to an explicit Rule 1–7 exclusion (`SKUMax = 0`) from boxes that hit generic CAP saturation. Promised as the follow-up to 1.14.27's Override-RR fix.
+
+### Detection
+The allocator pre-computes (after the normal box-filter steps, before the diagnostic insert):
+
+1. **`itemFullyExcluded` map** — per `ItemCode`, walks `eomByDiv[itemDiv[itemCode]]` and asks "does any eligible store have `SKUMax > 0` for this item?" If no, the item is fully excluded. Computed once across all distinct items in the in-memory `itemDiv` set, so it's O(items × stores-per-div) once, not per-box.
+
+2. **`excludedByRuleBoxes` set** — per box that reached the allocator, returns true iff **every** distinct ItemCode in the box is in `itemFullyExcluded` with value true. Computed by deduping `lpmBoxes.Concat(nonLpmBoxes)` into a `BoxNo → HashSet<ItemCode>` map then checking each box's items against the precomputed map.
+
+The set is passed into `BuildAndInsertUnallocatedDiagnosticAsync` as a new `HashSet<string>` parameter. The classification ladder is now:
+
+```
+if FILTERED_SEASON      → "FILTERED_SEASON"
+else if EXCLUDED_BY_RULE → "EXCLUDED_BY_RULE"   ← new branch, ranks ABOVE trace check
+else if perBox skip trace has rows → SKIP_NO_DIV / SKIP_NO_EOM (most common)
+else if alloc trace or sim qty > 0 → "CAP"
+else → "UNKNOWN"
+```
+
+`EXCLUDED_BY_RULE` ranks above the trace check intentionally: a box can hit both "missing division" and "every store excluded" — the more specific signal wins.
+
+### Migration 047
+Drops the `CK_LSUD_TopReason` CHECK constraint from migration 046 (which forbade `EXCLUDED_BY_RULE`) and re-adds it with the extended six-value taxonomy:
+```
+'FILTERED_SEASON', 'SKIP_NO_DIV', 'SKIP_NO_EOM', 'EXCLUDED_BY_RULE', 'CAP', 'UNKNOWN'
+```
+Idempotent — guarded by `sys.check_constraints` lookup.
+
+### UI changes
+- **Top Reason filter dropdown** (Allocation Gap tab): new option **"EXCLUDED_BY_RULE (SKUMax=0)"**.
+- **Top Reason chip**: secondary color (slate), label **"Excluded by Rule"**.
+- **Tooltip**: full plain-language explanation calling out which Rules trigger this code, plus the distinction from CAP.
+
+### Notes
+- **Apply migration 047 to prod LPMSIM DB** alongside 1.14.28 deploy, otherwise the allocator's diagnostic insert will fail with CHECK violation (`Msg 547`) on any batch that has an EXCLUDED_BY_RULE row. The existing try/catch in GenerateAsync would swallow this, so the build itself stays safe, but no rows would land in the table for that batch.
+- Forward-fill only — existing 1.14.26 diagnostic rows that should have been `EXCLUDED_BY_RULE` stay labelled `CAP`/`UNKNOWN` until you re-Generate the batch.
+
+---
+
 ## 1.14.27 — Override RR honors SKUMax=0 exclusion (2026-05-15)
 
 ### Bug

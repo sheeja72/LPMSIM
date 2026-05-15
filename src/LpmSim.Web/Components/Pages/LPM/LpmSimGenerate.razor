@@ -1410,6 +1410,8 @@
                         <MudSelectItem T="string" Value="@("FILTERED_SEASON")">FILTERED_SEASON</MudSelectItem>
                         <MudSelectItem T="string" Value="@("SKIP_NO_DIV")">SKIP_NO_DIV</MudSelectItem>
                         <MudSelectItem T="string" Value="@("SKIP_NO_EOM")">SKIP_NO_EOM</MudSelectItem>
+                        @* 1.14.28 — distinguish explicit Rule 1-7 exclusions from generic cap saturation. *@
+                        <MudSelectItem T="string" Value="@("EXCLUDED_BY_RULE")">EXCLUDED_BY_RULE (SKUMax=0)</MudSelectItem>
                         <MudSelectItem T="string" Value="@("CAP")">CAP (SKU Max / Merch Need)</MudSelectItem>
                         <MudSelectItem T="string" Value="@("UNKNOWN")">UNKNOWN</MudSelectItem>
                     </MudSelect>
@@ -2820,23 +2822,25 @@
     /// <summary>Plain-language explanation shown in the MudTooltip on the Top Reason chip.</summary>
     private static string GapReasonTooltip(string code) => code switch
     {
-        "FILTERED_SEASON" => "Box was eligible per the SQL filter but every item failed the per-item Season filter (1.14.18). Box never reached the allocator.",
-        "SKIP_NO_DIV"     => "One or more items missing from upc_subclass — can't classify which division they belong to, so the allocator skipped them.",
-        "SKIP_NO_EOM"     => "No LPM_EOM_Output rows for this item's division this period. The allocator has no stores to allocate to.",
-        "CAP"             => "Box reached the allocator but every eligible store hit either the SKU Max cap or the EOM Merch Need (Week) cap. Enable Verbose Trace on the run and use the Allocation Trace tab to see the SKU vs Target split.",
-        "UNKNOWN"         => "Defensive fallback — diagnostic couldn't classify this box. Should never appear in practice; please report.",
-        _                 => code,
+        "FILTERED_SEASON"  => "Box was eligible per the SQL filter but every item failed the per-item Season filter (1.14.18). Box never reached the allocator.",
+        "SKIP_NO_DIV"      => "One or more items missing from upc_subclass — can't classify which division they belong to, so the allocator skipped them.",
+        "SKIP_NO_EOM"      => "No LPM_EOM_Output rows for this item's division this period. The allocator has no stores to allocate to.",
+        "EXCLUDED_BY_RULE" => "Every item in this box has SKUMax = 0 at every store eligible for its division. Explicit exclusion set by SKU Max Rules 1-7 (ExcludeExport_Planning / ExcludeSubclass / RemoveItemsFromTransfer / ExcludeItemsMFCS / DeptPriceMaxQty_MH4 with maxqty=0 / LPM_StoreDivAccess deactivation / LPM_StoreDeptAccess deactivation). Distinct from CAP — this is a business rule blocking allocation, not a capacity limit.",
+        "CAP"              => "Box reached the allocator but every eligible store hit either the SKU Max cap or the EOM Merch Need (Week) cap. Enable Verbose Trace on the run and use the Allocation Trace tab to see the SKU vs Target split.",
+        "UNKNOWN"          => "Defensive fallback — diagnostic couldn't classify this box. Should never appear in practice; please report.",
+        _                  => code,
     };
 
     /// <summary>Chip color + short label per reason code.</summary>
     private static (Color color, string label) GapReasonChip(string code) => code switch
     {
-        "FILTERED_SEASON" => (Color.Info,    "Filtered (Season)"),
-        "SKIP_NO_DIV"     => (Color.Warning, "No Division"),
-        "SKIP_NO_EOM"     => (Color.Warning, "No EOM"),
-        "CAP"             => (Color.Error,   "Cap hit"),
-        "UNKNOWN"         => (Color.Default, "Unknown"),
-        _                 => (Color.Default, code),
+        "FILTERED_SEASON"  => (Color.Info,      "Filtered (Season)"),
+        "SKIP_NO_DIV"      => (Color.Warning,   "No Division"),
+        "SKIP_NO_EOM"      => (Color.Warning,   "No EOM"),
+        "EXCLUDED_BY_RULE" => (Color.Secondary, "Excluded by Rule"),
+        "CAP"              => (Color.Error,     "Cap hit"),
+        "UNKNOWN"          => (Color.Default,   "Unknown"),
+        _                  => (Color.Default,   code),
     };
 
     private async Task ExportGapAsync()

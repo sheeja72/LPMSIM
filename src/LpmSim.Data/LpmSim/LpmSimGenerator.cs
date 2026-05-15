@@ -1209,6 +1209,72 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // batches always do. Wrapped in try/catch so a missing table
         // (mig 046 not applied yet) is non-fatal — the build itself
         // is already committed by this point.
+        //
+        // 1.14.28 — Precompute the "every item × every eligible store is
+        // SKUMax=0" check so the diagnostic can label affected boxes as
+        // EXCLUDED_BY_RULE instead of generic CAP. Two-step calculation
+        // for speed:
+        //   1. itemFullyExcluded: per ItemCode, is the item barred from
+        //      every store eligible for its division? Pre-computed once
+        //      across all distinct items.
+        //   2. excludedByRuleBoxes: per BoxNo (that reached allocator),
+        //      are ALL its items fully excluded? If yes, the box's gap
+        //      is purely a Rule-1-through-7 exclusion, not a cap.
+        var itemFullyExcluded = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in itemDiv)
+        {
+            var itemCode = kv.Key;
+            var div      = kv.Value;
+            if (!eomByDiv.TryGetValue(div, out var divStores) || divStores.Count == 0)
+            {
+                // No eligible stores for this division ⇒ everything is
+                // blocked, but the reason is SKIP_NO_EOM not exclusion.
+                // Mark NOT-fully-excluded so the diagnostic falls through
+                // to the SKIP_NO_EOM branch.
+                itemFullyExcluded[itemCode] = false;
+                continue;
+            }
+            bool anyAllowed = false;
+            foreach (var s in divStores)
+            {
+                if (skuMaxByStoreItem.GetValueOrDefault((s.StoreID, itemCode), 0) > 0)
+                {
+                    anyAllowed = true;
+                    break;
+                }
+            }
+            itemFullyExcluded[itemCode] = !anyAllowed;
+        }
+        // Per-box check: a box is EXCLUDED_BY_RULE if it reached the
+        // allocator AND every item it contains is itemFullyExcluded.
+        // Iterates lpmBoxes+nonLpmBoxes (the post-filter sets — boxes
+        // that actually entered the allocator), deduped by BoxNo.
+        var excludedByRuleBoxes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var boxItemsByBox = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var b in lpmBoxes.Concat(nonLpmBoxes))
+        {
+            if (!boxItemsByBox.TryGetValue(b.BoxNo, out var itemsInBox))
+            {
+                itemsInBox = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                boxItemsByBox[b.BoxNo] = itemsInBox;
+            }
+            itemsInBox.Add(b.ItemCode);
+        }
+        foreach (var (boxNo, itemsInBox) in boxItemsByBox)
+        {
+            if (itemsInBox.Count == 0) continue;
+            bool allExcluded = true;
+            foreach (var item in itemsInBox)
+            {
+                if (!itemFullyExcluded.TryGetValue(item, out var fullyExcluded) || !fullyExcluded)
+                {
+                    allExcluded = false;
+                    break;
+                }
+            }
+            if (allExcluded) excludedByRuleBoxes.Add(boxNo);
+        }
+
         try
         {
             await BuildAndInsertUnallocatedDiagnosticAsync(
@@ -1217,6 +1283,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 batch.CreateTS,
                 eligibleBoxes,
                 filteredOutBoxes,
+                excludedByRuleBoxes,
                 output,
                 trace,
                 ct);
@@ -3998,11 +4065,18 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     ///   • <c>SKIP_NO_DIV</c> / <c>SKIP_NO_EOM</c> — most common skip
     ///     decision in the trace for this box (these two are always logged
     ///     regardless of VerboseTrace).
+    ///   • <c>EXCLUDED_BY_RULE</c> (1.14.28) — box reached the allocator
+    ///     but every item in it has <c>SKUMax = 0</c> at every eligible
+    ///     store (Rules 1-7 blocked it). Distinct from CAP because the
+    ///     reason is an explicit business exclusion rather than capacity
+    ///     saturation. Caller passes the pre-computed
+    ///     <paramref name="excludedByRuleBoxes"/> set.
     ///   • <c>CAP</c> — deduced when the box reached the allocator and has
-    ///     <c>RemainingQty &gt; 0</c> but no SKIP_NO_* trace rows. With
-    ///     non-verbose trace (the default), SKIP_SKUMAX / SKIP_TARGET rows
-    ///     are dropped — so any remaining qty after the deductible reasons
-    ///     are cleared must be due to per-store cap saturation.
+    ///     <c>RemainingQty &gt; 0</c> but no SKIP_NO_* trace rows AND is
+    ///     not in <paramref name="excludedByRuleBoxes"/>. With non-verbose
+    ///     trace (the default), SKIP_SKUMAX / SKIP_TARGET rows are dropped
+    ///     — so any remaining qty after the deductible reasons are cleared
+    ///     must be due to per-store cap saturation.
     ///   • <c>UNKNOWN</c> — defensive fallback. Shouldn't happen.
     /// </summary>
     private static async Task BuildAndInsertUnallocatedDiagnosticAsync(
@@ -4011,6 +4085,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         DateTime createTs,
         Dictionary<string, EligibleBoxSummary> eligibleBoxes,
         HashSet<string> filteredOutBoxes,
+        HashSet<string> excludedByRuleBoxes,
         List<LpmSimOutput> output,
         List<LpmSimAllocTrace> trace,
         CancellationToken ct)
@@ -4073,6 +4148,20 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             {
                 topReason = "FILTERED_SEASON";
                 reasons   = "FILTERED_SEASON (all items dropped by per-item Season filter)";
+            }
+            else if (excludedByRuleBoxes.Contains(boxNo))
+            {
+                // 1.14.28 — Pre-allocator analysis says every item in this
+                // box has SKUMax = 0 at every store eligible for the item's
+                // division. That's an explicit Rule 1-7 exclusion, not a
+                // capacity cap — distinguish so the planner can tell
+                // "blocked on purpose" from "no headroom this period". Check
+                // ranks ABOVE the trace check because SKIP_NO_DIV / NO_EOM
+                // can co-fire with exclusions (e.g. an excluded item also
+                // happens to lack a division mapping); the more specific
+                // signal wins.
+                topReason = "EXCLUDED_BY_RULE";
+                reasons   = $"EXCLUDED_BY_RULE — {remaining} qty unallocated; every item in this box has SKUMax = 0 at every store eligible for its division. Set by SKU Max Rules 1-7 (Exclude/Subclass/Transfer/MFCS/PriceMaxQty=0/StoreDivAccess/StoreDeptAccess).";
             }
             else
             {
