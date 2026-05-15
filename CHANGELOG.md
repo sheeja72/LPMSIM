@@ -23,6 +23,48 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.27 — Override RR honors SKUMax=0 exclusion (2026-05-15)
+
+### Bug
+Override Round-Robin (Phase 1b / Phase 2b — fires when a box's post-normal usability hits the `Box %` threshold, default 50) was bypassing **the entire SKU Max check**, including pairs where SKU Max was explicitly set to `0` by an exclusion rule. Concrete case caught on prod: store `BFL-DXD` for item `WGS10273MUS-S` had `SKUMax = 0` in `LPM_SimItemSkuMax` (set by SKU Max Rule 1 / Rule 5 / similar), yet the SIM Output showed `136 pcs` allocated to that pair.
+
+Root cause: in `AllocateLineRoundRobin`, when called with `bypassAllCaps = true`, the per-store loop skipped the `if (skuHeadroom <= 0) continue;` guard entirely. That bypass conflated two different intents:
+- **Cap ceiling** (SKU Max as max headroom for a store that's allowed to receive) — the right thing to bypass in Override RR so partial boxes can be filled to 100%.
+- **Exclusion** (SKU Max = 0 explicitly set by a Rule to mean "never allocate this item to this store") — the wrong thing to bypass.
+
+### Fix
+Added a 2-line hard-exclusion check at the top of the per-store loop, **before** the `bypassAllCaps` branch:
+
+```csharp
+var skuMaxExcl = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+if (skuMaxExcl <= 0) continue;
+```
+
+`SKUMax = 0` is now respected in both Normal and Override RR phases. Override RR continues to bypass the SKU Max **ceiling** (when `skuMaxExcl > 0` but `skuHeadroom <= 0` due to SOH + cumItem saturating the cap) and the EOM Merch Need ceiling — that intent is preserved.
+
+### Affected SKU Max rules
+All rules that set `SKUMax = 0` as an exclusion now correctly stop Override RR too:
+- Rule 1 — `usa.dbo.ExcludeExport_Planning` (1.14.19's Active/Duration/GroupCode logic)
+- Rule 2 — `usa.dbo.ExcludeSubclass`
+- Rule 3 — `bfldata.dbo.RemoveItemsFromTransfer`
+- Rule 4 — `usa.dbo.ExcludeItemsMFCS`
+- Rule 5 — `usa.dbo.DeptPriceMaxQty_MH4` (when `maxqty = 0`)
+- Rule 6 — `dbo.LPM_StoreDivAccess` deactivation
+- Rule 7 — `dbo.LPM_StoreDeptAccess` deactivation
+
+### Behaviour change expected on the next SIM Generate
+- Boxes that previously had Override RR pushing units into excluded (Store, Item) pairs will now leave those units unallocated.
+- The 1.14.26 Allocation Gap diagnostic will surface these as `TopReason = CAP` (since the trace's `SKIP_*` rows for the underlying SKU Max = 0 are not separately tagged yet — see note below).
+
+### Out of scope, queued for 1.14.28
+Add a new reason code `EXCLUDED_BY_RULE` to the Allocation Gap diagnostic for boxes where unallocated qty is specifically attributable to `SKUMax = 0` exclusions vs generic SKU/EOM cap saturation. Approved as a follow-up; not in this minimal fix.
+
+### Notes
+- No DB migration. Pure code change.
+- The fix is one new `GetValueOrDefault` + `continue` pair per per-store cycle in Override RR. Performance impact: ~0. The lookup hits the same in-memory dictionary the existing code already uses.
+
+---
+
 ## 1.14.26 — Allocation Gap diagnostic: per-eligible-box reason for unallocated qty (2026-05-15)
 
 ### Why this exists

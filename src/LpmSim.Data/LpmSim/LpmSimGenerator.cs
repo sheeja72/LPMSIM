@@ -1643,24 +1643,38 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             {
                 if (remaining <= 0) break;
 
+                // 1.14.27 — SKUMax = 0 is an EXCLUSION (set by SKU Max Rules
+                // 1-7: ExcludeExport_Planning, ExcludeSubclass,
+                // RemoveItemsFromTransfer, ExcludeItemsMFCS, DeptPriceMaxQty
+                // with maxqty=0, LPM_StoreDivAccess deactivation,
+                // LPM_StoreDeptAccess deactivation), NOT a capacity cap.
+                // Override RR is meant to bypass SKU Max + EOM CEILINGS so
+                // a partially-filled box can reach 100% usability — it
+                // must NOT override explicit per-(Store, Item) exclusions.
+                // Honour the exclusion in both Normal and Override paths.
+                var skuMaxExcl = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+                if (skuMaxExcl <= 0) continue;
+
                 if (!bypassAllCaps)
                 {
                     // Strict mode (legacy / future flexibility): SKU Max cap
                     // SKUMax − SOH − cumItem (cumItem counts prior normal + RR).
                     var soh         = sohMap.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
                     var cumItem     = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
-                    var skuMax      = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
-                    var skuHeadroom = skuMax - soh - cumItem;
+                    var skuHeadroom = skuMaxExcl - soh - cumItem;
                     if (skuHeadroom <= 0) continue;
 
                     var cumDiv      = allocStoreDiv .GetValueOrDefault((s.StoreID, divCode), 0);
                     var divHeadroom = s.MerchNeedWeek - cumDiv;
                     if (divHeadroom <= 0) continue;
                 }
-                // Override mode skips both caps — every store gets a unit per
-                // cycle until the box's remaining qty is consumed. Stores with
-                // no Volume Group / EOM eligibility never enter `stores` here
-                // anyway, so we never push a unit to a non-existent store.
+                // Override mode skips both CAPS (SKU Max ceiling + EOM
+                // Merch Need ceiling) — every eligible store gets a unit
+                // per cycle until the box's remaining qty is consumed.
+                // SKUMax = 0 exclusions are filtered out above. Stores
+                // with no Volume Group / EOM eligibility never enter
+                // `stores` here anyway, so we never push a unit to a
+                // non-existent store.
 
                 buckets[s.StoreID] = buckets.GetValueOrDefault(s.StoreID, 0) + 1;
                 allocStoreItem[(s.StoreID, line.ItemCode)] = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0) + 1;
