@@ -1745,4 +1745,72 @@ SELECT {string.Join(", ", selectParts)}
         }
         return new CustomReportResult(colInfo, rows);
     }
+
+    /// <summary>
+    /// 1.14.26 — Per-eligible-box allocation gap diagnostic for the
+    /// "Allocation Gap" tab on the SIM Generate result preview. Reads
+    /// <c>dbo.LPMSIM_UnallocatedDiagnostic</c> (populated at the end of
+    /// every successful SIM Generate from 1.14.26 onward).
+    ///
+    /// Filters (all optional, all AND-combined):
+    ///   • <paramref name="boxKind"/> — "LPM" or "Non-LPM"; null = both.
+    ///   • <paramref name="topReason"/> — e.g. "FILTERED_SEASON" /
+    ///     "SKIP_NO_DIV" / "CAP" / etc. null = no filter.
+    ///   • <paramref name="boxNoContains"/> — case-insensitive substring;
+    ///     null/empty = no filter.
+    ///   • <paramref name="minRemaining"/> — only rows with RemainingQty
+    ///     ≥ N; null = no minimum (every row in the table).
+    ///
+    /// Sorted by RemainingQty DESC so the biggest gaps surface first.
+    /// </summary>
+    public async Task<List<UnallocatedDiagnosticRow>> GetUnallocatedDiagnosticAsync(
+        long batchNo,
+        string? boxKind = null,
+        string? topReason = null,
+        string? boxNoContains = null,
+        long? minRemaining = null,
+        CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var q = db.LpmSimUnallocatedDiagnostics.AsNoTracking()
+            .Where(d => d.LPMBatchNo == batchNo);
+        if (!string.IsNullOrEmpty(boxKind))
+            q = q.Where(d => d.BoxKind == boxKind);
+        if (!string.IsNullOrEmpty(topReason))
+            q = q.Where(d => d.TopReason == topReason);
+        if (!string.IsNullOrEmpty(boxNoContains))
+            q = q.Where(d => d.BoxNo.Contains(boxNoContains));
+        if (minRemaining.HasValue && minRemaining.Value > 0)
+            q = q.Where(d => d.RemainingQty >= minRemaining.Value);
+
+        return await q.OrderByDescending(d => d.RemainingQty)
+                      .ThenBy(d => d.BoxNo)
+                      .Select(d => new UnallocatedDiagnosticRow(
+                          d.BoxNo,
+                          d.PalletNo,
+                          d.LPMDt,
+                          d.BoxKind,
+                          d.BoxQty,
+                          d.SimQty,
+                          d.RemainingQty,
+                          d.TopReason,
+                          d.Reasons))
+                      .ToListAsync(ct);
+    }
 }
+
+/// <summary>
+/// 1.14.26 — Projection for the Allocation Gap tab. Mirrors
+/// <see cref="LpmSim.Core.Entities.LpmSimUnallocatedDiagnostic"/> minus the
+/// batch + audit columns.
+/// </summary>
+public record UnallocatedDiagnosticRow(
+    string    BoxNo,
+    string?   PalletNo,
+    DateTime? LPMDt,
+    string    BoxKind,
+    long      BoxQty,
+    long      SimQty,
+    long      RemainingQty,
+    string    TopReason,
+    string?   Reasons);

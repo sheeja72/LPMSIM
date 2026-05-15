@@ -1374,6 +1374,152 @@
             }
         </MudTabPanel>
 
+        @* ─────────────────────────────────────────────────────────────────
+           1.14.26 — Allocation Gap tab. One row per eligible box where
+           RemainingQty > 0. Driven by dbo.LPMSIM_UnallocatedDiagnostic,
+           populated at the end of every SIM Generate run from 1.14.26 on.
+           Forward-fill only — pre-1.14.26 batches show "No diagnostic data".
+           ───────────────────────────────────────────────────────────── *@
+        <MudTabPanel Text="Allocation Gap" Icon="@Icons.Material.Filled.ReportProblem" OnClick="LoadGapAsync">
+            <MudText Typo="Typo.subtitle2" Class="mb-1">Why each eligible box wasn't fully allocated</MudText>
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-3">
+                Per-box diagnostic for boxes where <code>RemainingQty &gt; 0</code>. Hover the <strong>Top Reason</strong>
+                chip for the plain-language explanation. For boxes attributed to <code>CAP</code> (SKU Max or EOM Merch
+                Need), enable <strong>Verbose Trace</strong> on the run and look at the existing Allocation Trace tab to
+                see the SKU vs Target split per (Store, Item).
+            </MudText>
+
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="2">
+                    <MudTextField T="string" Label="Box No (contains)" @bind-Value="_gapBoxNoFilter"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                  Clearable Immediate="true" DebounceInterval="300" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudSelect T="string" Label="Kind" @bind-Value="_gapKindFilter"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
+                        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("LPM")">LPM</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("Non-LPM")">Non-LPM</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudSelect T="string" Label="Top Reason" @bind-Value="_gapReasonFilter"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
+                        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("FILTERED_SEASON")">FILTERED_SEASON</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_DIV")">SKIP_NO_DIV</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_EOM")">SKIP_NO_EOM</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("CAP")">CAP (SKU Max / Merch Need)</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("UNKNOWN")">UNKNOWN</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="long?" Label="Min Remaining"
+                                     Value="_gapMinRemaining"
+                                     ValueChanged="(long? v) => { _gapMinRemaining = v; StateHasChanged(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" Step="10" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="4" Class="d-flex align-end gap-2">
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.PlayArrow"
+                               Disabled="_loadingGap" OnClick="LoadGapAsync">
+                        Load
+                    </MudButton>
+                    <MudButton Variant="Variant.Text" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.FilterAltOff"
+                               OnClick="ClearGapFilters">
+                        Clear filters
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Success" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_gapRows.Count == 0)" OnClick="ExportGapAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_loadingGap)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (_gapRows.Count > 0)
+            {
+                var gapTotalBoxQty    = _gapRows.Sum(r => r.BoxQty);
+                var gapTotalSimQty    = _gapRows.Sum(r => r.SimQty);
+                var gapTotalRemaining = _gapRows.Sum(r => r.RemainingQty);
+
+                <MudTable T="UnallocatedDiagnosticRow" Items="_gapRows" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@_gapRows.Count.ToString("N0") boxes</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" SortBy="r => r.PalletNo ?? string.Empty">Pallet No</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" SortBy="r => r.BoxKind">Kind</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@gapTotalBoxQty.ToString("N0")</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" SortBy="r => r.BoxQty">Box Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@gapTotalSimQty.ToString("N0")</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" style="background:#fef9c3;">@gapTotalRemaining.ToString("N0")</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" InitialDirection="SortDirection.Descending"
+                                               SortBy="r => r.RemainingQty">Remaining Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>
+                            <MudTableSortLabel T="UnallocatedDiagnosticRow" SortBy="r => r.TopReason">Top Reason</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>Reasons</MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.BoxNo</code></MudTd>
+                        <MudTd><code>@context.PalletNo</code></MudTd>
+                        <MudTd>
+                            @if (context.BoxKind == "LPM")
+                            {
+                                <span class="lpm-status lpm-status-ok">LPM</span>
+                            }
+                            else
+                            {
+                                <span class="lpm-status lpm-status-warn">Non-LPM</span>
+                            }
+                        </MudTd>
+                        <MudTd Style="text-align:right;">@context.BoxQty.ToString("N0")</MudTd>
+                        <MudTd Style="text-align:right;">@context.SimQty.ToString("N0")</MudTd>
+                        <MudTd Style="text-align:right;font-weight:600;background:#fffbeb;">@context.RemainingQty.ToString("N0")</MudTd>
+                        <MudTd>
+                            <MudTooltip Text="@GapReasonTooltip(context.TopReason)" Placement="Placement.Left">
+                                @{
+                                    var (chipColor, chipLabel) = GapReasonChip(context.TopReason);
+                                }
+                                <MudChip T="string" Size="Size.Small" Color="@chipColor">@chipLabel</MudChip>
+                            </MudTooltip>
+                        </MudTd>
+                        <MudTd>
+                            <MudText Typo="Typo.caption" Style="font-family:monospace;font-size:0.75rem;color:#475569;">
+                                @context.Reasons
+                            </MudText>
+                        </MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (_gapLoadedOnce && !_loadingGap)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    No allocation gap rows for this batch. Either every eligible box was fully allocated, OR the batch
+                    was generated before 1.14.26 (diagnostic only fills forward; re-Generate to populate).
+                </MudAlert>
+            }
+            else if (!_gapLoadedOnce)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    Click <strong>Load</strong> to fetch the per-box allocation gap diagnostic for batch #@_readiness?.CurrentBatchNo.
+                </MudAlert>
+            }
+        </MudTabPanel>
+
         <MudTabPanel Text="Item Details" Icon="@Icons.Material.Filled.ListAlt">
             @if (_loadingItems)
             {
@@ -2331,6 +2477,14 @@
     private long? _loadedBatchNo;
     private List<BoxDetailRow> _boxRows = new();
     private List<ItemDetailRow> _itemRows = new();
+    // 1.14.26 — Allocation Gap tab state.
+    private List<UnallocatedDiagnosticRow> _gapRows = new();
+    private bool   _loadingGap;
+    private bool   _gapLoadedOnce;
+    private string _gapBoxNoFilter   = "";
+    private string _gapKindFilter    = "";
+    private string _gapReasonFilter  = "";
+    private long?  _gapMinRemaining;
     private BatchAggregates? _aggregates;
     // (Kind × Warehouse) breakdown for the new "Allocation Result" table.
     // Loaded alongside _aggregates whenever a batch is opened/refreshed.
@@ -2623,6 +2777,117 @@
         _minUsability       = null;
         _maxUsability       = null;
         StateHasChanged();
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 1.14.26 — Allocation Gap tab helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    private async Task LoadGapAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long batchNo) return;
+        _loadingGap = true; StateHasChanged();
+        try
+        {
+            _gapRows = await Reports.GetUnallocatedDiagnosticAsync(
+                batchNo,
+                string.IsNullOrEmpty(_gapKindFilter)   ? null : _gapKindFilter,
+                string.IsNullOrEmpty(_gapReasonFilter) ? null : _gapReasonFilter,
+                string.IsNullOrEmpty(_gapBoxNoFilter)  ? null : _gapBoxNoFilter,
+                _gapMinRemaining);
+            _gapLoadedOnce = true;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load Allocation Gap failed: {ex.Message}", Severity.Error,
+                cfg => cfg.VisibleStateDuration = 8000);
+        }
+        finally
+        {
+            _loadingGap = false; StateHasChanged();
+        }
+    }
+
+    private void ClearGapFilters()
+    {
+        _gapBoxNoFilter  = "";
+        _gapKindFilter   = "";
+        _gapReasonFilter = "";
+        _gapMinRemaining = null;
+        StateHasChanged();
+    }
+
+    /// <summary>Plain-language explanation shown in the MudTooltip on the Top Reason chip.</summary>
+    private static string GapReasonTooltip(string code) => code switch
+    {
+        "FILTERED_SEASON" => "Box was eligible per the SQL filter but every item failed the per-item Season filter (1.14.18). Box never reached the allocator.",
+        "SKIP_NO_DIV"     => "One or more items missing from upc_subclass — can't classify which division they belong to, so the allocator skipped them.",
+        "SKIP_NO_EOM"     => "No LPM_EOM_Output rows for this item's division this period. The allocator has no stores to allocate to.",
+        "CAP"             => "Box reached the allocator but every eligible store hit either the SKU Max cap or the EOM Merch Need (Week) cap. Enable Verbose Trace on the run and use the Allocation Trace tab to see the SKU vs Target split.",
+        "UNKNOWN"         => "Defensive fallback — diagnostic couldn't classify this box. Should never appear in practice; please report.",
+        _                 => code,
+    };
+
+    /// <summary>Chip color + short label per reason code.</summary>
+    private static (Color color, string label) GapReasonChip(string code) => code switch
+    {
+        "FILTERED_SEASON" => (Color.Info,    "Filtered (Season)"),
+        "SKIP_NO_DIV"     => (Color.Warning, "No Division"),
+        "SKIP_NO_EOM"     => (Color.Warning, "No EOM"),
+        "CAP"             => (Color.Error,   "Cap hit"),
+        "UNKNOWN"         => (Color.Default, "Unknown"),
+        _                 => (Color.Default, code),
+    };
+
+    private async Task ExportGapAsync()
+    {
+        if (_gapRows.Count == 0)
+        {
+            Snackbar.Add("Nothing to export — Load the gap diagnostic first.", Severity.Info);
+            return;
+        }
+        try
+        {
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("Allocation Gap");
+            string[] headers = { "Box No", "Pallet No", "LPM Dt", "Kind",
+                                 "Box Qty", "SIM Qty", "Remaining Qty",
+                                 "Top Reason", "Reasons" };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                ws.Cell(1, i + 1).Value = headers[i];
+                ws.Cell(1, i + 1).Style.Font.Bold = true;
+                ws.Cell(1, i + 1).Style.Fill.BackgroundColor = XLColor.FromHtml("#0f172a");
+                ws.Cell(1, i + 1).Style.Font.FontColor = XLColor.White;
+            }
+            int row = 2;
+            foreach (var r in _gapRows)
+            {
+                ws.Cell(row, 1).Value = r.BoxNo;
+                ws.Cell(row, 2).Value = r.PalletNo ?? "";
+                if (r.LPMDt is DateTime d) { ws.Cell(row, 3).Value = d; ws.Cell(row, 3).Style.DateFormat.Format = "yyyy-MM-dd"; }
+                ws.Cell(row, 4).Value = r.BoxKind;
+                ws.Cell(row, 5).Value = r.BoxQty;
+                ws.Cell(row, 6).Value = r.SimQty;
+                ws.Cell(row, 7).Value = r.RemainingQty;
+                ws.Cell(row, 8).Value = r.TopReason;
+                ws.Cell(row, 9).Value = r.Reasons ?? "";
+                row++;
+            }
+            ws.Columns().AdjustToContents();
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            var bytes = ms.ToArray();
+            var b64 = Convert.ToBase64String(bytes);
+            var url = $"data:application/octet-stream;base64,{b64}";
+            var fileName = $"AllocationGap_Batch{_readiness?.CurrentBatchNo}_{DateTime.Now:yyyy-MM-dd_HHmm}.xlsx";
+            await JS.InvokeVoidAsync("lpmDownload", url, fileName);
+            Snackbar.Add($"Downloaded {_gapRows.Count:N0} row(s) to {fileName}.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
     }
 
     // Box Usability filter is server-side for Item Details too — no client-side

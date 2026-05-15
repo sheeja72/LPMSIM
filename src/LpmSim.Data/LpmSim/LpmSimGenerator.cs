@@ -698,6 +698,19 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // Doing it here (rather than at every per-line site) guarantees one
         // consistent rule across all phases (P1a, P1b RR, P2a, P2b RR).
         // "Both Seasons" → no filter.
+        //
+        // 1.14.26 — snapshot pre-filter box-level summary so we can later
+        // attribute "FILTERED_SEASON" in the LPMSIM_UnallocatedDiagnostic
+        // table to boxes that were eligible by SQL but had every item
+        // dropped by the per-item Season check. eligibleBoxes is the full
+        // 32,930-ish set; postFilterBoxes is the subset that actually
+        // reached the allocator. The diff is the FILTERED_SEASON set.
+        var eligibleBoxes = new Dictionary<string, EligibleBoxSummary>(StringComparer.OrdinalIgnoreCase);
+        foreach (var b in lpmBoxes)
+            eligibleBoxes.TryAdd(b.BoxNo, new EligibleBoxSummary(b.PalletNo, b.LPMDt, "LPM", b.BoxQty));
+        foreach (var b in nonLpmBoxes)
+            eligibleBoxes.TryAdd(b.BoxNo, new EligibleBoxSummary(b.PalletNo, b.LPMDt, "Non-LPM", b.BoxQty));
+
         if (req.Seasons == LpmSimSeasonFlags.Summer)
         {
             lpmBoxes.RemoveAll(b => string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
@@ -708,6 +721,17 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             lpmBoxes.RemoveAll(b => !string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
             nonLpmBoxes.RemoveAll(b => !string.Equals(b.Season, "W", StringComparison.OrdinalIgnoreCase));
         }
+
+        // 1.14.26 — boxes that the per-item filter removed entirely (every
+        // line was wrong-season). These never reach the allocator, so they
+        // get FILTERED_SEASON in the diagnostic instead of trace-based
+        // reasons.
+        var postFilterBoxNos = new HashSet<string>(
+            lpmBoxes.Select(b => b.BoxNo).Concat(nonLpmBoxes.Select(b => b.BoxNo)),
+            StringComparer.OrdinalIgnoreCase);
+        var filteredOutBoxes = new HashSet<string>(
+            eligibleBoxes.Keys.Where(k => !postFilterBoxNos.Contains(k)),
+            StringComparer.OrdinalIgnoreCase);
 
         // 2 + 3) Read SOH and Item→Div in ONE pass from LPM_LocStock.
         //
@@ -1177,6 +1201,35 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         await BulkInsertBoxBalancesAsync((SqlConnection)conn, batch.LPMBatchNo, batch.CreateTS,
             lpmBoxes, nonLpmBoxes, boxAllocByPhase, ct);
         msPersistBalances = swStep.ElapsedMilliseconds;
+
+        // 1.14.26 — Per-eligible-box allocation gap diagnostic. One row in
+        // dbo.LPMSIM_UnallocatedDiagnostic for every box where the SQL
+        // filter said "eligible" but the allocator left RemainingQty > 0.
+        // Forward-fill only: pre-1.14.26 batches don't get this; new
+        // batches always do. Wrapped in try/catch so a missing table
+        // (mig 046 not applied yet) is non-fatal — the build itself
+        // is already committed by this point.
+        try
+        {
+            await BuildAndInsertUnallocatedDiagnosticAsync(
+                (SqlConnection)conn,
+                batch.LPMBatchNo,
+                batch.CreateTS,
+                eligibleBoxes,
+                filteredOutBoxes,
+                output,
+                trace,
+                ct);
+        }
+        catch (SqlException ex) when (ex.Number == 208 /* invalid object — table missing */)
+        {
+            // Migration 046 hasn't been applied yet. Build succeeded;
+            // diagnostic just won't be available for this batch.
+        }
+        catch (Exception)
+        {
+            // Diagnostic write is best-effort — never fail the build over it.
+        }
 
         return new LpmSimGenerateResult
         {
@@ -3796,6 +3849,11 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     // SUM(w.Qty) OVER (PARTITION BY w.BoxNo) which the SELECT already
     // projects — previously used only for ORDER BY, now also read.
     private record BoxItem(string BoxNo, string? PalletNo, DateTime? LPMDt, string ItemCode, int Qty, string Season, long BoxQty);
+    // 1.14.26 — Pre-filter snapshot of eligible boxes for the
+    // LPMSIM_UnallocatedDiagnostic write at the end of GenerateAsync.
+    // BoxQty is replicated from BoxItem.BoxQty (same value for every line
+    // of the same BoxNo). BoxKind is "LPM" if LPMDt is set, else "Non-LPM".
+    private record EligibleBoxSummary(string? PalletNo, DateTime? LPMDt, string BoxKind, long BoxQty);
     private record EomStore(string StoreID, int DivCode, int SKUMax, decimal TargetEOM,
                             decimal PriorityRank, decimal WtAvgSold, string VolumeGroup,
                             decimal MerchNeedWeek);
@@ -3911,6 +3969,174 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         foreach (System.Data.DataColumn col in dt.Columns)
             bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
         await bulk.WriteToServerAsync(dt, ct);
+    }
+
+    /// <summary>
+    /// 1.14.26 — Build the per-eligible-box gap diagnostic for the just-
+    /// completed batch and bulk-insert it into
+    /// <c>dbo.LPMSIM_UnallocatedDiagnostic</c>. One row per eligible BoxNo
+    /// where <c>RemainingQty &gt; 0</c>. Fully-allocated boxes are omitted.
+    ///
+    /// Reason taxonomy:
+    ///   • <c>FILTERED_SEASON</c> — eligible per SQL filter but every line
+    ///     got dropped by the 1.14.18 per-item Season filter; box never
+    ///     reached the allocator.
+    ///   • <c>SKIP_NO_DIV</c> / <c>SKIP_NO_EOM</c> — most common skip
+    ///     decision in the trace for this box (these two are always logged
+    ///     regardless of VerboseTrace).
+    ///   • <c>CAP</c> — deduced when the box reached the allocator and has
+    ///     <c>RemainingQty &gt; 0</c> but no SKIP_NO_* trace rows. With
+    ///     non-verbose trace (the default), SKIP_SKUMAX / SKIP_TARGET rows
+    ///     are dropped — so any remaining qty after the deductible reasons
+    ///     are cleared must be due to per-store cap saturation.
+    ///   • <c>UNKNOWN</c> — defensive fallback. Shouldn't happen.
+    /// </summary>
+    private static async Task BuildAndInsertUnallocatedDiagnosticAsync(
+        SqlConnection conn,
+        long batchNo,
+        DateTime createTs,
+        Dictionary<string, EligibleBoxSummary> eligibleBoxes,
+        HashSet<string> filteredOutBoxes,
+        List<LpmSimOutput> output,
+        List<LpmSimAllocTrace> trace,
+        CancellationToken ct)
+    {
+        if (eligibleBoxes.Count == 0) return;
+
+        // Per-box allocated qty (sum across all output lines for the box).
+        // Boxes absent from this dict had zero allocation.
+        var simQtyByBox = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        foreach (var o in output)
+        {
+            simQtyByBox.TryGetValue(o.BoxNo, out var prev);
+            simQtyByBox[o.BoxNo] = prev + o.Qty;
+        }
+
+        // Per-(box, skip-decision) trace row counts. We only need the SKIP_*
+        // variants; ALLOC* rows tell us the box reached the allocator but
+        // are otherwise not informative for the gap reason.
+        // Also remember whether the box has any ALLOC* trace at all — used
+        // below to distinguish CAP from UNKNOWN.
+        var skipCountsByBox = new Dictionary<(string Box, string Reason), int>(BoxReasonComparer.Instance);
+        var sawAllocByBox = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in trace)
+        {
+            if (string.IsNullOrEmpty(t.Decision)) continue;
+            if (t.Decision.StartsWith("ALLOC", StringComparison.Ordinal))
+            {
+                sawAllocByBox.Add(t.BoxNo);
+                continue;
+            }
+            if (!t.Decision.StartsWith("SKIP_", StringComparison.Ordinal)) continue;
+            var key = (t.BoxNo, t.Decision);
+            skipCountsByBox.TryGetValue(key, out var prev);
+            skipCountsByBox[key] = prev + 1;
+        }
+
+        using var dt = new System.Data.DataTable();
+        dt.Columns.Add("LPMBatchNo", typeof(long));
+        dt.Columns.Add("BoxNo",      typeof(string));
+        dt.Columns.Add("PalletNo",   typeof(string));
+        dt.Columns.Add("LPMDt",      typeof(DateTime));
+        dt.Columns.Add("BoxKind",    typeof(string));
+        dt.Columns.Add("BoxQty",     typeof(long));
+        dt.Columns.Add("SimQty",     typeof(long));
+        dt.Columns.Add("TopReason",  typeof(string));
+        dt.Columns.Add("Reasons",    typeof(string));
+        dt.Columns.Add("CreateTS",   typeof(DateTime));
+
+        dt.BeginLoadData();
+        foreach (var (boxNo, summary) in eligibleBoxes)
+        {
+            simQtyByBox.TryGetValue(boxNo, out var simQty);
+            var remaining = summary.BoxQty - simQty;
+            if (remaining <= 0) continue;   // fully allocated — not in diagnostic
+
+            string topReason;
+            string reasons;
+
+            if (filteredOutBoxes.Contains(boxNo))
+            {
+                topReason = "FILTERED_SEASON";
+                reasons   = "FILTERED_SEASON (all items dropped by per-item Season filter)";
+            }
+            else
+            {
+                // Aggregate skip counts for this box.
+                var perBox = skipCountsByBox
+                    .Where(kv => string.Equals(kv.Key.Box, boxNo, StringComparison.OrdinalIgnoreCase))
+                    .ToDictionary(kv => kv.Key.Reason, kv => kv.Value);
+
+                if (perBox.Count > 0)
+                {
+                    var ordered = perBox.OrderByDescending(kv => kv.Value).ToList();
+                    topReason = ordered[0].Key;     // SKIP_NO_DIV or SKIP_NO_EOM in practice
+                    reasons   = string.Join(" · ",
+                        ordered.Select(kv => $"{kv.Key} ({kv.Value})"));
+                }
+                else if (sawAllocByBox.Contains(boxNo) || simQty > 0)
+                {
+                    // Box reached allocator (or got partial allocation) but
+                    // the trace has no SKIP_* rows — almost certainly because
+                    // VerboseTrace=false dropped SKIP_SKUMAX / SKIP_TARGET.
+                    // Attribute the gap to CAP.
+                    topReason = "CAP";
+                    reasons   = $"CAP — {remaining} qty unallocated; SKU Max or EOM Merch Need (Week) cap saturated at every eligible store. Enable VerboseTrace on the run to see the precise SKU vs Target split in the Allocation Trace tab.";
+                }
+                else
+                {
+                    // Box was in the eligible set, not filtered out, but
+                    // didn't surface in output OR trace at all. Defensive.
+                    topReason = "UNKNOWN";
+                    reasons   = "UNKNOWN — box was eligible but produced no output and no trace rows. Investigate.";
+                }
+            }
+
+            // Truncate Reasons to nvarchar(400) limit defensively.
+            if (reasons.Length > 400) reasons = reasons[..397] + "…";
+
+            dt.Rows.Add(
+                batchNo,
+                boxNo,
+                (object?)summary.PalletNo  ?? DBNull.Value,
+                (object?)summary.LPMDt     ?? DBNull.Value,
+                summary.BoxKind,
+                summary.BoxQty,
+                simQty,
+                topReason,
+                reasons,
+                createTs);
+        }
+        dt.EndLoadData();
+
+        if (dt.Rows.Count == 0) return;    // every eligible box fully allocated — nothing to write
+
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, null)
+        {
+            DestinationTableName = "dbo.LPMSIM_UnallocatedDiagnostic",
+            BatchSize            = 50_000,
+            BulkCopyTimeout      = 300,
+            EnableStreaming      = true,
+        };
+        foreach (System.Data.DataColumn col in dt.Columns)
+            bulk.ColumnMappings.Add(col.ColumnName, col.ColumnName);
+        await bulk.WriteToServerAsync(dt, ct);
+    }
+
+    /// <summary>Comparer for the (BoxNo, SkipReason) dictionary used inside
+    /// <see cref="BuildAndInsertUnallocatedDiagnosticAsync"/>. BoxNo is
+    /// case-insensitive (same as the other dictionaries); Reason is
+    /// ordinal (decision codes are stable case-sensitive literals).</summary>
+    private sealed class BoxReasonComparer : IEqualityComparer<(string Box, string Reason)>
+    {
+        public static readonly BoxReasonComparer Instance = new();
+        public bool Equals((string Box, string Reason) x, (string Box, string Reason) y)
+            => StringComparer.OrdinalIgnoreCase.Equals(x.Box, y.Box)
+            && StringComparer.Ordinal.Equals(x.Reason, y.Reason);
+        public int GetHashCode((string Box, string Reason) obj)
+            => HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Box    ?? ""),
+                StringComparer.Ordinal.GetHashCode(obj.Reason ?? ""));
     }
 
     private static async Task BulkInsertTraceAsync(SqlConnection conn, List<LpmSimAllocTrace> rows, CancellationToken ct)

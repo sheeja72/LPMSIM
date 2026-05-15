@@ -23,6 +23,63 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.26 — Allocation Gap diagnostic: per-eligible-box reason for unallocated qty (2026-05-15)
+
+### Why this exists
+Planners had no way to answer "we had 32,930 Non-LPM Summer boxes eligible (463K qty) but only 143K allocated — why the 320K gap?" The existing SIM Boxes tab only listed boxes with ≥1 output row, so the 30K+ boxes that got zero allocation were invisible, and there was no per-box reason attached.
+
+### Added — `dbo.LPMSIM_UnallocatedDiagnostic` (migration 046)
+One row per eligible box per batch where `RemainingQty > 0`. Fully-allocated boxes are omitted (the existing SIM Boxes tab already covers them). Populated automatically at the end of every successful SIM Generate from 1.14.26 onward — **no operator action needed beyond applying mig 046**.
+
+Columns:
+
+| Column | Meaning |
+|---|---|
+| `LPMBatchNo` | FK to LPMSIM_Batch (CASCADE on delete) |
+| `BoxNo` | Eligible box that didn't fully allocate |
+| `PalletNo`, `LPMDt`, `BoxKind` | Box context |
+| `BoxQty` | Total qty in the source box (from whboxitems) |
+| `SimQty` | Allocated qty for this box (0 if nothing allocated) |
+| `RemainingQty` | Computed `PERSISTED` column = `BoxQty − SimQty` |
+| `TopReason` | One of: `FILTERED_SEASON` / `SKIP_NO_DIV` / `SKIP_NO_EOM` / `CAP` / `UNKNOWN` |
+| `Reasons` | Full breakdown — e.g. `SKIP_NO_DIV (3) · SKIP_NO_EOM (2)` or `CAP — 45 qty unallocated; SKU Max / EOM Merch Need cap saturated`. |
+
+### Reason taxonomy
+- **`FILTERED_SEASON`** — eligible per SQL filter but every item failed the per-item Season filter (1.14.18); box never reached the allocator.
+- **`SKIP_NO_DIV`** — items missing from `upc_subclass`; allocator can't classify division.
+- **`SKIP_NO_EOM`** — no `LPM_EOM_Output` rows for the item's division this period.
+- **`CAP`** — deduced when the box reached the allocator with allocations but `RemainingQty > 0` and no SKIP_NO_* trace rows. The remaining qty is attributable to SKU Max or EOM Merch Need (Week) cap saturation. **For the precise SKU vs Target split, enable Verbose Trace on the run** — without it, `SKIP_SKUMAX` and `SKIP_TARGET` rows are dropped from the trace to save space, so the diagnostic can only label this as a generic "CAP".
+- **`UNKNOWN`** — defensive fallback. Shouldn't appear in practice.
+
+### Added — "Allocation Gap" tab on SIM Generate result preview
+Located between **SIM Boxes** and **Item Details**. Filters:
+- Box No (contains)
+- Kind (LPM / Non-LPM)
+- Top Reason (drop-down with all five codes)
+- Min Remaining (numeric — only rows with `RemainingQty ≥ N`)
+
+Table columns: Box No · Pallet No · Kind chip · Box Qty · SIM Qty · **Remaining Qty** (highlighted) · Top Reason chip (hover for plain-language tooltip) · Reasons (full breakdown). Default sort: `RemainingQty DESC` so biggest gaps surface first. Totals row at the top.
+
+**Excel export button** dumps the full result with all columns, including the `Reasons` breakdown, so you can pivot/sort in Excel.
+
+### Implementation
+- **Migration 046** — `CREATE TABLE` + clustered PK `(LPMBatchNo, BoxNo)` + NCI on `(LPMBatchNo, TopReason, BoxKind)` + CASCADE FK + CHECK constraints on `BoxKind` and `TopReason`.
+- **Entity** `LpmSimUnallocatedDiagnostic` + DbContext registration. `RemainingQty` marked `ValueGeneratedOnAddOrUpdate` so EF reads but never writes it.
+- **`LpmSimGenerator.GenerateAsync`** — added `eligibleBoxes` snapshot BEFORE the per-item Season filter, `filteredOutBoxes` set AFTER, and a final `BuildAndInsertUnallocatedDiagnosticAsync` step that aggregates `output` + `trace` in-memory and bulk-inserts via `SqlBulkCopy`. Wrapped in try/catch on `SqlException 208` so a missing table (mig 046 not applied) is non-fatal — the build itself is already committed.
+- **`LpmSimReportService.GetUnallocatedDiagnosticAsync(...)`** — new method with all four filters, sorted `RemainingQty DESC`.
+- **Razor tab** — new `<MudTabPanel>` with `OnClick="LoadGapAsync"` so the data loads on first tab activation (no auto-fetch on result-preview render).
+
+### Out of scope (intentional)
+- **Backfill historical batches** — pre-1.14.26 batches have no rows in the new table. Re-Generate to populate. Documented in the empty-state alert on the tab.
+- **Per-item drill-down** — diagnostic is per-box only. For "which specific items in this box weren't allocated and why", use the existing Allocation Trace tab.
+- **Verbose-trace coverage warning** — `CAP` reason rows include a hint to enable Verbose Trace for more detail, but the diagnostic itself doesn't force-enable it.
+
+### Notes
+- **Apply migration 046 to prod LPMSIM DB** before kicking off a new SIM Generate, otherwise the diagnostic insert silently skips (and the tab shows "No allocation gap rows" for new batches).
+- Pure code change otherwise. No other schema migrations in this release.
+
+---
+
 ## 1.14.25 — Reports role can actually open report pages + SIM Generate click feedback (2026-05-15)
 
 This release bundles the Reports-role access fix with the previously-prepared (but not yet pushed) SIM Generate click-feedback improvement.

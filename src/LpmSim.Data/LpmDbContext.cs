@@ -36,6 +36,9 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
     public DbSet<LpmSimProductionSchedule> LpmSimProductionSchedules => Set<LpmSimProductionSchedule>();
     public DbSet<LpmSimAdmRun>     LpmSimAdmRuns      => Set<LpmSimAdmRun>();
     public DbSet<LpmSimAdmBoxAlloc> LpmSimAdmBoxAllocs => Set<LpmSimAdmBoxAlloc>();
+    // 1.14.26 — per-eligible-box gap diagnostic, written at the end of every
+    // successful SIM Generate. Table created by migration 046.
+    public DbSet<LpmSimUnallocatedDiagnostic> LpmSimUnallocatedDiagnostics => Set<LpmSimUnallocatedDiagnostic>();
 
     protected override void OnModelCreating(ModelBuilder mb)
     {
@@ -420,6 +423,32 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.HasOne<LpmSimAdmRun>()
                 .WithMany()
                 .HasForeignKey(x => x.AdmRunNo)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // 1.14.26 — Per-eligible-box allocation gap diagnostic. Table created
+        // by migration 046. RemainingQty is a PERSISTED computed column on
+        // the DB side, so we mark it ValueGeneratedOnAddOrUpdate +
+        // PropertySaveBehavior.Ignore so EF reads it but never tries to
+        // INSERT or UPDATE the value (same pattern as the EOM fill-rate
+        // computed columns above).
+        mb.Entity<LpmSimUnallocatedDiagnostic>(e =>
+        {
+            e.ToTable("LPMSIM_UnallocatedDiagnostic");
+            e.HasKey(x => new { x.LPMBatchNo, x.BoxNo });
+            e.Property(x => x.BoxNo).HasMaxLength(25);
+            e.Property(x => x.PalletNo).HasMaxLength(50);
+            e.Property(x => x.LPMDt).HasColumnType("date");
+            e.Property(x => x.BoxKind).HasMaxLength(10);
+            e.Property(x => x.TopReason).HasMaxLength(50);
+            e.Property(x => x.Reasons).HasMaxLength(400);
+            e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
+            e.Property(x => x.RemainingQty)
+             .ValueGeneratedOnAddOrUpdate()
+             .Metadata.SetAfterSaveBehavior(Microsoft.EntityFrameworkCore.Metadata.PropertySaveBehavior.Ignore);
+            e.HasOne<LpmSimBatch>()
+                .WithMany()
+                .HasForeignKey(x => x.LPMBatchNo)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }
