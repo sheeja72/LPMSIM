@@ -1,6 +1,7 @@
 @page "/lpm/reports/wh-ho-stock"
 @rendermode InteractiveServer
-@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@attribute [Authorize(Roles = Roles.AnyRole)]
+@* 1.14.25 — opened to AnyRole so the Reports (Viewer) role can access. *@
 @using LpmSim.Data.Reports
 @using LpmSim.Data.Warehouse
 @using LpmSim.Data.Auditing

@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.23</Version>
-    <AssemblyVersion>1.14.23.0</AssemblyVersion>
-    <FileVersion>1.14.23.0</FileVersion>
-    <InformationalVersion>1.14.23 (Sales/Turns: download current data button)</InformationalVersion>
+    <Version>1.14.25</Version>
+    <AssemblyVersion>1.14.25.0</AssemblyVersion>
+    <FileVersion>1.14.25.0</FileVersion>
+    <InformationalVersion>1.14.25 (Reports role can open report pages + SIM Generate click feedback)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -3148,6 +3148,14 @@
     {
         if (_runDate is null || string.IsNullOrEmpty(_country)) return;
 
+        // 1.14.24 — IMMEDIATE feedback so the user sees their click registered
+        // even before the schedule-existence probe runs. 1.14.22 introduced
+        // the probe but didn't surface any UI state during it, so a slow probe
+        // (network blip, transient DB issue) looked exactly like "nothing
+        // happens" to the user.
+        Snackbar.Add("Checking for existing batch…", Severity.Info,
+            cfg => cfg.VisibleStateDuration = 1500);
+
         // 1.14.22 — when an existing Draft batch is present, also peek at
         // whether it has a Production Schedule attached. If so, the dialog
         // text below names the schedule that will be deleted and the user's
@@ -3159,27 +3167,48 @@
         {
             bool hasSchedule = false;
             long? existingDraftNo = null;
+            bool probeTimedOut = false;
+            // 1.14.24 — strict 3s timeout on the probe. The two queries
+            // are simple indexed seeks (Batch PK + Schedule PK on
+            // LPMBatchNo) and complete in <500ms normally. If they take
+            // longer than 3 seconds something is genuinely wrong (pool
+            // exhaustion / network blip / transient DB issue), and we
+            // bail to the legacy dialog instead of leaving the user
+            // staring at a frozen page.
             try
             {
-                await using var probeDb = await DbFactory.CreateDbContextAsync();
+                using var probeCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                await using var probeDb = await DbFactory.CreateDbContextAsync(probeCts.Token);
                 existingDraftNo = await probeDb.LpmSimBatches.AsNoTracking()
                     .Where(b => b.Country == _country
                              && b.RunDate == _runDate.Value.Date
                              && b.Status == "Draft")
                     .OrderByDescending(b => b.LPMBatchNo)
                     .Select(b => (long?)b.LPMBatchNo)
-                    .FirstOrDefaultAsync();
+                    .FirstOrDefaultAsync(probeCts.Token);
                 if (existingDraftNo.HasValue)
                 {
                     hasSchedule = await probeDb.LpmSimProductionSchedules.AsNoTracking()
-                        .AnyAsync(s => s.LPMBatchNo == existingDraftNo.Value);
+                        .AnyAsync(s => s.LPMBatchNo == existingDraftNo.Value, probeCts.Token);
                 }
             }
-            catch
+            catch (OperationCanceledException)
             {
-                // Probe is best-effort. If it fails, fall back to the
-                // legacy dialog — the service-side guard still throws if
-                // a schedule sneaks in, so we can't accidentally lose it.
+                // Probe timed out — surface so the user knows we're falling
+                // back. The dialog still appears; service-side guard still
+                // protects schedule data even if the user picks "Generate".
+                probeTimedOut = true;
+                Snackbar.Add(
+                    "Schedule check timed out — opening dialog. If a Production Schedule exists, Generate may fail; delete the schedule on the Production Schedule page first.",
+                    Severity.Warning, cfg => cfg.VisibleStateDuration = 8000);
+            }
+            catch (Exception ex)
+            {
+                // Other probe failures are non-fatal: fall back to legacy
+                // dialog. The service-side guard at LpmSimGenerator.cs:522
+                // still throws if a schedule exists and the flag is false.
+                Snackbar.Add($"Schedule check failed ({ex.Message}). Falling back to legacy dialog.",
+                    Severity.Warning, cfg => cfg.VisibleStateDuration = 8000);
             }
 
             bool? ok;
@@ -3192,7 +3221,8 @@
             }
             else
             {
-                ok = await DialogService.ShowMessageBox("Overwrite Draft",
+                var legacyTitle = probeTimedOut ? "Overwrite Draft (schedule check skipped)" : "Overwrite Draft";
+                ok = await DialogService.ShowMessageBox(legacyTitle,
                     "A Draft batch already exists for this country and date. Generate will replace it. Continue?",
                     yesText: "Generate", cancelText: "Cancel");
             }

@@ -23,6 +23,68 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.25 — Reports role can actually open report pages + SIM Generate click feedback (2026-05-15)
+
+This release bundles the Reports-role access fix with the previously-prepared (but not yet pushed) SIM Generate click-feedback improvement.
+
+### Bug — Reports (Viewer) role had no actual page access
+After 1.14.16 renamed the `Viewer` role's display label to `Reports` (migration 043), it became obvious that **no page in the app actually granted Viewer access**. `grep -r 'Roles\.Viewer\|Roles\.AnyRole\|"Viewer"'` returned zero hits in `[Authorize]` attributes. So a "Reports" user could only see the Home page; clicking any sidebar link (including the four pages most logically named "report"-style) gave them an Access Denied screen.
+
+The `Roles.AnyRole` constant (= `"Admin,Editor,Viewer,PlanningManager"`) was declared in `Roles.cs` but never used anywhere — exactly the right tool, just unused.
+
+### Fix
+Four read-only / report-style pages switched from `Roles.AdminOrEditorOrPlanner` to `Roles.AnyRole`:
+
+| Page | Path |
+|---|---|
+| WH Stock Position | `lpm/reports/wh-ho-stock` |
+| Variance Report | `lpm/reports/variance` |
+| Warehouse Boxes | `lpm/warehouse-boxes` |
+| LPM SIM Reports | `lpm/lpm-sim/reports` |
+
+Effect:
+- A Reports (Viewer) user can now open these four pages. The sidebar links no longer dead-end.
+- Admin / Editor / PlanningManager continue to have access — `AnyRole` is a superset of `AdminOrEditorOrPlanner`.
+- **All other pages stay locked** to their previous roles. Viewer cannot Generate, Approve, Delete, Build, Save, Upload, or edit anything (SIM Generate, Production Schedule, EOM Generate, Adm, all Admin pages — all still require Admin/Editor/Planner).
+
+### SIM Generate click feedback (from the unreleased 1.14.24 work)
+
+Pre-1.14.25, clicking the SIM Generate button when an existing Draft batch was present could appear to "do nothing" if the 1.14.22 schedule-existence probe stalled — the probe ran BEFORE any visible UI state changed.
+
+1.14.25 ships three layers of protection:
+
+1. **Immediate snackbar at click**: `"Checking for existing batch…"` fires the moment `GenerateAsync` enters, before the probe. The user sees the click registered no matter what happens next.
+2. **3-second timeout on the schedule-probe** via `CancellationTokenSource(TimeSpan.FromSeconds(3))` flowing through `CreateDbContextAsync` + `FirstOrDefaultAsync` + `AnyAsync`. If the probe takes longer, `OperationCanceledException` is caught and we fall back to the legacy dialog with a warning snackbar.
+3. **Non-fatal exception handling**: any other probe failure shows a warning snackbar and falls through to the legacy "Overwrite Draft?" dialog. Service-side guard at `LpmSimGenerator.cs:522` still throws if a schedule exists and the flag is false, so schedule data can't be lost silently.
+
+### Notes
+- No DB migration in this release.
+- Pure code change.
+- After deploy: a Reports user signing in fresh (sign out + sign in again, or hard refresh) will see the four report pages working. No DB changes needed for ajmal's account.
+
+---
+
+## 1.14.24 — SIM Generate click feedback + schedule-probe timeout (2026-05-14)
+
+### Bug
+On 1.14.22, clicking the SIM Generate button when an existing Draft batch was present could appear to "do nothing" if the new schedule-existence probe stalled. The probe ran BEFORE any visible UI state changed (no snackbar, no busy indicator), so a slow probe was indistinguishable from a dead click. Reported on prod 1.14.22 with an existing Draft batch.
+
+### Fix — three layers of protection
+1. **Immediate snackbar at click**: `"Checking for existing batch…"` fires the moment `GenerateAsync` enters, before the probe. The user sees the click registered no matter what happens next.
+2. **3-second timeout on the schedule-probe**: the two probe queries (Batch PK lookup + Schedule existence) are simple indexed seeks and complete in <500ms normally. A `CancellationTokenSource(TimeSpan.FromSeconds(3))` flows through `CreateDbContextAsync` + `FirstOrDefaultAsync` + `AnyAsync`. If the probe takes longer, `OperationCanceledException` is caught and we fall back to the legacy dialog with a warning snackbar.
+3. **Non-fatal exception handling**: any other probe failure (transient DB issue, connection pool exhaustion, etc.) shows a warning snackbar and falls through to the legacy "Overwrite Draft?" dialog. Service-side guard at `LpmSimGenerator.cs:522` still throws if a schedule exists and the flag is false, so schedule data can't be lost silently.
+
+### Behaviour after 1.14.24
+- **Happy path** (probe succeeds): unchanged from 1.14.22. User sees the stronger "Replace Draft + delete Production Schedule" dialog and one-click overwrites.
+- **Slow / failing probe**: user sees an immediate snackbar confirming the click, then within 3 seconds either the proper dialog appears or a "Schedule check timed out — opening dialog" warning + the legacy dialog opens. No more silent failure.
+- **Cancelling either dialog**: returns to the filter screen as before.
+
+### Notes
+- No DB migration. Pure UX defensiveness in `LpmSimGenerate.razor`.
+- Service contract (`LpmSimGenerateRequest.DeleteExistingSchedule`) and EF service code unchanged from 1.14.22.
+
+---
+
 ## 1.14.23 — Sales/Turns: download current data button (2026-05-14)
 
 ### Added
