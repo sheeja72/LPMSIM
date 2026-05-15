@@ -1,9 +1,11 @@
 @page "/lpm/planned"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <PageTitle>Planned Inputs</PageTitle>
 
@@ -316,6 +318,13 @@ else if (!string.IsNullOrEmpty(_country))
             await db.SaveChangesAsync();
             foreach (var r in dirty) { r.IsDirty = false; r.ExistsInDb = true; }
             Snackbar.Add($"Saved {dirty.Count} division(s).", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("PlannedInputs.Save",
+                $"{_country}/{_year}-{_month:D2}",
+                new { country = _country, year = _year, month = _month,
+                      divisionCount = dirty.Count,
+                      divs = dirty.Select(r => r.DivCode).ToList() },
+                action: 'X');
         }
         catch (Exception ex)
         {

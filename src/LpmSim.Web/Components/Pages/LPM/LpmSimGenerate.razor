@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
 @using LpmSim.Data.LpmSim
+@using LpmSim.Data.Auditing
 @using LpmSim.Core.Entities
 @using ClosedXML.Excel
 @using System.IO
@@ -14,6 +15,7 @@
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 @inject IJSRuntime JS
 @implements IDisposable
 
@@ -3547,6 +3549,33 @@
                     Severity.Warning,
                     cfg => cfg.VisibleStateDuration = 15000);
 
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(
+                "LpmSimGenerate.Generate",
+                $"#{result.LPMBatchNo}",
+                new
+                {
+                    batchNo            = result.LPMBatchNo,
+                    country            = _country,
+                    runDate            = d.ToString("yyyy-MM-dd"),
+                    weekNo             = _runWeek,
+                    sources            = CurrentSources.ToString(),
+                    seasons            = CurrentSeasons.ToString(),
+                    overrideUsabilityPct = _overridePct,
+                    fillStrategy       = _fillStrategy.ToString(),
+                    ignoreMerchNeed    = _ignoreMerchNeed,
+                    includePurchased   = _includePurchasedBoxes,
+                    palletCategories   = _selectedPalletCategories.ToList(),
+                    warehouses         = _selectedWarehouses.ToList(),
+                    lpmMonths          = _selectedLpmMonths.ToList(),
+                    deleteExistingSchedule = deleteExistingSchedule,
+                    lines              = result.LinesGenerated,
+                    boxes              = result.BoxesProcessed,
+                    totalQty           = result.TotalQty,
+                    elapsedMs          = (int)sw.Elapsed.TotalMilliseconds,
+                },
+                action: 'X');
+
             // Release the busy flag BEFORE awaiting CheckAsync. CheckAsync's
             // reentrancy guard returns early when _busy is true (it's the
             // shared "another op is running" gate), which would otherwise
@@ -3825,6 +3854,22 @@
                 $"SKU Max build started in background ({scopeLabel}, {preview.ItemsInScope:N0} items). " +
                 "You can navigate away — it'll keep running.",
                 Severity.Success, cfg => cfg.VisibleStateDuration = 6000);
+
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(
+                "LpmSimGenerate.BuildSkuMax",
+                $"{_country}/{d:yyyy-MM}/{scopeLabel}",
+                new
+                {
+                    country         = _country,
+                    runDate         = d.ToString("yyyy-MM-dd"),
+                    scope           = _selectedSkuMaxScope.ToString(),
+                    itemsInScope    = preview.ItemsInScope,
+                    droppedNoMaster = preview.DroppedNoMaster,
+                    rowsReplaced    = preview.ExistingRowsInScope,
+                    rowsPreserved   = preview.ExistingRowsKept,
+                },
+                action: 'X');
         }
         catch (InvalidOperationException ex)
         {
@@ -4054,6 +4099,12 @@
         {
             await Sim.ApproveAsync(bn, CurrentUser.Name);
             Snackbar.Add($"Batch #{bn} approved.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(
+                "LpmSimGenerate.Approve",
+                $"#{bn}",
+                new { batchNo = bn, country = _country },
+                action: 'X');
             _busy = false;          // release before CheckAsync (see GenerateAsync note)
             await CheckAsync();
         }
@@ -4148,6 +4199,12 @@
         {
             await Sim.DeleteAsync(bn, CurrentUser.Name);
             Snackbar.Add($"Batch #{bn} archived.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(
+                "LpmSimGenerate.Delete",
+                $"#{bn}",
+                new { batchNo = bn, country = _country },
+                action: 'X');
             _busy = false;          // release before CheckAsync (see GenerateAsync note)
             await CheckAsync();
         }

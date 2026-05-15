@@ -1,9 +1,11 @@
 @page "/admin/grades"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 
 <PageTitle>Store Grades</PageTitle>
 
@@ -157,6 +159,10 @@
             db.LpmStoreGrades.Remove(row);
             await db.SaveChangesAsync();
             Snackbar.Add($"Deleted {g.Country}/{g.GradeCode}.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("Grades.Delete", $"{g.Country}/{g.GradeCode}",
+                new { country = g.Country, gradeCode = g.GradeCode, gradeName = g.GradeName },
+                action: 'X');
             await ReloadAsync();
         }
         catch (Exception ex) { Snackbar.Add($"Delete failed: {ex.Message}", Severity.Error); }

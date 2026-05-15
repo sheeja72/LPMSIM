@@ -1,8 +1,10 @@
 @page "/admin/skumax-rules"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <PageTitle>SKU Max Rules</PageTitle>
 
@@ -292,6 +294,11 @@ else
                 }
             }
 
+            // 1.14.29 — count what we're about to change for the audit row.
+            var deletedCount  = _rows.Count(r => r.IsDeleted && r.RuleId > 0);
+            var insertedCount = toUpsert.Count(r => r.RuleId == 0);
+            var updatedCount  = toUpsert.Count(r => r.RuleId > 0);
+
             await db.SaveChangesAsync();
 
             // Keep the saved rows on screen: just pick up new IDs, clear dirty flags, and drop deleted.
@@ -300,6 +307,12 @@ else
             _rows.RemoveAll(r => r.IsDeleted);
 
             Snackbar.Add("Saved.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("SkuMaxRules.BulkSave",
+                $"{_country}/Div{_divCode}",
+                new { country = _country, divCode = _divCode,
+                      inserted = insertedCount, updated = updatedCount, deleted = deletedCount },
+                action: 'X');
             StateHasChanged();
         }
         catch (Exception ex)

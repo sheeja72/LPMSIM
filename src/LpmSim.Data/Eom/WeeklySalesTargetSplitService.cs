@@ -123,14 +123,17 @@ public class WeeklySalesTargetSplitService(
 
         await db.SaveChangesAsync(ct);
 
+        // 1.14.29 — promoted from 'R' (default) to 'X' so it shows in the
+        // Audit Log under the new user-initiated action category instead
+        // of mixing with read events.
         await actionLog.LogAsync(
-            "WeeklySalesTargetSplit",
+            "WeeklySalesTargetSplit.Save",
             $"{row.Country}/{row.Year}-{row.Month:D2}/Div{row.DivCode}",
             new
             {
                 row.Country, row.Year, row.Month, row.DivCode,
                 row.Wk1, row.Wk2, row.Wk3, row.Wk4,
-            }, ct: ct);
+            }, action: 'X', ct: ct);
     }
 
     /// <summary>
@@ -150,10 +153,11 @@ public class WeeklySalesTargetSplitService(
         db.LpmWeeklySalesTargetSplits.RemoveRange(existing);
         await db.SaveChangesAsync(ct);
 
+        // 1.14.29 — promoted from 'R' to 'X' (see Save note above).
         await actionLog.LogAsync(
-            "WeeklySalesTargetSplit",
+            "WeeklySalesTargetSplit.Delete",
             $"{country}/{year}-{month:D2}/Div{divCode}",
-            new { Action = "Delete", Removed = existing.Count }, ct: ct);
+            new { divCode, removed = existing.Count }, action: 'X', ct: ct);
     }
 
     /// <summary>

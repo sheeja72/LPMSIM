@@ -1,10 +1,12 @@
 @page "/admin/users"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.Admin)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 
 <PageTitle>User Access</PageTitle>
 
@@ -165,6 +167,10 @@
             db.LpmUsers.Remove(row);
             await db.SaveChangesAsync();
             Snackbar.Add($"Deleted {user.Username}.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("Users.Delete", user.Username,
+                new { username = user.Username, displayName = user.DisplayName, email = user.Email },
+                action: 'X');
             await ReloadAsync();
         }
         catch (Exception ex)

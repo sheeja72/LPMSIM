@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.28</Version>
-    <AssemblyVersion>1.14.28.0</AssemblyVersion>
-    <FileVersion>1.14.28.0</FileVersion>
-    <InformationalVersion>1.14.28 (Allocation Gap: EXCLUDED_BY_RULE reason code)</InformationalVersion>
+    <Version>1.14.29</Version>
+    <AssemblyVersion>1.14.29.0</AssemblyVersion>
+    <FileVersion>1.14.29.0</FileVersion>
+    <InformationalVersion>1.14.29 (Audit log: 27 button-click handlers instrumented with Action='X')</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -23,6 +23,78 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.29 — Audit log: 27 button-click handlers instrumented with Action='X' (2026-05-15)
+
+### Background
+1.14.22 shipped the `IActionLogger.LogAsync(..., char action = 'R', ...)` foundation and the new "Action" chip rendering in `/admin/audit` for rows with `Action = 'X'`. But **no handler actually wrote `'X'` rows** — so the audit log only captured: EF-interceptor I/U/D rows + the three Read (`'R'`) calls from WarehouseBoxes / VarianceReport / WhHoStock load handlers.
+
+1.14.29 wires up **27 button-click handlers** across 18 pages so every meaningful user-initiated action lands in `LPMAuditLog` with `Action = 'X'` and a rich JSON payload of the params used.
+
+### Handlers instrumented (27 total)
+
+**LPM workflow (12 spots):**
+| Page | Handler | Audit Entity |
+|---|---|---|
+| `LpmSimGenerate.razor` | GenerateAsync | `LpmSimGenerate.Generate` |
+| `LpmSimGenerate.razor` | ApproveAsync | `LpmSimGenerate.Approve` |
+| `LpmSimGenerate.razor` | DeleteAsync | `LpmSimGenerate.Delete` |
+| `LpmSimGenerate.razor` | BuildSkuMaxAsync | `LpmSimGenerate.BuildSkuMax` |
+| `ProductionSchedule.razor` | GenerateAsync | `ProductionSchedule.Generate` |
+| `ProductionSchedule.razor` | ApproveAsync | `ProductionSchedule.Approve` |
+| `ProductionSchedule.razor` | DeleteAsync | `ProductionSchedule.Delete` |
+| `EomGenerate.razor` | GenerateAsync (preview) | `EomGenerate.Generate` |
+| `EomGenerate.razor` | ApproveAsync (generate & save) | `EomGenerate.Approve` |
+| `Adm.razor` | GenerateAsync | `Adm.Generate` |
+| `Adm.razor` | ApproveAsync | `Adm.Approve` |
+| `Adm.razor` | DeleteAsync | `Adm.Delete` |
+
+**Admin / Config (15 spots):**
+| File | Handler | Audit Entity |
+|---|---|---|
+| `Users.razor` | DeleteAsync | `Users.Delete` |
+| `UserEditDialog.razor` | SaveAsync | `Users.Add` / `Users.Edit` (branches on `IsNew`) |
+| `SkuMaxRuleEditDialog.razor` | SaveAsync | `SkuMaxRules.Add` / `SkuMaxRules.Edit` |
+| `SkuMaxRules.razor` | SaveAsync (bulk) | `SkuMaxRules.BulkSave` |
+| `GradeEditDialog.razor` | SaveAsync | `Grades.Add` / `Grades.Edit` |
+| `Grades.razor` | DeleteAsync | `Grades.Delete` |
+| `VolumeGroupEditDialog.razor` | SaveAsync | `VolumeGroups.Add` / `VolumeGroups.Edit` |
+| `VolumeGroups.razor` | DeleteAsync | `VolumeGroups.Delete` |
+| `WarehousePriorities.razor` | DeleteAsync | `WarehousePriorities.Delete` |
+| `StoreDivAccess.razor` | DeleteAsync | `StoreDivAccess.Delete` |
+| `StoreDeptAccess.razor` | DeleteAsync | `StoreDeptAccess.Delete` |
+| `DivMax.razor` | SaveAsync | `DivMax.Save` |
+| `MonthlyWeights.razor` | SaveAsync | `MonthlyWeights.Save` |
+| `PlannedInputs.razor` | SaveAsync | `PlannedInputs.Save` |
+| `WeeklySalesTargetSplitService.cs` | Save + Delete (service-side) | `WeeklySalesTargetSplit.Save` / `WeeklySalesTargetSplit.Delete` (promoted from existing `'R'` rows) |
+
+### Each row written carries
+- `EntityName` — `Page.Action` (e.g. `LpmSimGenerate.BuildSkuMax`)
+- `EntityKey` — a natural identifier per action (batch number with `#` prefix, username, store ID, period `YYYY-MM`, etc.)
+- `Action` = `'X'`
+- `ChangedBy` — current signed-in user (from `ICurrentUser.Name` via the logger)
+- `ChangedTS` — `DateTime.Now`
+- `ChangesJson` — JSON object with the relevant params (country, run date, sources, fill strategy, role list, etc.) so the audit row tells the full story without joining anywhere
+
+### Implementation notes
+- Each page got `@using LpmSim.Data.Auditing` + `@inject IActionLogger ActionLog` added in the page-header injects section. Three pages (WarehouseBoxes / VarianceReport / WhHoStock) already had both — left as-is.
+- Log calls placed AFTER the success-path Snackbar / dialog close / DB SaveChanges, INSIDE the existing try block. If the action throws before reaching the log call, no row is written (intentional — only successful actions get logged).
+- `WeeklySalesTargetSplitService.cs` previously wrote `Action='R'` rows from its Save/Delete service methods. 1.14.29 promotes those to `Action='X'` so they show under the new user-initiated category instead of mixing with Read events. Entity name renamed from `WeeklySalesTargetSplit` to `WeeklySalesTargetSplit.Save` / `.Delete` for consistency with the other handlers.
+- The logger swallows exceptions internally (per the foundation comment), so an audit-write failure never breaks the user's action.
+
+### Side effect on the audit page
+The `/admin/audit` page (Admin-only) will now show:
+- I / U / D chips for EF data-change rows (unchanged — written by the SaveChangesInterceptor)
+- R chips for the 3 existing Read-event handlers (unchanged)
+- **X chips (yellow "Action") for the 27 newly-instrumented handlers** — clicking the Top Reason chip would show a tooltip, but the audit page renders chips without tooltips currently (could add later if useful)
+
+The existing filters (Entity, Changed-by, Date range) work on the new rows immediately. No new filter UI added.
+
+### Notes
+- No DB migration. No schema change.
+- Pure code change across 19 files.
+
+---
+
 ## 1.14.28 — Allocation Gap: EXCLUDED_BY_RULE reason code (2026-05-15)
 
 ### Added

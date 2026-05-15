@@ -1,8 +1,10 @@
 @page "/lpm/monthly-weights"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <PageTitle>Monthly Weights</PageTitle>
 
@@ -346,6 +348,13 @@ else if (!string.IsNullOrEmpty(_country))
             await db.SaveChangesAsync();
             _lastSaved = DateTime.Now;
             Snackbar.Add($"Saved {_rows.Count} weights.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("MonthlyWeights.Save",
+                $"{_country}/{_runYear}-{_runMonth:D2}",
+                new { country = _country, runYear = _runYear, runMonth = _runMonth,
+                      rowCount = _rows.Count,
+                      weights = _rows.Select(r => new { r.PeriodSeq, r.PeriodYear, r.PeriodMonth, r.WeightPct }).ToList() },
+                action: 'X');
         }
         catch (Exception ex)
         {

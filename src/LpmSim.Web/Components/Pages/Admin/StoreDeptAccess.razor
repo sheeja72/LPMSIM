@@ -1,10 +1,12 @@
 @page "/admin/store-dept-access"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 
 <PageTitle>Store / Department Access</PageTitle>
 
@@ -270,6 +272,12 @@
         db.LpmStoreDeptAccesses.Remove(entity);
         await db.SaveChangesAsync();
         Snackbar.Add($"Removed override for {row.StoreID} · Div {row.DivCode} · {row.Department}", Severity.Success);
+        // 1.14.29 — audit-log this user-initiated action.
+        await ActionLog.LogAsync("StoreDeptAccess.Delete",
+            $"{row.Country}/{row.StoreID}/Div{row.DivCode}/{row.Department}",
+            new { country = row.Country, storeId = row.StoreID, divCode = row.DivCode,
+                  department = row.Department },
+            action: 'X');
         await ReloadAsync();
     }
 

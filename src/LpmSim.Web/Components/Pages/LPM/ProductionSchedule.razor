@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
 @using LpmSim.Data.LpmSim
+@using LpmSim.Data.Auditing
 @using LpmSim.Core.Entities
 @using ClosedXML.Excel
 @using System.IO
@@ -12,6 +13,7 @@
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 @inject IJSRuntime JS
 
 <PageTitle>Production Schedule</PageTitle>
@@ -634,6 +636,25 @@ else if (!_busy)
                 $"Schedule built in {FormatDuration(sw.Elapsed)} — {result.ScheduledBoxes:N0} scheduled, {result.DeferredBoxes:N0} deferred, {result.DropboxBoxes:N0} dropboxes.",
                 Severity.Success, cfg => cfg.VisibleStateDuration = 12000);
 
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(
+                "ProductionSchedule.Generate",
+                $"#{bn}",
+                new
+                {
+                    batchNo            = bn,
+                    dailyTargetQty     = _dailyTarget,
+                    daysInWeek         = _daysInWeek,
+                    minUsabilityPct    = _minUsability,
+                    priorityWarehouses = _priorityWarehouses.ToList(),
+                    scheduledBoxes     = result.ScheduledBoxes,
+                    deferredBoxes      = result.DeferredBoxes,
+                    dropboxBoxes       = result.DropboxBoxes,
+                    scheduledQty       = result.ScheduledQty,
+                    elapsedMs          = (int)sw.Elapsed.TotalMilliseconds,
+                },
+                action: 'X');
+
             _busy = false;
             await LoadScheduleAsync();
         }
@@ -660,6 +681,9 @@ else if (!_busy)
         {
             await Scheduler.ApproveAsync(bn, CurrentUser.Name);
             Snackbar.Add($"Schedule for batch #{bn} approved.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("ProductionSchedule.Approve", $"#{bn}",
+                new { batchNo = bn }, action: 'X');
             _busy = false;
             await LoadScheduleAsync();
         }
@@ -685,6 +709,9 @@ else if (!_busy)
         {
             await Scheduler.DeleteAsync(bn, CurrentUser.Name);
             Snackbar.Add($"Schedule for batch #{bn} deleted.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("ProductionSchedule.Delete", $"#{bn}",
+                new { batchNo = bn }, action: 'X');
             _busy = false;
             await LoadScheduleAsync();
         }

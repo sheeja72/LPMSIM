@@ -1,9 +1,11 @@
 @page "/lpm/div-max"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <PageTitle>Division Max Entry</PageTitle>
 
@@ -268,6 +270,13 @@ else if (_rows.Count > 0)
             foreach (var r in dirty) r.OriginalMaxQty = r.MaxQty;
 
             Snackbar.Add($"Saved {dirty.Count} row(s).", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("DivMax.Save",
+                $"{DateTime.Now:yyyyMMddHHmmss}",
+                new { rowCount = dirty.Count,
+                      stores  = dirty.Select(r => r.StoreID).Distinct().Take(20).ToList(),
+                      divs    = dirty.Select(r => r.DivCode).Distinct().Take(20).ToList() },
+                action: 'X');
         }
         catch (Exception ex)
         {

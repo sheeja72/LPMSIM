@@ -2,6 +2,7 @@
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditor)]
 @using LpmSim.Data.Eom
+@using LpmSim.Data.Auditing
 @using ClosedXML.Excel
 @using System.IO
 @inject IDbContextFactory<LpmDbContext> DbFactory
@@ -9,6 +10,7 @@
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 @inject IJSRuntime JS
 
 <PageTitle>EOM Generate</PageTitle>
@@ -1270,6 +1272,11 @@
             _divStock = new();
             _divStockLoadedForScope = null;
             Snackbar.Add($"Generated: {_preview.Count} rows. Click Approve to save.", Severity.Info);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("EomGenerate.Generate",
+                $"{_country}/{_year}-{_month:D2}",
+                new { country = _country, year = _year, month = _month, rows = _preview.Count },
+                action: 'X');
         }
         catch (Exception ex)
         {
@@ -1322,6 +1329,11 @@
         {
             var count = await Eom.GenerateAsync(_country, _year, _month, CurrentUser.Name);
             Snackbar.Add($"Generated & approved {count} rows for {_country} {_year}/{_month:D2}.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("EomGenerate.Approve",
+                $"{_country}/{_year}-{_month:D2}",
+                new { country = _country, year = _year, month = _month, rowsSaved = count },
+                action: 'X');
             var (rows, last) = await Eom.GetSavedAsync(_country, _year, _month);
             _preview = rows;
             _savedAt = last;

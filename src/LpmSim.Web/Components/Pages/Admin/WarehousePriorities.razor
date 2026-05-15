@@ -2,11 +2,13 @@
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrPlanner)]
 @using LpmSim.Data.LpmSim
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject LpmSimReportService Reports
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 
 <PageTitle>Warehouse Priorities</PageTitle>
 
@@ -194,6 +196,10 @@
         db.LpmWarehousePriorities.Remove(entity);
         await db.SaveChangesAsync();
         Snackbar.Add($"Removed {row.Warehouse} from priority list.", Severity.Info);
+        // 1.14.29 — audit-log this user-initiated action.
+        await ActionLog.LogAsync("WarehousePriorities.Delete", $"{row.Country}/{row.Warehouse}",
+            new { country = row.Country, warehouse = row.Warehouse, priority = row.Priority },
+            action: 'X');
         await ReloadAsync();
     }
 

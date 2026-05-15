@@ -2,12 +2,14 @@
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
 @using LpmSim.Data.LpmSim
+@using LpmSim.Data.Auditing
 @using LpmSim.Core.Entities
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject LpmAdmService AdmSvc
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 
 <PageTitle>ADM — Allocation Distribution Model</PageTitle>
 
@@ -413,6 +415,13 @@ else if (!_busy)
                 $"ADM run #{res.AdmRunNo} — Week Target {res.WeekTargetQty:N0} qty/week · " +
                 $"{res.ScheduledBoxes:N0} boxes scheduled, {res.DeferredBoxes:N0} deferred, in {res.ElapsedMs} ms.",
                 Severity.Success, cfg => cfg.VisibleStateDuration = 8000);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("Adm.Generate", $"#{res.AdmRunNo}",
+                new { admRunNo = res.AdmRunNo, country = _country, runDate = _runDate?.ToString("yyyy-MM-dd"),
+                      numWeeks = _numWeeks, week1TargetPct = _week1TargetPct, brandCapPct = _brandCapPct,
+                      applyVarietyBonus = _applyVarietyBonus,
+                      scheduledBoxes = res.ScheduledBoxes, deferredBoxes = res.DeferredBoxes },
+                action: 'X');
             await LoadExistingAsync();
         }
         catch (Exception ex)
@@ -434,6 +443,9 @@ else if (!_busy)
         try
         {
             await AdmSvc.ApproveAsync(_run.AdmRunNo);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("Adm.Approve", $"#{_run.AdmRunNo}",
+                new { admRunNo = _run.AdmRunNo }, action: 'X');
             await LoadExistingAsync();
             Snackbar.Add("ADM run approved.", Severity.Success);
         }
@@ -455,7 +467,11 @@ else if (!_busy)
         _busy = true; StateHasChanged();
         try
         {
+            var deletedRunNo = _run.AdmRunNo;
             await AdmSvc.DeleteAsync(_run.AdmRunNo);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("Adm.Delete", $"#{deletedRunNo}",
+                new { admRunNo = deletedRunNo }, action: 'X');
             _run = null; _boxes.Clear(); _weekSummary.Clear(); _weekDivSummary.Clear();
             Snackbar.Add("ADM run deleted.", Severity.Info);
         }

@@ -1,9 +1,11 @@
 @page "/admin/volume-groups"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AdminOrPlanner)]
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ISnackbar Snackbar
 @inject IDialogService DialogService
+@inject IActionLogger ActionLog
 
 <PageTitle>Volume Groups</PageTitle>
 
@@ -152,6 +154,10 @@
             db.LpmVolumeGroups.Remove(row);
             await db.SaveChangesAsync();
             Snackbar.Add($"Deleted {g.Country}/{g.GroupCode}.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync("VolumeGroups.Delete", $"{g.Country}/{g.GroupCode}",
+                new { country = g.Country, groupCode = g.GroupCode, groupName = g.GroupName },
+                action: 'X');
             await ReloadAsync();
         }
         catch (Exception ex) { Snackbar.Add($"Delete failed: {ex.Message}", Severity.Error); }

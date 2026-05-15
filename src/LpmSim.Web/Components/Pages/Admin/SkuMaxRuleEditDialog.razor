@@ -1,5 +1,7 @@
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <MudDialog>
     <DialogContent>
@@ -107,6 +109,13 @@
             }
             await db.SaveChangesAsync();
             Snackbar.Add("Saved.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(IsNew ? "SkuMaxRules.Add" : "SkuMaxRules.Edit",
+                $"{Model.Country}/Div{Model.DivCode}/{Model.WHStockFrom}-{Model.WHStockTo}",
+                new { country = Model.Country, divCode = Model.DivCode, groupCode = Model.GroupCode,
+                      whStockFrom = Model.WHStockFrom, whStockTo = Model.WHStockTo,
+                      skuMax = Model.SKUMax, isActive = Model.IsActive },
+                action: 'X');
             MudDialog.Close(DialogResult.Ok(true));
         }
         catch (Exception ex) { Snackbar.Add($"Save failed: {ex.Message}", Severity.Error); }

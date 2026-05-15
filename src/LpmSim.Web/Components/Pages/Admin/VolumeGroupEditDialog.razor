@@ -1,5 +1,7 @@
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <MudDialog>
     <DialogContent>
@@ -81,6 +83,12 @@
             }
             await db.SaveChangesAsync();
             Snackbar.Add("Saved.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(IsNew ? "VolumeGroups.Add" : "VolumeGroups.Edit",
+                $"{Model.Country}/{Model.GroupCode}",
+                new { country = Model.Country, groupCode = Model.GroupCode, groupName = Model.GroupName,
+                      sortOrder = Model.SortOrder, sharePct = Model.SharePct, isActive = Model.IsActive },
+                action: 'X');
             MudDialog.Close(DialogResult.Ok(true));
         }
         catch (Exception ex) { Snackbar.Add($"Save failed: {ex.Message}", Severity.Error); }

@@ -1,6 +1,8 @@
+@using LpmSim.Data.Auditing
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
 
 <MudDialog>
     <DialogContent>
@@ -113,6 +115,11 @@
 
             await db.SaveChangesAsync();
             Snackbar.Add("Saved.", Severity.Success);
+            // 1.14.29 — audit-log this user-initiated action.
+            await ActionLog.LogAsync(IsNew ? "Users.Add" : "Users.Edit", username,
+                new { username, displayName = Model.DisplayName, email = Model.Email,
+                      isActive = Model.IsActive, roles = Model.SelectedRoles.ToList() },
+                action: 'X');
             MudDialog.Close(DialogResult.Ok(true));
         }
         catch (Exception ex)
