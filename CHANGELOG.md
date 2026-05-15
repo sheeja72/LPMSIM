@@ -23,6 +23,64 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.30 — Override RR honors SKU Max ceiling — never over-allocate (2026-05-15)
+
+### Bug
+Override Round-Robin (Phase 1b / Phase 2b — fires when a box's post-normal usability hits the `Box %` threshold, default 50) was bypassing **both** the SKU Max ceiling AND the EOM Merch Need ceiling. That let a box top up to 100% by pushing units into stores that had already hit their per-(Store, Item) SKU Max cap.
+
+Concrete case caught on prod after 1.14.27:
+- `WGS10273MUS-S` × `BFL-CIRC` — `SKUMax = 10` in `LPM_SimItemSkuMax`
+- SIM Output for that pair: **151 pcs allocated** (over the cap by ~15×)
+- Same item at `BFL-YASM`: 91 pcs allocated
+- Other items at `BFL-CIRC`: 89 pcs etc.
+
+1.14.27 added a SKUMax = 0 *exclusion* check at the top of the per-store loop, but left the SKU Max **ceiling** bypass intact. That fixed the "fully excluded store gets allocations" bug but not the "over-allocation" bug. This release fixes the ceiling.
+
+### Root cause
+In `AllocateLineRoundRobin`, when called with `bypassAllCaps = true`, the entire cap block was gated by `if (!bypassAllCaps)` — so the `skuHeadroom <= 0 → continue` guard never ran for Override RR. Both ceilings were skipped together.
+
+The original intent of Override RR was to bypass only the **EOM Merch Need (Week)** ceiling — the weekly demand cap that prevents partial boxes from filling toward 100% when stores are willing to take more but the weekly cap blocked them. SKU Max is a per-(Store, Item) *capacity* — a hard limit on how much a store can hold — that should always apply, in every phase.
+
+### Fix
+The SKU Max headroom check is moved **above** the `bypassAllCaps` branch so it always runs:
+
+```csharp
+// 1.14.30 — SKU Max CEILING is now honoured in both Normal and
+// Override paths. Override RR still bypasses EOM Merch Need (Week).
+var soh         = sohMap.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+var cumItem     = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+var skuHeadroom = skuMaxExcl - soh - cumItem;
+if (skuHeadroom <= 0) continue;
+
+if (!bypassAllCaps)
+{
+    // Normal mode also checks EOM Merch Need (Week).
+    var cumDiv      = allocStoreDiv .GetValueOrDefault((s.StoreID, divCode), 0);
+    var divHeadroom = s.MerchNeedWeek - cumDiv;
+    if (divHeadroom <= 0) continue;
+}
+```
+
+EOM Merch Need stays inside the `bypassAllCaps` branch — Override RR can still ignore the weekly demand ceiling, which is its purpose.
+
+### Behaviour change
+- **No allocation will ever exceed `SKUMax − SOH − cumItem` for any (Store, Item)**, in any phase (P1a, P1b RR, P2a, P2b RR).
+- Boxes whose remaining qty after Phase 1a/2a normal can't fit anywhere because every eligible store has hit SKU Max will stay partial. Box usability won't reach 100% in those cases — the Allocation Gap diagnostic will surface them with `TopReason = CAP` (taxonomy unchanged).
+- The Box % override threshold's effect is reduced for items with tight SKU Max — it can still push past the weekly Merch Need cap, but not past per-store SKU capacity.
+
+### In-flight batches
+Existing batches generated before 1.14.30 (including the one with the 151/91 over-allocations) still have the wrong Output rows. **Re-Generate after 1.14.30 deploys** to get corrected allocations.
+
+### Notes
+- No DB migration. Pure code change in `LpmSimGenerator.cs` (~10 lines: moved the headroom check + comment block).
+- 1.14.27's SKUMax = 0 exclusion check (added above this) is preserved unchanged.
+- Allocation Gap diagnostic taxonomy unchanged — boxes now-correctly-capped at SKU Max will show as `CAP`.
+
+### Separate issue (not in this release)
+The screenshot also showed `SqlException: Execution Timeout Expired` in `LpmSimReportService.GetBatchAggregatesAsync`. That's a perf concern on the result-preview readiness query — flagged for follow-up (likely 1.14.31), needs a covering index or query rewrite. Not related to the SKU Max bug above.
+
+---
+
 ## 1.14.29 — Audit log: 27 button-click handlers instrumented with Action='X' (2026-05-15)
 
 ### Background
