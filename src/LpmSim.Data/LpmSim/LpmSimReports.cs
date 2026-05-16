@@ -89,11 +89,12 @@ public class DivisionSummaryRow
     /// <summary>Σ Merch Need (Week) across stores for this division.</summary>
     public long   MerchNeedWeek { get; set; }
 
-    /// <summary>Σ source Box Qty (whboxitems.Qty) across the qualifying boxes
-    /// that contributed any items in this division. Distinct on
-    /// (BoxNo, Itemcode) so a box-item allocated to multiple stores still
-    /// counts once. Same Min/Max Box Usability % filter as SimQty so the two
-    /// columns line up. (1.14.33)</summary>
+    /// <summary>Σ full warehouse Box Qty for items in this division — same
+    /// semantics as the Summary (Kind × Warehouse) tab's "Box Qty". Sources
+    /// directly from racks.dbo.whboxitems for every item in every qualifying
+    /// box, including "phantom" items in those boxes that got 0 allocation.
+    /// Same Min/Max Box Usability % filter as SimQty so the two columns
+    /// share the same denominator universe. (1.14.34)</summary>
     public long   BoxQty        { get; set; }
 
     public long   SimQty        { get; set; }
@@ -639,19 +640,28 @@ QualifyingBoxes AS (
 ),
 -- DivCode resolution mirrors the Store×Div SQL: LocStock first (matches engine)
 -- with upc_subclass × subclassmaster × Division as fallback for items not in LocStock.
-BatchItems AS (
-    SELECT DISTINCT Itemcode FROM dbo.LPMSIM_Output WHERE LPMBatchNo = @batchNo
+--
+-- 1.14.34 — Widened from `DISTINCT items in LPMSIM_Output` to `DISTINCT
+-- items in every qualifying box`. This is needed so Box Qty (whboxitems-
+-- sourced) can roll up phantom items in the box that got 0 allocation
+-- (capped, filtered, or never picked) into their proper division, matching
+-- the Summary tab Box Qty semantics. SimAgg still INNER JOINs on
+-- ItemDiv so its totals are unaffected (allocated items are a subset of box items).
+BoxItems AS (
+    SELECT DISTINCT w.itemcode AS Itemcode
+      FROM racks.dbo.whboxitems w
+      INNER JOIN QualifyingBoxes qb ON qb.BoxNo = w.BoxNo
 ),
 ItemDivLs AS (
     SELECT bi.Itemcode, DivCode = MIN(ls.DivCode)
-      FROM BatchItems bi
+      FROM BoxItems bi
       INNER JOIN racks.dbo.LPM_LocStock ls
               ON ls.Itemcode = bi.Itemcode AND ls.Country = @country AND ls.DivCode IS NOT NULL
      GROUP BY bi.Itemcode
 ),
 ItemDivUpc AS (
     SELECT bi.Itemcode, DivCode = MIN(d.DivCode)
-      FROM BatchItems bi
+      FROM BoxItems bi
       INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = bi.Itemcode
       INNER JOIN Datareporting.dbo.subclassmaster  sm ON sm.MH4ID  = u.MH4ID
       INNER JOIN LPMSIM.dbo.Division               d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
@@ -674,22 +684,23 @@ SimAgg AS (
      WHERE s.LPMBatchNo = @batchNo
      GROUP BY id.DivCode
 ),
--- 1.14.33: Σ source Box Qty per division, on the SAME QualifyingBoxes
--- filter as SimAgg so the two columns line up under the Min/Max Box
--- Usability % filter. Inner SELECT DISTINCT collapses the (BoxNo, Itemcode)
--- duplicates that arise when one box-item is split across multiple stores —
--- otherwise SUM would multiply BoxItemQty by the number of receiving stores.
+-- 1.14.34: Σ full warehouse Box Qty per division — matches the Summary
+-- (per Kind × Warehouse) tab Box Qty semantics. Sources directly from
+-- racks.dbo.whboxitems for every item in every qualifying box, NOT just
+-- the items that received an allocation. Includes phantom items in the
+-- box that got 0 allocation (every store capped, season-filtered, or just
+-- not picked) — these are real warehouse stock sitting in the contributing
+-- boxes, so they belong in the rollup.
+--
+-- Items in whboxitems with no DivCode mapping (not in LocStock for this
+-- country and not resolvable via upc_subclass × subclassmaster × Division)
+-- get dropped — same behaviour as SimAgg's INNER JOIN ItemDiv.
 BoxQtyAgg AS (
     SELECT id.DivCode,
-           BoxQty = SUM(CAST(x.BoxItemQty AS bigint))
-      FROM (
-            SELECT DISTINCT s.BoxNo, s.Itemcode,
-                   BoxItemQty = ISNULL(s.BoxItemQty, 0)
-              FROM dbo.LPMSIM_Output s
-              INNER JOIN QualifyingBoxes qb ON qb.BoxNo = s.BoxNo
-             WHERE s.LPMBatchNo = @batchNo
-           ) x
-      INNER JOIN ItemDiv id ON id.Itemcode = x.Itemcode
+           BoxQty = SUM(CAST(w.Qty AS bigint))
+      FROM racks.dbo.whboxitems w
+      INNER JOIN QualifyingBoxes qb ON qb.BoxNo    = w.BoxNo
+      INNER JOIN ItemDiv id          ON id.Itemcode = w.itemcode
      GROUP BY id.DivCode
 ),
 EomAgg AS (

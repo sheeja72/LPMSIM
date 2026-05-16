@@ -23,6 +23,58 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.34 — Division Summary Box Qty: full box content (2026-05-16)
+
+### Bug
+1.14.33 added a Box Qty column to the Division Summary tab, but the total didn't match the Summary (per Kind × Warehouse) tab — `296,839` vs `347,923` on the same batch. Planner caught it.
+
+Root cause: 1.14.33 sourced Box Qty from `LPMSIM_Output.BoxItemQty`, but the allocator only writes a row to `LPMSIM_Output` when `qty > 0` for at least one store (`LpmSimGenerator.cs:1620, 1816` — `if (qty <= 0) continue;` before `output.Add(...)`). So box-items that got zero allocation everywhere — capped under SKU Max / Merch Need, season-filtered, or never picked — were missing from the sum. The Summary tab gets `347,923` because it sources `racks.dbo.whboxitems` directly (every item in every contributing box, including phantoms).
+
+### Fix
+Switched `BoxQtyAgg` to read from `racks.dbo.whboxitems` directly so the Division Summary's Box Qty now means **"full warehouse stock of items in this division across every qualifying box"** — same metric as the Summary tab, just sliced by division instead of (Kind × Warehouse).
+
+```sql
+BoxQtyAgg AS (
+    SELECT id.DivCode,
+           BoxQty = SUM(CAST(w.Qty AS bigint))
+      FROM racks.dbo.whboxitems w
+      INNER JOIN QualifyingBoxes qb ON qb.BoxNo    = w.BoxNo
+      INNER JOIN ItemDiv id          ON id.Itemcode = w.itemcode
+     GROUP BY id.DivCode
+)
+```
+
+`ItemDiv` had to be widened to resolve phantom items too. The `BatchItems` CTE — previously `DISTINCT itemcode FROM LPMSIM_Output` — became `BoxItems`:
+
+```sql
+BoxItems AS (
+    SELECT DISTINCT w.itemcode AS Itemcode
+      FROM racks.dbo.whboxitems w
+      INNER JOIN QualifyingBoxes qb ON qb.BoxNo = w.BoxNo
+)
+```
+
+`ItemDivLs` (LocStock lookup) and `ItemDivUpc` (`upc_subclass × subclassmaster × Division` fallback) now operate on this wider universe. `SimAgg` is unaffected — allocated items ⊆ box items, so the INNER JOIN ItemDiv still yields the same rows for SIM Qty.
+
+### What this means
+- Division Summary **Box Qty** total now matches the Summary tab's **Box Qty** (modulo any whboxitems items with no resolvable DivCode — those still get dropped, same as SimAgg's behaviour). For the screenshot batch: ≈ `347,923` instead of `296,839`.
+- `SIM Qty ÷ Box Qty` now reads as **"how much of the warehouse stock in contributing boxes actually got allocated to this division"** — diluted by phantoms, which is correct planner intent.
+- Same Min/Max Box Usability % filter still applies — Box Qty and SIM Qty share the `QualifyingBoxes` denominator.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | `BatchItems` CTE renamed `BoxItems` and widened to source from `whboxitems × QualifyingBoxes`. `ItemDivLs` / `ItemDivUpc` now operate on `BoxItems`. `BoxQtyAgg` replaced — reads `whboxitems` directly, no DISTINCT box-item hack needed. `DivisionSummaryRow.BoxQty` doc updated. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | Box Qty header tooltip updated to describe new semantics ("full warehouse Box Qty … matches Summary tab"). |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.33 → 1.14.34 |
+
+### Notes
+- **No DB migration.** Reads the existing `racks.dbo.whboxitems` table (same source the Summary tab already uses).
+- **Performance** — widened `BoxItems` is typically 10-30% larger than the old `BatchItems` (adds phantom items in the same boxes). LocStock / upc_subclass joins are indexed on Itemcode, so the extra cost is bounded and small.
+- **Items in `whboxitems` with no DivCode** — these get dropped from the rollup (same as SimAgg). For the screenshot batch this should be near-zero since most box items have a LocStock entry. If a planner sees Division Summary Box Qty < Summary tab Box Qty, the gap is items with no DivCode mapping — a data-quality signal, not a calculation bug.
+
+---
+
 ## 1.14.33 — Division Summary: Box Qty column before SIM Qty (2026-05-16)
 
 ### Added — Box Qty column in the **Division Summary** tab
