@@ -37,6 +37,15 @@
 SET XACT_ABORT ON;
 GO
 
+-- Why EXEC() wraps the ToFillQty ALTERs: SQL Server parses every column
+-- reference in a batch BEFORE executing any statement in it. If we wrote
+-- the ALTER TABLE ADD ToFillQty AS (... SOH ...) inline, the parser would
+-- fail with "Invalid column name 'SOH'" because the preceding ALTER TABLE
+-- ADD SOH hasn't executed yet at parse time. Wrapping the second ALTER
+-- in EXEC() defers parsing of the inner string until execution time, by
+-- which point SOH exists. (Same pattern as DDL that adds + references a
+-- column in the same idempotent block.)
+
 -- ────────────────────────────────────────────────────────────────────────────
 -- 1) Main table — dbo.LPM_SimItemSkuMax
 -- ────────────────────────────────────────────────────────────────────────────
@@ -55,14 +64,19 @@ BEGIN
     BEGIN
         -- Computed PERSISTED. Inner CASE clamps negative SOH at 0; outer
         -- CASE floors the result at 0 so overstocked stores read as 0.
-        ALTER TABLE dbo.LPM_SimItemSkuMax
-            ADD ToFillQty AS (
-                CASE
-                    WHEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END > 0
-                    THEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END
-                    ELSE 0
-                END
-            ) PERSISTED;
+        -- Wrapped in EXEC() so the SOH reference is parsed at execute
+        -- time (after the ALTER ADD SOH above has run), not at batch
+        -- parse time.
+        EXEC('
+            ALTER TABLE dbo.LPM_SimItemSkuMax
+                ADD ToFillQty AS (
+                    CASE
+                        WHEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END > 0
+                        THEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END
+                        ELSE 0
+                    END
+                ) PERSISTED;
+        ');
         PRINT 'Added LPM_SimItemSkuMax.ToFillQty (computed PERSISTED)';
     END
     ELSE
@@ -88,14 +102,16 @@ BEGIN
 
     IF COL_LENGTH('dbo.LPM_SimItemSkuMax_Backup', 'ToFillQty') IS NULL
     BEGIN
-        ALTER TABLE dbo.LPM_SimItemSkuMax_Backup
-            ADD ToFillQty AS (
-                CASE
-                    WHEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END > 0
-                    THEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END
-                    ELSE 0
-                END
-            ) PERSISTED;
+        EXEC('
+            ALTER TABLE dbo.LPM_SimItemSkuMax_Backup
+                ADD ToFillQty AS (
+                    CASE
+                        WHEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END > 0
+                        THEN SKUMax - CASE WHEN SOH > 0 THEN SOH ELSE 0 END
+                        ELSE 0
+                    END
+                ) PERSISTED;
+        ');
         PRINT 'Added LPM_SimItemSkuMax_Backup.ToFillQty (computed PERSISTED)';
     END
     ELSE
