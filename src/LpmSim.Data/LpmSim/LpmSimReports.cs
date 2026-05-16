@@ -620,87 +620,129 @@ SELECT @batchNo                  AS LPMBatchNo,
         var b = await db.LpmSimBatches.AsNoTracking().FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
         if (b is null) return new();
 
+        // 1.14.36 — Perf refactor. Previously this method used 8 nested
+        // CTEs that the optimizer kept inlining as views, causing
+        // racks.dbo.whboxitems to be scanned 2–3× per query (once via the
+        // BoxUsability correlated subquery, once via BoxItems, once via
+        // BoxQtyAgg). After adding the Box Qty column in 1.14.34, the
+        // Division Summary tab was slow to load.
+        //
+        // Fix: materialize the heavy joins ONCE into temp tables with
+        // clustered indexes, then run the rollup against the temps. Same
+        // pattern that fixed Rule 5 (1.14.10) and SKU Max Excluded audit
+        // (1.14.32).
+        //
+        // Temps created in this command are session-scoped — they live for
+        // the duration of this SqlCommand and get dropped at the end. SET
+        // NOCOUNT ON suppresses row-count messages so the only result set
+        // the SqlDataReader sees is the final SELECT.
         const string sql = @"
-WITH BoxUsability AS (
-    -- Per-box usability % = SIM Qty / Box Qty × 100, used by the optional
-    -- Min/Max Box Usability % filter so this report agrees with the others.
-    SELECT s.BoxNo,
-           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM racks.dbo.whboxitems w WHERE w.BoxNo = s.BoxNo), 0),
-           SimQty = SUM(CAST(s.Qty AS bigint))
-      FROM dbo.LPMSIM_Output s
-     WHERE s.LPMBatchNo = @batchNo
-     GROUP BY s.BoxNo
-),
-QualifyingBoxes AS (
-    SELECT BoxNo
-      FROM BoxUsability
-     WHERE BoxQty > 0
-       AND (@minPct IS NULL OR ROUND(CAST(SimQty AS decimal(20,4)) * 100 / BoxQty, 1) >= @minPct)
-       AND (@maxPct IS NULL OR ROUND(CAST(SimQty AS decimal(20,4)) * 100 / BoxQty, 1) <= @maxPct)
-),
--- DivCode resolution mirrors the Store×Div SQL: LocStock first (matches engine)
--- with upc_subclass × subclassmaster × Division as fallback for items not in LocStock.
+SET NOCOUNT ON;
+
+IF OBJECT_ID('tempdb..#BoxUsability') IS NOT NULL DROP TABLE #BoxUsability;
+IF OBJECT_ID('tempdb..#QB')           IS NOT NULL DROP TABLE #QB;
+IF OBJECT_ID('tempdb..#BoxRows')      IS NOT NULL DROP TABLE #BoxRows;
+IF OBJECT_ID('tempdb..#ItemDivLs')    IS NOT NULL DROP TABLE #ItemDivLs;
+IF OBJECT_ID('tempdb..#ItemDivUpc')   IS NOT NULL DROP TABLE #ItemDivUpc;
+IF OBJECT_ID('tempdb..#ItemDiv')      IS NOT NULL DROP TABLE #ItemDiv;
+
+-- 1) Per-box usability % = SIM Qty / Box Qty × 100, used by the optional
+-- Min/Max Box Usability % filter so this report agrees with the others.
+-- The correlated subquery to whboxitems happens ONCE here (was running
+-- repeatedly when this was a CTE).
+SELECT s.BoxNo,
+       BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint))
+                          FROM racks.dbo.whboxitems w
+                         WHERE w.BoxNo = s.BoxNo), 0),
+       SimQty = SUM(CAST(s.Qty AS bigint))
+  INTO #BoxUsability
+  FROM dbo.LPMSIM_Output s
+ WHERE s.LPMBatchNo = @batchNo
+ GROUP BY s.BoxNo;
+
+-- 2) Apply the Min/Max % filter and persist the qualifying box list.
+-- Clustered index on BoxNo so downstream INNER JOINs on BoxNo are seeks.
+SELECT BoxNo
+  INTO #QB
+  FROM #BoxUsability
+ WHERE BoxQty > 0
+   AND (@minPct IS NULL OR ROUND(CAST(SimQty AS decimal(20,4)) * 100 / BoxQty, 1) >= @minPct)
+   AND (@maxPct IS NULL OR ROUND(CAST(SimQty AS decimal(20,4)) * 100 / BoxQty, 1) <= @maxPct);
+
+CREATE CLUSTERED INDEX IX_QB ON #QB (BoxNo);
+
+-- 3) THE BIG SCAN: whboxitems × #QB happens exactly ONCE here. Everything
+-- downstream (BoxQtyAgg, BoxItems via DISTINCT, ItemDiv lookups) reads
+-- from this temp table.
 --
--- 1.14.34 — Widened from `DISTINCT items in LPMSIM_Output` to `DISTINCT
--- items in every qualifying box`. This is needed so Box Qty (whboxitems-
--- sourced) can roll up phantom items in the box that got 0 allocation
--- (capped, filtered, or never picked) into their proper division, matching
--- the Summary tab Box Qty semantics. SimAgg still INNER JOINs on
--- ItemDiv so its totals are unaffected (allocated items are a subset of box items).
-BoxItems AS (
-    SELECT DISTINCT w.itemcode AS Itemcode
-      FROM racks.dbo.whboxitems w
-      INNER JOIN QualifyingBoxes qb ON qb.BoxNo = w.BoxNo
-),
-ItemDivLs AS (
-    SELECT bi.Itemcode, DivCode = MIN(ls.DivCode)
-      FROM BoxItems bi
-      INNER JOIN racks.dbo.LPM_LocStock ls
-              ON ls.Itemcode = bi.Itemcode AND ls.Country = @country AND ls.DivCode IS NOT NULL
-     GROUP BY bi.Itemcode
-),
-ItemDivUpc AS (
-    SELECT bi.Itemcode, DivCode = MIN(d.DivCode)
-      FROM BoxItems bi
-      INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = bi.Itemcode
-      INNER JOIN Datareporting.dbo.subclassmaster  sm ON sm.MH4ID  = u.MH4ID
-      INNER JOIN LPMSIM.dbo.Division               d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
-     WHERE bi.Itemcode NOT IN (SELECT Itemcode FROM ItemDivLs)
-     GROUP BY bi.Itemcode
-),
-ItemDiv AS (
-    SELECT Itemcode, DivCode FROM ItemDivLs
-    UNION ALL
-    SELECT Itemcode, DivCode FROM ItemDivUpc
-),
-SimAgg AS (
+-- 1.14.34 widened the item-universe from `LPMSIM_Output items` to `every
+-- item in every qualifying box` so phantom items (in boxes but not
+-- allocated) roll up into Box Qty correctly. That widening is what made
+-- the CTE version slow.
+--
+-- Clustered on itemcode so the GROUP BY DivCode (via ItemDiv join) is a
+-- seek-based aggregation, not a hash.
+SELECT w.BoxNo, w.itemcode, Qty = CAST(ISNULL(w.Qty, 0) AS bigint)
+  INTO #BoxRows
+  FROM racks.dbo.whboxitems w
+  INNER JOIN #QB qb ON qb.BoxNo = w.BoxNo;
+
+CREATE CLUSTERED INDEX IX_BR ON #BoxRows (itemcode);
+
+-- 4) Item → DivCode resolution. Mirrors the Store×Div SQL: LocStock first
+-- (matches the allocator), upc_subclass × subclassmaster × Division as
+-- fallback for items not in LocStock.
+--
+-- Sourced from DISTINCT itemcodes in #BoxRows (was BoxItems CTE) so
+-- phantom items get resolved too — necessary for the 1.14.34 Box Qty
+-- semantics.
+SELECT bi.itemcode, DivCode = MIN(ls.DivCode)
+  INTO #ItemDivLs
+  FROM (SELECT DISTINCT itemcode FROM #BoxRows) bi
+  INNER JOIN racks.dbo.LPM_LocStock ls
+          ON ls.Itemcode = bi.itemcode
+         AND ls.Country  = @country
+         AND ls.DivCode  IS NOT NULL
+ GROUP BY bi.itemcode;
+
+CREATE CLUSTERED INDEX IX_IDL ON #ItemDivLs (itemcode);
+
+SELECT bi.itemcode, DivCode = MIN(d.DivCode)
+  INTO #ItemDivUpc
+  FROM (SELECT DISTINCT br.itemcode
+          FROM #BoxRows br
+         WHERE br.itemcode NOT IN (SELECT itemcode FROM #ItemDivLs)) bi
+  INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = bi.itemcode
+  INNER JOIN Datareporting.dbo.subclassmaster  sm ON sm.MH4ID  = u.MH4ID
+  INNER JOIN LPMSIM.dbo.Division               d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+ GROUP BY bi.itemcode;
+
+SELECT itemcode, DivCode INTO #ItemDiv FROM #ItemDivLs
+UNION ALL
+SELECT itemcode, DivCode FROM #ItemDivUpc;
+
+CREATE CLUSTERED INDEX IX_ID ON #ItemDiv (itemcode);
+
+-- 5) Final rollup. Every CTE below reads from indexed temp tables — no
+-- more re-scans of whboxitems / LocStock / upc_subclass.
+WITH SimAgg AS (
     SELECT id.DivCode,
            SimQty      = SUM(CAST(s.Qty AS bigint)),
            RrQty       = SUM(CASE WHEN s.IsRoundRobin = 1 THEN CAST(s.Qty AS bigint) ELSE 0 END),
            OverrideQty = SUM(CASE WHEN s.IsOverride   = 1 THEN CAST(s.Qty AS bigint) ELSE 0 END)
       FROM dbo.LPMSIM_Output s
-      INNER JOIN ItemDiv id        ON id.Itemcode = s.Itemcode
-      INNER JOIN QualifyingBoxes qb ON qb.BoxNo   = s.BoxNo
+      INNER JOIN #ItemDiv id ON id.itemcode = s.Itemcode
+      INNER JOIN #QB qb      ON qb.BoxNo    = s.BoxNo
      WHERE s.LPMBatchNo = @batchNo
      GROUP BY id.DivCode
 ),
--- 1.14.34: Σ full warehouse Box Qty per division — matches the Summary
--- (per Kind × Warehouse) tab Box Qty semantics. Sources directly from
--- racks.dbo.whboxitems for every item in every qualifying box, NOT just
--- the items that received an allocation. Includes phantom items in the
--- box that got 0 allocation (every store capped, season-filtered, or just
--- not picked) — these are real warehouse stock sitting in the contributing
--- boxes, so they belong in the rollup.
---
--- Items in whboxitems with no DivCode mapping (not in LocStock for this
--- country and not resolvable via upc_subclass × subclassmaster × Division)
--- get dropped — same behaviour as SimAgg's INNER JOIN ItemDiv.
 BoxQtyAgg AS (
+    -- 1.14.34 semantics: Σ full whboxitems.Qty for every item in every
+    -- qualifying box, by division. Includes phantom items not allocated.
     SELECT id.DivCode,
-           BoxQty = SUM(CAST(w.Qty AS bigint))
-      FROM racks.dbo.whboxitems w
-      INNER JOIN QualifyingBoxes qb ON qb.BoxNo    = w.BoxNo
-      INNER JOIN ItemDiv id          ON id.Itemcode = w.itemcode
+           BoxQty = SUM(br.Qty)
+      FROM #BoxRows br
+      INNER JOIN #ItemDiv id ON id.itemcode = br.itemcode
      GROUP BY id.DivCode
 ),
 EomAgg AS (
@@ -746,7 +788,11 @@ SELECT @batchNo                  AS LPMBatchNo,
   LEFT JOIN EomAgg eo        ON eo.DivCode  = a.DivCode
   LEFT JOIN SohAgg soh       ON soh.DivCode = a.DivCode
   LEFT JOIN BoxQtyAgg bq     ON bq.DivCode  = a.DivCode
- ORDER BY div.Division, a.DivCode;";
+ ORDER BY div.Division, a.DivCode;
+
+-- Cleanup. Tempdb auto-cleans on session end too, but explicit DROP
+-- keeps the session footprint tight when the same connection is reused.
+DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
 
         return await ExecAsync(db, sql, ReadDivisionSummary, ct, new Dictionary<string, object>
         {

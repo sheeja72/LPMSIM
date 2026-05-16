@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.35</Version>
-    <AssemblyVersion>1.14.35.0</AssemblyVersion>
-    <FileVersion>1.14.35.0</FileVersion>
-    <InformationalVersion>1.14.35 (LPM_SimItemSkuMax: SOH + ToFillQty)</InformationalVersion>
+    <Version>1.14.36</Version>
+    <AssemblyVersion>1.14.36.0</AssemblyVersion>
+    <FileVersion>1.14.36.0</FileVersion>
+    <InformationalVersion>1.14.36 (Division Summary perf: temp tables vs CTE re-scans)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

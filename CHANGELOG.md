@@ -23,6 +23,64 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.36 — Division Summary perf: temp tables vs CTE re-scans (2026-05-16)
+
+### Bug
+After 1.14.34 widened the Box Qty rollup to source from `racks.dbo.whboxitems` directly, the Division Summary tab became slow to load. Planner reported the lag.
+
+### Root cause
+`GetDivisionSummaryAsync` was built as a chain of 8 inlined CTEs. SQL Server expands CTEs as views — each reference re-evaluates the underlying SQL. After 1.14.34, the reference graph looked like:
+
+```
+whboxitems (10M+ rows)
+   ├── BoxUsability      (per-box correlated subquery — 1 scan)
+   ├── BoxItems          (× QualifyingBoxes — 1 scan)
+   └── BoxQtyAgg         (× QualifyingBoxes × ItemDiv — 1 scan)
+
+QualifyingBoxes ← used 3× (BoxItems, SimAgg, BoxQtyAgg)
+BoxItems        ← used 2× (ItemDivLs, ItemDivUpc) → cascaded into 4 effective uses
+ItemDiv         ← used 2× (SimAgg, BoxQtyAgg)
+```
+
+The optimizer couldn't always spool these — particularly `whboxitems × QualifyingBoxes` was being re-evaluated 2–3 times per query. On batches with millions of warehouse box rows this added 30+ seconds to every tab load.
+
+### Fix
+Convert the CTE chain to **materialized temp tables with clustered indexes** — same pattern that fixed Rule 5 (1.14.10) and SKU Max Excluded audit (1.14.32).
+
+```
+#BoxUsability  ← per-box SimQty + BoxQty                  (single pass)
+#QB            ← qualifying boxes after Min/Max % filter   clustered (BoxNo)
+#BoxRows       ← whboxitems × #QB ONCE                     clustered (itemcode)
+#ItemDivLs     ← LocStock lookup                           clustered (itemcode)
+#ItemDivUpc    ← upc_subclass fallback for unresolved
+#ItemDiv       ← UNION ALL of both                         clustered (itemcode)
+```
+
+Then the final rollup runs with all CTEs reading from indexed temp tables. The expensive `whboxitems × QB` join happens exactly **once** in `#BoxRows`, and the GROUP BY DivCode in `BoxQtyAgg` becomes a seek-based aggregate via the `#ItemDiv` clustered index.
+
+### Expected speedup
+**5–20×** depending on batch size and how aggressively the optimizer was inlining before. On a typical UAE batch (≈15k qualifying boxes), Division Summary tab load should drop from 20–40s back to 1–3s.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | `GetDivisionSummaryAsync` SQL rewritten: 8-CTE chain → 6 temp tables + clustered indexes + final rollup CTEs reading from temps. Output rows / columns / semantics **unchanged** — same 10 columns, same totals. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.35 → 1.14.36 |
+
+### Semantic correctness
+- **Same output shape** — `DivisionSummaryRow` unchanged. `ReadDivisionSummary` unchanged.
+- **Same Box Qty semantics** — `#BoxRows` is the same `whboxitems × QualifyingBoxes` join, just materialized once. `BoxQtyAgg` GROUPs by `DivCode` exactly like before.
+- **Same SIM Qty math** — `SimAgg` still INNER JOINs `LPMSIM_Output × #ItemDiv × #QB`. Allocated items are a subset of box items so the same rows resolve.
+- **Same filter behaviour** — Min/Max Box Usability % still drives `#QB`.
+
+### Notes
+- **No DB migration.** Reads existing tables.
+- **No client change.** Razor template / DTO unchanged.
+- **Tempdb pressure** — `#BoxRows` size = qty rows in `whboxitems` for qualifying boxes. Typically 100k–500k rows × 3 columns = a few MB. Negligible.
+- **`ExecAsync` compatibility** — temp tables created with `SELECT INTO` are session-scoped and live for the duration of the SqlCommand. `SET NOCOUNT ON` suppresses row-count messages so the SqlDataReader sees only the final SELECT's result set. Explicit `DROP TABLE` at the end keeps the session footprint tight if the connection is reused.
+
+---
+
 ## 1.14.35 — LPM_SimItemSkuMax: SOH + ToFillQty (2026-05-16)
 
 ### Added — 2 new columns on `dbo.LPM_SimItemSkuMax` (migration 049)
