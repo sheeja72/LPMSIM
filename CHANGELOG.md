@@ -23,6 +23,39 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.32 — SKU Max Excluded: DivisionName + Brand + GroupCode columns (2026-05-15)
+
+### Added — 3 new columns on `dbo.LPM_SimItemSkuMaxExcluded` (migration 048)
+| Column | Type | Source |
+|---|---|---|
+| `DivisionName` | `varchar(80) NULL` | `dbo.Division.Division` joined on `DivCode` |
+| `Brand` | `varchar(80) NULL` | `usa.dbo.upcbarcodes.Vendor` joined on `ItemCode` (TOP 1 per item) |
+| `GroupCode` | `varchar(50) NULL` | `Hodata.dbo.ItemMaster.GroupCode` joined on `ItemCode` (TOP 1 per item) |
+
+All three columns are NULL-able and additive — existing audit rows stay NULL. The next `Build SKU Max` run repopulates everything from scratch (existing `DELETE FROM ... WHERE Country = @c AND Year1 = @y AND Month1 = @m` + `INSERT` pattern), so re-Building the period gets you the new columns populated for every row.
+
+### Performance
+`usa.dbo.upcbarcodes` has ~18M rows. The naive approach of LEFT JOINing it directly into each of the 5 audit INSERTs would scan 18M rows × 5 = 90M reads. Avoided by pre-materializing once per build:
+
+1. **`#AuditItems`** — `DISTINCT ItemCode` across all 4 match tables (`#ExcludeMatches`, `#PriceCapMatches`, `#DeactMatches`, `#DeptDeactMatches`). Typically a few thousand rows.
+2. **`#BrandLookup`** — `usa.dbo.upcbarcodes JOIN #AuditItems` filtered to items we actually need, with `ROW_NUMBER() OVER (PARTITION BY itemcode ORDER BY Vendor)` to pick a deterministic Vendor per item.
+3. **`#GrpLookup`** — `Hodata.dbo.ItemMaster JOIN #AuditItems`, same TOP-1 pattern.
+4. **`#DivLookup`** — `dbo.Division` is tiny, scanned once.
+
+All four temps get clustered indexes on the join key. Each of the 4 main-phase audit INSERTs then LEFT JOINs to the temps (small + indexed → near-zero overhead).
+
+Mirrors the 1.14.10 pattern that fixed Rule 5's 14-minute regression.
+
+### Pre-Generate sync (different code path)
+The `DeactivationsSync` INSERT at `LpmSimGenerator.cs:586` is a separate flow that runs before SIM Generate, outside the main BuildSkuMax transaction. It doesn't have access to the temp tables above, so it uses inline `OUTER APPLY` with `TOP 1` for the Brand and GroupCode lookups. Row count is typically small (only Store-Div pairs deactivated after the build with `SKUMax > 0` left over), so OUTER APPLY is fine here.
+
+### Notes
+- **Apply migration 048 to prod LPMSIM DB before the next Build SKU Max.** Without it, the new `INSERT INTO ... DivisionName/Brand/GroupCode` will fail with `Msg 207 — Invalid column name`. Existing builds before 048 + 1.14.32 deploy are unaffected.
+- **`dbo.Division`** — the property is `.Name` in C# but the SQL column is `Division` (verified via DbContext mapping `e.Property(x => x.Name).HasColumnName("Division")`). The SQL uses the column name directly.
+- Forward-fill only — historical audit rows (pre-1.14.32) stay NULL on the three new columns unless that period gets re-Built.
+
+---
+
 ## 1.14.31 — Negative SOH / divSoh clamped at 0 in cap math (2026-05-15)
 
 ### Bug

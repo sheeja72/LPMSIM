@@ -582,21 +582,49 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // m.SKUMax > 0 also ensures we only audit + zero rows that
             // ACTUALLY change — re-running is a no-op once everything is
             // already zero.
+            // 1.14.32 — also populate DivisionName / Brand / GroupCode here
+            // so the post-build sync audits look the same as the main-phase
+            // audits. Lookups are inline because the sync's row count is
+            // typically small (only Store-Div pairs that were deactivated
+            // AFTER the Build, with SKUMax > 0 left over). OUTER APPLY
+            // with TOP 1 keeps multiplicities in upcbarcodes / ItemMaster
+            // from inflating the result.
             sync.CommandText = @"
                 INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                        (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
-                        PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                        PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS,
+                        DivisionName, Brand, GroupCode)
                 SELECT m.Country, m.Year1, m.Month1, m.StoreID, m.ItemCode, m.Season, m.DivCode,
                        m.SKUMax,
                        'dbo.LPM_StoreDivAccess',
                        'Store-Div deactivated post-build (Pre-Generate sync)',
                        CONCAT('Div=', m.DivCode),
-                       SYSDATETIME()
+                       SYSDATETIME(),
+                       (SELECT CAST(d.Division AS varchar(80))
+                          FROM dbo.Division d WHERE d.DivCode = m.DivCode),
+                       bl.Brand,
+                       gl.GroupCode
                   FROM dbo.LPM_SimItemSkuMax m
                   INNER JOIN dbo.LPM_StoreDivAccess sda
                           ON sda.Country = m.Country
                          AND sda.StoreID = m.StoreID
                          AND sda.DivCode = m.DivCode
+                  OUTER APPLY (
+                      SELECT TOP 1 CAST(b.Vendor AS varchar(80)) AS Brand
+                        FROM usa.dbo.upcbarcodes b
+                       WHERE b.itemcode = m.ItemCode
+                         AND b.Vendor IS NOT NULL
+                         AND LTRIM(RTRIM(b.Vendor)) <> ''
+                       ORDER BY b.Vendor
+                  ) bl
+                  OUTER APPLY (
+                      SELECT TOP 1 CAST(im.GroupCode AS varchar(50)) AS GroupCode
+                        FROM Hodata.dbo.ItemMaster im
+                       WHERE im.ItemCode = m.ItemCode
+                         AND im.GroupCode IS NOT NULL
+                         AND LTRIM(RTRIM(im.GroupCode)) <> ''
+                       ORDER BY im.GroupCode
+                  ) gl
                  WHERE m.Country = @country
                    AND m.Year1   = @y
                    AND m.Month1  = @m
@@ -3426,6 +3454,84 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     -- state (the prior build's overrides survive). The DELETE
                     -- of the period's audit rows is INSIDE the transaction so
                     -- a failed apply doesn't leave the table empty.
+
+                    -- 1.14.32 — pre-materialise three lookup temp tables that
+                    -- enrich the audit INSERTs with DivisionName / Brand /
+                    -- GroupCode for the planner-facing report (columns added
+                    -- in migration 048). Done ONCE before the transaction:
+                    --   • #DivLookup  — DivCode → Division.Name (small)
+                    --   • #BrandLookup — ItemCode → upcbarcodes.Vendor (TOP 1
+                    --                    per item because upcbarcodes can
+                    --                    have multiple rows per item; we
+                    --                    pre-filter to items in the 4 match
+                    --                    tables so the 18M-row scan stays
+                    --                    cheap — same pattern as 1.14.10's
+                    --                    Rule 5 perf fix).
+                    --   • #GrpLookup  — ItemCode → ItemMaster.GroupCode
+                    -- All three are LEFT-JOINed into the 4 INSERTs below so
+                    -- rows with no lookup match still land in the audit (the
+                    -- new column is just NULL for those).
+                    IF OBJECT_ID('tempdb..#DivLookup')   IS NOT NULL DROP TABLE #DivLookup;
+                    IF OBJECT_ID('tempdb..#BrandLookup') IS NOT NULL DROP TABLE #BrandLookup;
+                    IF OBJECT_ID('tempdb..#GrpLookup')   IS NOT NULL DROP TABLE #GrpLookup;
+
+                    SELECT d.DivCode, CAST(d.Division AS varchar(80)) AS DivisionName
+                      INTO #DivLookup
+                      FROM dbo.Division d;
+                    CREATE CLUSTERED INDEX IX_DivLookup ON #DivLookup (DivCode);
+
+                    -- Distinct items across all 4 match tables — keeps the
+                    -- upcbarcodes / ItemMaster scans tight.
+                    IF OBJECT_ID('tempdb..#AuditItems') IS NOT NULL DROP TABLE #AuditItems;
+                    SELECT DISTINCT ItemCode
+                      INTO #AuditItems
+                      FROM (
+                          SELECT ItemCode FROM #ExcludeMatches
+                          UNION ALL SELECT ItemCode FROM #PriceCapMatches
+                          UNION ALL SELECT ItemCode FROM #DeactMatches
+                          UNION ALL SELECT ItemCode FROM #DeptDeactMatches
+                      ) u
+                     WHERE ItemCode IS NOT NULL;
+                    CREATE CLUSTERED INDEX IX_AuditItems ON #AuditItems (ItemCode);
+
+                    -- Brand from usa.dbo.upcbarcodes.Vendor — TOP 1 per item
+                    -- via ROW_NUMBER() so the brand assignment is stable
+                    -- (deterministic order) when an item has multiple
+                    -- barcode rows. Pre-filtered to items actually in the
+                    -- audit set so we never scan all 18M rows.
+                    SELECT ItemCode, Vendor AS Brand
+                      INTO #BrandLookup
+                      FROM (
+                          SELECT b.itemcode AS ItemCode,
+                                 CAST(b.Vendor AS varchar(80)) AS Vendor,
+                                 ROW_NUMBER() OVER (PARTITION BY b.itemcode
+                                                    ORDER BY b.Vendor) AS rn
+                            FROM usa.dbo.upcbarcodes b
+                            INNER JOIN #AuditItems ai ON ai.ItemCode = b.itemcode
+                           WHERE b.Vendor IS NOT NULL
+                             AND LTRIM(RTRIM(b.Vendor)) <> ''
+                      ) x
+                     WHERE x.rn = 1;
+                    CREATE CLUSTERED INDEX IX_BrandLookup ON #BrandLookup (ItemCode);
+
+                    -- GroupCode from Hodata.dbo.ItemMaster — TOP 1 per item
+                    -- defensively, though ItemMaster typically has one row
+                    -- per ItemCode.
+                    SELECT ItemCode, GroupCode
+                      INTO #GrpLookup
+                      FROM (
+                          SELECT im.ItemCode,
+                                 CAST(im.GroupCode AS varchar(50)) AS GroupCode,
+                                 ROW_NUMBER() OVER (PARTITION BY im.ItemCode
+                                                    ORDER BY im.GroupCode) AS rn
+                            FROM Hodata.dbo.ItemMaster im
+                            INNER JOIN #AuditItems ai ON ai.ItemCode = im.ItemCode
+                           WHERE im.GroupCode IS NOT NULL
+                             AND LTRIM(RTRIM(im.GroupCode)) <> ''
+                      ) x
+                     WHERE x.rn = 1;
+                    CREATE CLUSTERED INDEX IX_GrpLookup ON #GrpLookup (ItemCode);
+
                     SET XACT_ABORT ON;
                     BEGIN TRY
                         BEGIN TRAN;
@@ -3435,43 +3541,63 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
                         INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                                (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
-                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS,
+                                DivisionName, Brand, GroupCode)
                         SELECT @country, @y, @m, em.StoreID, em.ItemCode, em.Season, em.DivCode,
-                               em.OrigSku, em.SourceTable, em.Reason, em.MatchedKey, SYSDATETIME()
-                          FROM #ExcludeMatches em;
+                               em.OrigSku, em.SourceTable, em.Reason, em.MatchedKey, SYSDATETIME(),
+                               dl.DivisionName, bl.Brand, gl.GroupCode
+                          FROM #ExcludeMatches em
+                          LEFT JOIN #DivLookup   dl ON dl.DivCode  = em.DivCode
+                          LEFT JOIN #BrandLookup bl ON bl.ItemCode = em.ItemCode
+                          LEFT JOIN #GrpLookup   gl ON gl.ItemCode = em.ItemCode;
                         SET @excluded = @@ROWCOUNT;
 
                         INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                                (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
-                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS,
+                                DivisionName, Brand, GroupCode)
                         SELECT @country, @y, @m, pc.StoreID, pc.ItemCode, pc.Season, pc.DivCode,
                                pc.OrigSku,
                                'usa.dbo.DeptPriceMaxQty_MH4',
                                'Price-band cap from DeptPriceMaxQty_MH4 (REPLACE)',
-                               pc.MatchedKey, SYSDATETIME()
-                          FROM #PriceCapMatches pc;
+                               pc.MatchedKey, SYSDATETIME(),
+                               dl.DivisionName, bl.Brand, gl.GroupCode
+                          FROM #PriceCapMatches pc
+                          LEFT JOIN #DivLookup   dl ON dl.DivCode  = pc.DivCode
+                          LEFT JOIN #BrandLookup bl ON bl.ItemCode = pc.ItemCode
+                          LEFT JOIN #GrpLookup   gl ON gl.ItemCode = pc.ItemCode;
                         SET @priceCapped = @@ROWCOUNT;
 
                         INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                                (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
-                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS,
+                                DivisionName, Brand, GroupCode)
                         SELECT @country, @y, @m, dm.StoreID, dm.ItemCode, dm.Season, dm.DivCode,
                                dm.OrigSku,
                                'dbo.LPM_StoreDivAccess',
                                'Store-Div deactivated in LPM_StoreDivAccess (IsActive=0)',
-                               dm.MatchedKey, SYSDATETIME()
-                          FROM #DeactMatches dm;
+                               dm.MatchedKey, SYSDATETIME(),
+                               dl.DivisionName, bl.Brand, gl.GroupCode
+                          FROM #DeactMatches dm
+                          LEFT JOIN #DivLookup   dl ON dl.DivCode  = dm.DivCode
+                          LEFT JOIN #BrandLookup bl ON bl.ItemCode = dm.ItemCode
+                          LEFT JOIN #GrpLookup   gl ON gl.ItemCode = dm.ItemCode;
                         SET @deactivated = @@ROWCOUNT;
 
                         INSERT INTO dbo.LPM_SimItemSkuMaxExcluded
                                (Country, Year1, Month1, StoreID, ItemCode, Season, DivCode,
-                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS)
+                                PriorSKUMax, SourceTable, Reason, MatchedKey, CreateTS,
+                                DivisionName, Brand, GroupCode)
                         SELECT @country, @y, @m, dd.StoreID, dd.ItemCode, dd.Season, dd.DivCode,
                                dd.OrigSku,
                                'dbo.LPM_StoreDeptAccess',
                                'Store-Dept deactivated in LPM_StoreDeptAccess (IsActive=0)',
-                               dd.MatchedKey, SYSDATETIME()
-                          FROM #DeptDeactMatches dd;
+                               dd.MatchedKey, SYSDATETIME(),
+                               dl.DivisionName, bl.Brand, gl.GroupCode
+                          FROM #DeptDeactMatches dd
+                          LEFT JOIN #DivLookup   dl ON dl.DivCode  = dd.DivCode
+                          LEFT JOIN #BrandLookup bl ON bl.ItemCode = dd.ItemCode
+                          LEFT JOIN #GrpLookup   gl ON gl.ItemCode = dd.ItemCode;
                         SET @deptDeactivated = @@ROWCOUNT;
 
                         CREATE NONCLUSTERED INDEX IX_ExcludeMatches_SI    ON #ExcludeMatches    (StoreID, ItemCode);
