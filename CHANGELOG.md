@@ -23,6 +23,48 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.31 — Negative SOH / divSoh clamped at 0 in cap math (2026-05-15)
+
+### Bug
+Even after 1.14.30 fixed the Override-RR SKU Max bypass, a planner spotted item `71662112288` × `BFL-SPRG` receiving **29 pcs** when `SKUMax = 8`. Investigation traced it to a negative SOH row in `LPM_LocStock` (oversold / data anomaly) that mathematically inflated the SKU Max headroom:
+
+```
+skuHeadroom = SKUMax  − SOH        − cumItem
+            = 8       − (−21)      − 0
+            = 29       ← allocator thought the store could take 29 more
+```
+
+Same risk on the EOM target gate:
+
+```
+TargetEOM  − divSOH  − cumDiv
+TargetEOM  − (−N)    − cumDiv  →  inflates by N
+```
+
+### Fix
+Clamp `SOH` and `divSoh` at zero **for the cap math only** at three call sites in `LpmSimGenerator.cs`:
+
+1. `AllocateLineNormal` — SKU balance: `var sb = skuMax - Math.Max(0, soh) - cumItem;`
+2. `AllocateLineNormal` — EOM Balance gate: `if ((s.TargetEOM - Math.Max(0, divSoh)) <= 0m)`
+3. `AllocateLineRoundRobin` — SKU headroom: `var skuHeadroom = skuMaxExcl - Math.Max(0, soh) - cumItem;`
+
+The cached `sohArr[i]` / `divSohArr[i]` arrays (which feed the Allocation Trace) keep the **raw** SOH / divSoh values so the planner can still spot oversold rows in the trace. Only the cap-comparison math is clamped.
+
+### Behaviour change
+- Items in stores with negative SOH now correctly stop at `SKUMax` (no longer get over-allocated proportional to the negative-stock magnitude).
+- Same for EOM Balance: divisions with negative divSOH no longer get inflated headroom.
+- Allocation Trace tab still shows the negative SOH values verbatim — so this fix doesn't hide the underlying data anomaly, just stops it from amplifying caps.
+
+### In-flight batches
+Existing batches generated before 1.14.31 keep their wrong over-allocations. **Re-Generate** after deploy to correct.
+
+### Notes
+- No DB migration. Pure code change (~6 lines + comments) in `LpmSimGenerator.cs`.
+- Doesn't address the underlying negative-stock data — that's a separate operational issue in `LPM_LocStock`. Worth checking why SOH goes negative (oversold? returns? bad ETL?) — but the allocator should never amplify it regardless.
+- The earlier flagged `GetBatchAggregatesAsync` timeout (1.14.31 was originally queued for that perf fix) is still pending; it'll bump to **1.14.32**.
+
+---
+
 ## 1.14.30 — Override RR honors SKU Max ceiling — never over-allocate (2026-05-15)
 
 ### Bug

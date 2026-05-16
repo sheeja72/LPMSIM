@@ -1442,7 +1442,17 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             var skuMax  = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
             sohArr[i] = soh; divSohArr[i] = divSoh; skuMaxArr[i] = skuMax;
             startCumIt[i] = cumItem; startCumDv[i] = cumDiv;
-            var sb = skuMax - soh - cumItem;
+            // 1.14.31 — negative SOH / divSoh (oversold or data anomaly in
+            // LPM_LocStock) was inflating both cap headrooms:
+            //   sb     = SKUMax    − (−21) − cumItem  → SKUMax + 21
+            //   tgt    = TargetEOM − (−N)  − cumDiv   → TargetEOM + N
+            // Clamp both at 0 for the cap math — negative stock should
+            // never amplify a ceiling. Trace columns below (sohArr,
+            // divSohArr) keep the RAW values so the planner can spot the
+            // underlying negative-stock anomaly in the Allocation Trace tab.
+            var effSoh    = Math.Max(0, soh);
+            var effDivSoh = Math.Max(0, divSoh);
+            var sb = skuMax - effSoh - cumItem;
             var db = s.MerchNeedWeek - cumDiv;
             skuBalArr[i] = sb; divBalArr[i] = db;
             if (sb <= 0)         { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_SKUMAX"); continue; }
@@ -1454,8 +1464,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // of IgnoreMerchNeed because EOM Balance is a separate signal
             // from the weekly Merch Need cap. Skips for stores whose EOM rows
             // exist but have a zero/negative balance (over-stocked or
-            // empty-target).
-            if ((s.TargetEOM - divSoh) <= 0m)
+            // empty-target). 1.14.31 — divSoh clamped at 0 for the same
+            // reason as the SKU Max clamp above.
+            if ((s.TargetEOM - effDivSoh) <= 0m)
             { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_EOM_BALANCE"); continue; }
             // EqualFillRate normally requires MerchNeedWeek > 0 to compute fillRate.
             // In IgnoreMerchNeed mode the denominator becomes SkuMax instead, so
@@ -1734,7 +1745,10 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 // the weekly demand cap when usability >= Box%).
                 var soh         = sohMap.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
                 var cumItem     = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
-                var skuHeadroom = skuMaxExcl - soh - cumItem;
+                // 1.14.31 — clamp negative SOH at 0 so over-stock anomalies
+                // (oversold rows in LPM_LocStock) don't inflate the SKU Max
+                // headroom. Same rationale as the AllocateLineNormal clamp.
+                var skuHeadroom = skuMaxExcl - Math.Max(0, soh) - cumItem;
                 if (skuHeadroom <= 0) continue;
 
                 if (!bypassAllCaps)
