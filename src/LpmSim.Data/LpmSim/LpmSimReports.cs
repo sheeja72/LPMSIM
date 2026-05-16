@@ -89,6 +89,13 @@ public class DivisionSummaryRow
     /// <summary>Σ Merch Need (Week) across stores for this division.</summary>
     public long   MerchNeedWeek { get; set; }
 
+    /// <summary>Σ source Box Qty (whboxitems.Qty) across the qualifying boxes
+    /// that contributed any items in this division. Distinct on
+    /// (BoxNo, Itemcode) so a box-item allocated to multiple stores still
+    /// counts once. Same Min/Max Box Usability % filter as SimQty so the two
+    /// columns line up. (1.14.33)</summary>
+    public long   BoxQty        { get; set; }
+
     public long   SimQty        { get; set; }
     public long   RrQty         { get; set; }
 
@@ -667,6 +674,24 @@ SimAgg AS (
      WHERE s.LPMBatchNo = @batchNo
      GROUP BY id.DivCode
 ),
+-- 1.14.33: Σ source Box Qty per division, on the SAME QualifyingBoxes
+-- filter as SimAgg so the two columns line up under the Min/Max Box
+-- Usability % filter. Inner SELECT DISTINCT collapses the (BoxNo, Itemcode)
+-- duplicates that arise when one box-item is split across multiple stores —
+-- otherwise SUM would multiply BoxItemQty by the number of receiving stores.
+BoxQtyAgg AS (
+    SELECT id.DivCode,
+           BoxQty = SUM(CAST(x.BoxItemQty AS bigint))
+      FROM (
+            SELECT DISTINCT s.BoxNo, s.Itemcode,
+                   BoxItemQty = ISNULL(s.BoxItemQty, 0)
+              FROM dbo.LPMSIM_Output s
+              INNER JOIN QualifyingBoxes qb ON qb.BoxNo = s.BoxNo
+             WHERE s.LPMBatchNo = @batchNo
+           ) x
+      INNER JOIN ItemDiv id ON id.Itemcode = x.Itemcode
+     GROUP BY id.DivCode
+),
 EomAgg AS (
     SELECT eo.DivCode,
            EOM           = SUM(ISNULL(eo.TargetEOM, 0)),
@@ -702,12 +727,14 @@ SELECT @batchNo                  AS LPMBatchNo,
        MerchNeedWeek = ISNULL(eo.MerchNeedWeek, 0),
        SimQty        = ISNULL(sim.SimQty, 0),
        RrQty         = ISNULL(sim.RrQty, 0),
-       OverrideQty   = ISNULL(sim.OverrideQty, 0)
+       OverrideQty   = ISNULL(sim.OverrideQty, 0),
+       BoxQty        = ISNULL(bq.BoxQty, 0)
   FROM AllDivs a
   LEFT JOIN dbo.Division div ON div.DivCode = a.DivCode
   LEFT JOIN SimAgg sim       ON sim.DivCode = a.DivCode
   LEFT JOIN EomAgg eo        ON eo.DivCode  = a.DivCode
   LEFT JOIN SohAgg soh       ON soh.DivCode = a.DivCode
+  LEFT JOIN BoxQtyAgg bq     ON bq.DivCode  = a.DivCode
  ORDER BY div.Division, a.DivCode;";
 
         return await ExecAsync(db, sql, ReadDivisionSummary, ct, new Dictionary<string, object>
@@ -732,6 +759,7 @@ SELECT @batchNo                  AS LPMBatchNo,
         SimQty        = r.IsDBNull(6) ? 0 : r.GetInt64(6),
         RrQty         = r.IsDBNull(7) ? 0 : r.GetInt64(7),
         OverrideQty   = r.IsDBNull(8) ? 0 : r.GetInt64(8),
+        BoxQty        = r.IsDBNull(9) ? 0 : r.GetInt64(9),
     };
 
     private static StoreSummaryRow ReadStoreSummary(SqlDataReader r) => new()

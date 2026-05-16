@@ -1205,6 +1205,10 @@
                 var dsumEom = dsRows.Sum(r => r.EOM);
                 var dsumSoh = dsRows.Sum(r => r.SOH);
                 var dsumMnw = dsRows.Sum(r => r.MerchNeedWeek);
+                // 1.14.33: source Box Qty (whboxitems.Qty) for the qualifying
+                // boxes, same Min/Max Box Usability % filter as SIM Qty so the
+                // two columns line up.
+                var dsumBox = dsRows.Sum(r => r.BoxQty);
                 var dsumSim = dsRows.Sum(r => r.SimQty);
                 var dsumRr  = dsRows.Sum(r => r.RrQty);
                 var dsumOvr = dsRows.Sum(r => r.OverrideQty);
@@ -1230,6 +1234,7 @@
                         <MudTh><div class="th-total" title="Total SOH ÷ Total EOM × 100 across all rows in view.">@(totalFillRate?.ToString("0.0") ?? "—")%</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.CurrentFillRate ?? -1m"><span title="Current Fill Rate % = SOH ÷ EOM × 100">Current<br />Fill Rate %</span></MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total" title="Σ Merch Need (Week) for this division = SIM cap.">@dsumMnw.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total" title="Σ Merch Need (Week) ÷ 6 (fixed 6-day production week).">@totalMerchDay.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.MerchNeedDay"><span title="Merch Need (Day) = Merch Need (Week) ÷ 6">Merch Need<br />(Day)</span></MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ source Box Qty (whboxitems.Qty) on the same Min/Max Box Usability % filter as SIM Qty.">@dsumBox.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.BoxQty"><span title="Source Box Qty (whboxitems.Qty) summed across qualifying boxes for this division">Box Qty</span></MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@dsumSim.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@dsumRr.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.RrQty">RR Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total" title="Subset of SIM Qty above SKU Max / Merch Need caps (P1b/P2b override).">@dsumOvr.ToString("N0")</div><MudTableSortLabel T="DivisionSummaryRow" SortBy="r => r.OverrideQty">Override<br />Qty</MudTableSortLabel></MudTh>
@@ -1243,6 +1248,7 @@
                         <MudTd>@(context.CurrentFillRate?.ToString("0.0") ?? "—")%</MudTd>
                         <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
                         <MudTd>@context.MerchNeedDay.ToString("N0")</MudTd>
+                        <MudTd>@context.BoxQty.ToString("N0")</MudTd>
                         <MudTd>@context.SimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RrQty > 0 ? context.RrQty.ToString("N0") : "—")</MudTd>
                         <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
@@ -4256,11 +4262,13 @@
         var bn = _readiness?.CurrentBatchNo ?? 0;
         await SaveExcelAsync($"LPMSIM_DivisionSummary_{bn}.xlsx", "DivisionSummary", sheet =>
         {
+            // 1.14.33: Box Qty inserted between Merch Need (Day) and SIM Qty
+            // to match the on-screen column order in the Division Summary tab.
             string[] headers = {
                 "Div Code", "Division", "EOM", "SOH",
                 "EOM Balance", "Current Fill Rate %",
                 "Merch Need (Week)", "Merch Need (Day)",
-                "SIM Qty", "RR Qty", "Override Qty"
+                "Box Qty", "SIM Qty", "RR Qty", "Override Qty"
             };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
@@ -4274,11 +4282,12 @@
                 sheet.Cell(row, 6).Value  = (double?)r.CurrentFillRate;
                 sheet.Cell(row, 7).Value  = r.MerchNeedWeek;
                 sheet.Cell(row, 8).Value  = r.MerchNeedDay;
-                sheet.Cell(row, 9).Value  = r.SimQty;
-                sheet.Cell(row, 10).Value = r.RrQty;
-                sheet.Cell(row, 11).Value = r.OverrideQty;
+                sheet.Cell(row, 9).Value  = r.BoxQty;
+                sheet.Cell(row, 10).Value = r.SimQty;
+                sheet.Cell(row, 11).Value = r.RrQty;
+                sheet.Cell(row, 12).Value = r.OverrideQty;
             }
-            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 7, 8, 9, 10, 11 });
+            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 7, 8, 9, 10, 11, 12 });
             sheet.Range(2, 6, rows.Count + 1, 6).Style.NumberFormat.Format = "0.0";
         });
     }

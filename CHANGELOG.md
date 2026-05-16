@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.33 — Division Summary: Box Qty column before SIM Qty (2026-05-16)
+
+### Added — Box Qty column in the **Division Summary** tab
+A new column showing the Σ source Box Qty (`whboxitems.Qty`) for the qualifying boxes that contributed to each division. Sits between **Merch Need (Day)** and **SIM Qty** so the planner can read across:
+
+```
+Merch Need (Day) → Box Qty → SIM Qty → RR Qty → Override Qty
+```
+
+This makes it obvious at a glance how much warehouse stock was *available* per division vs how much actually got allocated (`SIM Qty / Box Qty` ≈ how well the boxes got used after the SKU Max / Merch Need / Demand caps did their work).
+
+### How it's computed
+A new `BoxQtyAgg` CTE in `LpmSimReports.GetDivisionSummaryAsync`:
+
+```sql
+BoxQtyAgg AS (
+    SELECT id.DivCode,
+           BoxQty = SUM(CAST(x.BoxItemQty AS bigint))
+      FROM (
+            SELECT DISTINCT s.BoxNo, s.Itemcode,
+                   BoxItemQty = ISNULL(s.BoxItemQty, 0)
+              FROM dbo.LPMSIM_Output s
+              INNER JOIN QualifyingBoxes qb ON qb.BoxNo = s.BoxNo
+             WHERE s.LPMBatchNo = @batchNo
+           ) x
+      INNER JOIN ItemDiv id ON id.Itemcode = x.Itemcode
+     GROUP BY id.DivCode
+)
+```
+
+Two correctness notes:
+1. **Same `QualifyingBoxes` filter as `SimAgg`** — Box Qty and SIM Qty stay on the same Min/Max Box Usability % filter, so the ratio is meaningful for any filter setting.
+2. **`SELECT DISTINCT BoxNo, Itemcode` inner query** — `LPMSIM_Output` writes one row per (BoxNo, Itemcode, StoreID) when a box-item splits across stores. Without the DISTINCT, `SUM(BoxItemQty)` would multiply the source qty by the number of receiving stores. The DISTINCT collapses it back to one row per box-item per division.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | `DivisionSummaryRow.BoxQty` property; `BoxQtyAgg` CTE; `BoxQty = ISNULL(bq.BoxQty, 0)` in final SELECT; `LEFT JOIN BoxQtyAgg`; `ReadDivisionSummary` reads col 9 |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | Division Summary tab: new `MudTh` + `MudTd` between Merch Need (Day) and SIM Qty, with footer total; Excel export gets a new "Box Qty" column inserted at column 9, downstream columns shifted +1 |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.32 → 1.14.33 |
+
+### Notes
+- **No DB migration.** Source data is the existing `LPMSIM_Output.BoxItemQty` column added in 1.14.18 (migration 044). Batches Generated before 1.14.18 have `BoxItemQty = NULL` → Box Qty will show 0 for those rows. Re-Generating the batch backfills it from `racks.dbo.whboxitems.Qty`.
+- **Store Summary / Item Detail tabs unchanged** — they already show their own Box Qty equivalents (`BoxQty` and `BoxItemQty`). This change is scoped strictly to the Division Summary tab per the request.
+- **Excel export updated** — header row and cell columns shifted to match the on-screen order.
+
+---
+
 ## 1.14.32 — SKU Max Excluded: DivisionName + Brand + GroupCode columns (2026-05-15)
 
 ### Added — 3 new columns on `dbo.LPM_SimItemSkuMaxExcluded` (migration 048)
