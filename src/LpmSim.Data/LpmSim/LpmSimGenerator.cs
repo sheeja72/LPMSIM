@@ -2935,11 +2935,37 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 SET NOCOUNT ON;
 
                 IF OBJECT_ID('tempdb..#NewSnap') IS NOT NULL DROP TABLE #NewSnap;
+                IF OBJECT_ID('tempdb..#SohLookup') IS NOT NULL DROP TABLE #SohLookup;
+
+                -- 1.14.35 — Per-(Store, Item) SOH from racks.dbo.LPM_LocStock for
+                -- this country. Mirrors the canonical SOH read at the top of
+                -- LpmSimGenerator.GenerateAsync: DataSettings.SIMCountry filter
+                -- (bulletproof against empty / mis-tagged LocStock.Country),
+                -- SUM across multiple LocStock rows for the same (Store, Item).
+                -- LEFT-joined into #NewSnap below so items not in LocStock get
+                -- SOH=0, matching the same default the allocator uses.
+                SELECT ls.StoreID,
+                       ls.Itemcode,
+                       SOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
+                  INTO #SohLookup
+                  FROM racks.dbo.LPM_LocStock ls
+                  INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+                 WHERE ds.SIMCountry = @country
+                   AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
+                   AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> ''
+                 GROUP BY ls.StoreID, ls.Itemcode;
+
+                CREATE CLUSTERED INDEX IX_SohLookup ON #SohLookup (StoreID, Itemcode);
 
                 SELECT
                     s.StoreID, iw.ItemCode, iw.Season,
                     iw.DivCode, iw.WHBoxQty, s.VolumeGroup,
-                    CAST(ISNULL(r.SKUMax, 0) AS int) AS SKUMax
+                    CAST(ISNULL(r.SKUMax, 0) AS int) AS SKUMax,
+                    -- Clamp at int range (SOH can theoretically exceed int if
+                    -- summed across many sub-locations, but realistically per
+                    -- (Store, Item) it stays small). Falls back to 0 for
+                    -- items not in LocStock for this country.
+                    CAST(ISNULL(sl.SOH, 0) AS int) AS SOH
                   INTO #NewSnap
                   FROM #ItemWh iw
                   INNER JOIN #Stores s
@@ -2951,7 +2977,10 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                          AND r2.GroupCode  = s.VolumeGroup
                          AND iw.WHBoxQty BETWEEN r2.WHStockFrom AND r2.WHStockTo
                        ORDER BY r2.WHStockFrom
-                  ) r;
+                  ) r
+                  LEFT JOIN #SohLookup sl
+                         ON sl.StoreID  = s.StoreID
+                        AND sl.Itemcode = iw.ItemCode;
 
                 DECLARE @rc bigint = @@ROWCOUNT;
 
@@ -2962,6 +2991,10 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 CREATE CLUSTERED INDEX IX_NewSnap ON #NewSnap (StoreID, ItemCode, Season);
 
                 SELECT @rc AS Rc;";
+            // 1.14.35 — @country needed for the #SohLookup CTE (filter by
+            // DataSettings.SIMCountry, same pattern as the canonical SOH read
+            // at the top of GenerateAsync).
+            ins.Parameters.Add(new SqlParameter("@country", country));
             ins.CommandTimeout = 1800;  // 30 min ceiling
             // ExecuteScalarAsync (not ExecuteReaderAsync) — single value
             // return + immediate result-set drain matches the pattern used
@@ -3803,6 +3836,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                tgt.WHBoxQty    = s.WHBoxQty,
                                tgt.VolumeGroup = s.VolumeGroup,
                                tgt.DivCode     = s.DivCode,
+                               tgt.SOH         = s.SOH,            -- 1.14.35
                                tgt.CreateTS    = @now
                           FROM dbo.LPM_SimItemSkuMax tgt
                           INNER JOIN #NewSnap s
@@ -3815,15 +3849,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                              OR tgt.WHBoxQty    <> s.WHBoxQty
                              OR ISNULL(tgt.VolumeGroup, '') <> ISNULL(s.VolumeGroup, '')
                              OR tgt.DivCode     <> s.DivCode
+                             OR tgt.SOH         <> s.SOH           -- 1.14.35
                            );
                         SET @updated = @@ROWCOUNT;
 
                         -- INSERT rows in #NewSnap not yet in target.
                         INSERT INTO dbo.LPM_SimItemSkuMax WITH (TABLOCK)
                                (Country, Year1, Month1, StoreID, ItemCode, Season,
-                                DivCode, WHBoxQty, VolumeGroup, SKUMax, CreateTS, CreatedBy)
+                                DivCode, WHBoxQty, VolumeGroup, SKUMax, SOH, CreateTS, CreatedBy)
                         SELECT @country, @y, @m, s.StoreID, s.ItemCode, s.Season,
-                               s.DivCode, s.WHBoxQty, s.VolumeGroup, s.SKUMax, @now, @user
+                               s.DivCode, s.WHBoxQty, s.VolumeGroup, s.SKUMax, s.SOH, @now, @user
                           FROM #NewSnap s
                          WHERE NOT EXISTS (
                              SELECT 1 FROM dbo.LPM_SimItemSkuMax tgt
@@ -3897,12 +3932,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     SET XACT_ABORT ON;
                     BEGIN TRAN;
 
+                    -- 1.14.35: SOH carried into the backup so archived
+                    -- periods preserve the same shape. ToFillQty is a
+                    -- computed PERSISTED column on both tables — recomputed
+                    -- automatically from the inserted SOH/SKUMax, so it's
+                    -- not listed in the column lists below.
                     INSERT INTO dbo.LPM_SimItemSkuMax_Backup
                            (Country, Year1, Month1, StoreID, ItemCode, Season,
-                            DivCode, WHBoxQty, VolumeGroup, SKUMax,
+                            DivCode, WHBoxQty, VolumeGroup, SKUMax, SOH,
                             CreateTS, CreatedBy, BackupTS, BackupBy)
                     SELECT Country, Year1, Month1, StoreID, ItemCode, Season,
-                           DivCode, WHBoxQty, VolumeGroup, SKUMax,
+                           DivCode, WHBoxQty, VolumeGroup, SKUMax, SOH,
                            CreateTS, CreatedBy, SYSDATETIME(), @user
                       FROM dbo.LPM_SimItemSkuMax
                      WHERE Country = @c

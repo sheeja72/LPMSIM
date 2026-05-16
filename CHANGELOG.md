@@ -23,6 +23,67 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.35 — LPM_SimItemSkuMax: SOH + ToFillQty (2026-05-16)
+
+### Added — 2 new columns on `dbo.LPM_SimItemSkuMax` (migration 049)
+| Column | Type | Source |
+|---|---|---|
+| `SOH` | `int NOT NULL DEFAULT 0` | `racks.dbo.LPM_LocStock.SOH`, summed per `(StoreID, Itemcode)` for the build's `SIMCountry`. Mirrors the canonical SOH read at the top of `LpmSimGenerator.GenerateAsync`. |
+| `ToFillQty` | computed PERSISTED int | `MAX(SKUMax − MAX(SOH, 0), 0)` — standard "fill gap to max", floored at 0, negative SOH (oversold) treated as 0. |
+
+The same two columns are added to `dbo.LPM_SimItemSkuMax_Backup` so archived periods carry the same shape.
+
+### Why
+Planners want the fill gap visible directly in the SKU Max table without re-joining LocStock every time. `ToFillQty = SKUMax − SOH` is the standard calculation but two edges need handling:
+- **Negative SOH** (oversold rows in LocStock) would inflate ToFillQty: SKUMax=10, SOH=-5 → naive `10−(−5)=15`. We clamp SOH at 0 first, so `10−0=10`. Same negative-SOH clamp the allocator already applies for cap math (see 1.14.31).
+- **Overstocked stores** (SOH > SKUMax) would give negative ToFillQty. We floor at 0 — "nothing to fill" reads cleaner than a negative number.
+
+### Why computed PERSISTED, not a regular column
+- **Can never drift** — SQL recalculates on every `UPDATE` of SOH or SKUMax. If anything downstream (a manual SSMS update, a future exclusion rule) changes SKUMax, ToFillQty stays in sync automatically.
+- **On disk + indexable** — PERSISTED means the value lands in the row (small storage cost, but read-time recompute is gone). Indexable in case we want to filter "where ToFillQty > 0" cheaply later.
+
+### BuildSkuMax wiring (`LpmSimGenerator.cs`)
+A new `#SohLookup` temp table is materialized right before `#NewSnap`, then LEFT-joined in:
+
+```sql
+SELECT ls.StoreID, ls.Itemcode,
+       SOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
+  INTO #SohLookup
+  FROM racks.dbo.LPM_LocStock ls
+  INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+ WHERE ds.SIMCountry = @country
+   AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
+   AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> ''
+ GROUP BY ls.StoreID, ls.Itemcode;
+
+CREATE CLUSTERED INDEX IX_SohLookup ON #SohLookup (StoreID, Itemcode);
+```
+
+`#NewSnap` then carries an extra `SOH` column, threaded through:
+1. **UPDATE** branch of the delta-apply phase — sets `tgt.SOH = s.SOH` and adds `tgt.SOH <> s.SOH` to the change-detection predicate (so a SOH-only change still triggers an update).
+2. **INSERT** branch — adds `SOH` to the column list / SELECT.
+3. **Archive INSERT** (`LPM_SimItemSkuMax_Backup`) — also carries `SOH`. ToFillQty is computed on both tables, so it's not in any insert column list (SQL recomputes from the inserted SOH/SKUMax).
+
+### What this means for planners
+- Open `dbo.LPM_SimItemSkuMax` in SSMS → `SOH` and `ToFillQty` show up alongside `SKUMax` for every (Store, Item, Season) row.
+- `ToFillQty = 0` means either the store is at/above its cap, or `SKUMax = 0` (excluded by a rule).
+- `ToFillQty > 0` is the slot the store is targeting this period.
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/049_lpm_sim_item_skumax_soh_tofill.sql` | NEW — adds `SOH` + `ToFillQty` (computed PERSISTED) to both `LPM_SimItemSkuMax` and its backup. Idempotent. |
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | New `#SohLookup` temp table + LEFT JOIN into `#NewSnap`; UPDATE/INSERT/archive all carry `SOH`. `@country` parameter added to the staging `ins` SqlCommand. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.34 → 1.14.35 |
+
+### Notes
+- **Apply migration 049 to prod LPMSIM DB before the next Build SKU Max.** Without it, the new `INSERT INTO ... SOH` will fail with `Msg 207 — Invalid column name 'SOH'`.
+- **Existing rows** (built pre-1.14.35) get `SOH = 0` via the NOT NULL DEFAULT, and `ToFillQty = SKUMax` (since `SKUMax − 0 = SKUMax`) — same as if they had no LocStock entry. Next Build repopulates everything with real values.
+- **Performance** — `#SohLookup` adds one indexed scan of `LPM_LocStock × DataSettings` to the build. Realistic size: ~10s of millions of LocStock rows pre-filter, ~5-10M after the country filter. The clustered index on `(StoreID, Itemcode)` makes the LEFT JOIN into `#NewSnap` a seek. Expected impact: < 1 minute added to a typical build.
+- **C# entity** (`LpmSimItemSkuMax.cs`) — **not modified**. The DbSet is never queried, so the schema mismatch is harmless. If a future feature needs to read SOH/ToFillQty through EF, the entity can be extended then.
+
+---
+
 ## 1.14.34 — Division Summary Box Qty: full box content (2026-05-16)
 
 ### Bug
