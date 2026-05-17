@@ -98,10 +98,22 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         var whOk      = whStockCount == divCount;
         var gradeSum  = activeGrades.Sum(g => g.SharePct);
         var gradesOk  = activeGrades.Count > 0 && Math.Abs(gradeSum - 1m) < 0.0001m;
-        var groupSum  = activeGroups.Sum(g => g.SharePct);
-        var groupsOk  = activeGroups.Count > 0 && Math.Abs(groupSum - 1m) < 0.0001m;
+        // 1.14.39 — Volume Groups are now per-(Country, DivCode, GroupCode).
+        // The share total check must be PER-DIVISION (each division's
+        // active groups must sum to 100%), not country-wide (which would
+        // sum to N × 100% across N divisions).
+        var groupsByDiv = activeGroups.GroupBy(g => g.DivCode).ToList();
+        var groupSum = groupsByDiv.Count == 0
+            ? 0m
+            : groupsByDiv.Average(g => g.Sum(x => x.SharePct));
+        var groupsOk = groupsByDiv.Count > 0
+            && groupsByDiv.All(g => Math.Abs(g.Sum(x => x.SharePct) - 1m) < 0.0001m);
+        // Rules check tightened: every (DivCode, GroupCode) in active
+        // volume groups must have at least one matching SKU Max rule.
+        // Previously checked just GroupCode, which let a missing rule
+        // for ACCESSORIES/A slip through if e.g. BAGS/A had a rule.
         var rulesOk   = activeRules.Count > 0 &&
-            activeGroups.All(g => activeRules.Any(r => r.GroupCode == g.GroupCode));
+            activeGroups.All(g => activeRules.Any(r => r.DivCode == g.DivCode && r.GroupCode == g.GroupCode));
 
         // Wave 2 — LpmSalesTurns count depends on weights + storeIds, so it
         // can only run AFTER Wave 1 finishes. Its own DbContext.
@@ -147,7 +159,9 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 "Volume Groups",
                 activeGroups.Count == 0
                     ? "No active volume groups configured."
-                    : $"{activeGroups.Count} active groups, share total = {(groupSum * 100m):0.##}%."),
+                    : groupsOk
+                        ? $"{activeGroups.Count} active groups across {groupsByDiv.Count} division(s), each summing to 100%."
+                        : $"{activeGroups.Count} active groups across {groupsByDiv.Count} division(s) — each division's share total must equal 100% (avg = {(groupSum * 100m):0.##}%)."),
             SkuMaxRules = new(rulesOk,
                 "SKU Max Rules",
                 activeRules.Count == 0
@@ -629,9 +643,15 @@ SELECT id.DivCode,
         var grades = (await db.LpmStoreGrades.AsNoTracking()
             .Where(g => g.IsActive && g.Country == country).OrderBy(g => g.SortOrder)
             .ToListAsync(ct));
-        var volumeGroups = (await db.LpmVolumeGroups.AsNoTracking()
+        // 1.14.39 — Volume Groups are now per-(Country, DivCode, GroupCode).
+        // Group by DivCode so Step 5 can pick the right bucket profile for
+        // each division's stores. Divisions with no rows in the map don't
+        // get a Volume Group assigned (Step 5 skips them).
+        var volumeGroupsByDiv = (await db.LpmVolumeGroups.AsNoTracking()
             .Where(g => g.IsActive && g.Country == country).OrderBy(g => g.SortOrder)
-            .ToListAsync(ct));
+            .ToListAsync(ct))
+            .GroupBy(g => g.DivCode)
+            .ToDictionary(grp => grp.Key, grp => grp.ToList());
         // skuRules no longer needed at EOM time — moved to SIM Generate's
         // LPM_SimItemSkuMax build. (LpmSKUMaxRules still queried elsewhere
         // when SIM rebuilds the per-item table.)
@@ -776,10 +796,16 @@ SELECT id.DivCode,
         }
 
         // Step 5: Volume Group by TargetEOM desc, per division.
+        // 1.14.39 — Each division now uses its OWN bucket profile from
+        // volumeGroupsByDiv. Divisions without configured groups skip
+        // bucketing — their rows keep the default VolumeGroup = "" and
+        // downstream code treats them as unranked.
         foreach (var grp in rows.GroupBy(r => r.DivCode))
         {
+            if (!volumeGroupsByDiv.TryGetValue(grp.Key, out var vgList) || vgList.Count == 0)
+                continue;
             var ordered = grp.OrderByDescending(r => r.TargetEOM).ToList();
-            AssignBuckets(ordered, volumeGroups.Select(g => (g.GroupCode, g.SharePct)).ToList(),
+            AssignBuckets(ordered, vgList.Select(g => (g.GroupCode, g.SharePct)).ToList(),
                           (r, code) => r.VolumeGroup = code);
         }
 

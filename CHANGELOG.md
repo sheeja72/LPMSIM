@@ -23,6 +23,93 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.39 — Volume Groups per (Country, Division, GroupCode) (2026-05-17)
+
+### Feature
+Previously `LPM_VolumeGroup` was keyed by `(Country, GroupCode)` — one bucket distribution (A=25%, B=20%, C=20%, D=15%, E=20%) applied to **every** division in a country. The planner now wants each division to carry its own bucket distribution: ACCESSORIES might be 0/0/100/0/0 while BAGS keeps the legacy split.
+
+### What changed
+
+**DB schema** (migration 051):
+- `LPM_VolumeGroup` gains `DivCode int NOT NULL`
+- PK swapped from `(Country, GroupCode)` to `(Country, DivCode, GroupCode)`
+- Old FK `FK_LPM_SKUMaxRule_Group` (referenced just `GroupCode`) dropped — app-level upload validation now enforces the full composite
+- New FK `FK_LPM_VolumeGroup_Division` on `DivCode → dbo.Division(DivCode)`
+- **All existing `LPM_VolumeGroup` rows deleted** (user's chosen migration path — wipe + reload)
+
+**C# entity** (`LpmVolumeGroup`):
+- New `DivCode` property
+- DbContext key updated to `(Country, DivCode, GroupCode)`
+
+**EOM Generate Step 5** (`EomCalculator.cs`):
+```csharp
+var volumeGroupsByDiv = (await db.LpmVolumeGroups...).GroupBy(g => g.DivCode)
+    .ToDictionary(grp => grp.Key, grp => grp.ToList());
+
+foreach (var grp in rows.GroupBy(r => r.DivCode))
+{
+    if (!volumeGroupsByDiv.TryGetValue(grp.Key, out var vgList) || vgList.Count == 0) continue;
+    var ordered = grp.OrderByDescending(r => r.TargetEOM).ToList();
+    AssignBuckets(ordered, vgList.Select(g => (g.GroupCode, g.SharePct)).ToList(), ...);
+}
+```
+
+**EOM readiness check** — tightened:
+- Volume Groups OK only when **each division** sums to 100% (was: country-wide sum = 100%, which would now sum to N × 100%)
+- SKU Max Rules OK only when every (Country, DivCode, GroupCode) volume group has a matching (Country, DivCode, GroupCode) rule (was: just GroupCode match)
+
+**Volume Groups admin page**:
+- New Division column in the table
+- Division filter dropdown ("All divisions" + per-division)
+- Per-division share-total chips at the bottom (green = 100%, amber = off)
+- Edit dialog: Division is required on Add, locked on Edit
+- Toggle/Delete queries widened to factor in DivCode
+
+**Volume Groups Upload page**:
+- New `Division` column in the template (col 2, between Country and GroupCode)
+- Accepts Division as **name** ("ACCESSORIES") or **code** (int) — same flex as SKU Max Rules upload
+- Validation: Division must resolve to a known DivCode
+- Error breakdown section above the row preview (same as SKU Max Rules upload from 1.14.38)
+- Error rows sorted first in the 200-row preview
+
+**SKU Max Rules Upload validation**:
+- Volume Group existence check now uses `(Country, DivCode, GroupCode)` instead of `(Country, GroupCode)` — a rule for `ACCESSORIES/A` requires a `LPM_VolumeGroup` row for `ACCESSORIES/A` specifically
+
+### Migration / rollout sequence
+
+Apply in this order (planner action):
+
+1. **Deploy 1.14.39** to Azure (auto via GitHub Actions)
+2. **Apply migration 051** in SSMS — wipes existing rows, adds DivCode, swaps PK
+3. **Re-upload Volume Groups** via Uploads page with the new per-Division Excel file
+4. **Re-run EOM Generate** for any active period — Step 5 now uses per-division buckets
+
+⚠ Between steps 2 and 3, `LPM_VolumeGroup` is empty. EOM Generate's readiness check will fail (Volume Groups: 0 active groups) and any in-flight runs will get blank `VolumeGroup` codes. **Don't run migration 051 until you're ready to immediately re-upload.**
+
+### Files changed
+| File | Change |
+|---|---|
+| **NEW** `db/051_lpm_volumegroup_per_division.sql` | Schema migration (wipe + new PK + DivCode + FK) |
+| `src/LpmSim.Core/Entities/LpmVolumeGroup.cs` | Add `DivCode` property |
+| `src/LpmSim.Data/LpmDbContext.cs` | EF key → `(Country, DivCode, GroupCode)` |
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | Step 5 per-division; readiness check tightened |
+| `src/LpmSim.Web/Components/Pages/Admin/VolumeGroups.razor` | Division column / filter / per-div share totals |
+| `src/LpmSim.Web/Components/Pages/Admin/VolumeGroupEditDialog.razor` | Division dropdown (required on Add) |
+| `src/LpmSim.Web/Components/Pages/Uploads/VolumeGroupsUpload.razor` | Division column + name/code resolution + error breakdown |
+| `src/LpmSim.Web/Components/Pages/Uploads/SkuMaxRulesUpload.razor` | Group-existence validation now uses (Country, DivCode, GroupCode) |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.38 → 1.14.39 |
+
+### Files NOT touched
+- `LpmSimGenerator.cs` — BuildSkuMax reads `LPM_SKUMaxRule` directly (already factors DivCode); volume groups only enter via `LPM_EOM_Output.VolumeGroup` which the allocator already consumes through `s.VolumeGroup`
+- `LPM_SKUMaxRule` schema — unchanged (already had DivCode since 1.14.x)
+- `LPM_EOM_Output.VolumeGroup` column — unchanged (still varchar(20), just now reflects per-division bucketing)
+
+### Notes
+- The dropped FK `FK_LPM_SKUMaxRule_Group` referenced just `GroupCode`. It would block adding a rule for any (Country, DivCode) pair if the bare GroupCode didn't exist in any volume group row. With per-Division semantics this check is too loose to be useful — replaced by the upload-time `groupKeys.Contains((ctry, divCode, grp))` check in `SkuMaxRulesUpload`.
+- **No data backfill** — the migration just wipes. If you want to preserve the old shape's behaviour, upload a file that duplicates the same A/B/C/D/E percentages across every Division (one row per division × group).
+
+---
+
 ## 1.14.38 — SKU Max Rules page perf + Upload error visibility (2026-05-17)
 
 ### Two fixes bundled

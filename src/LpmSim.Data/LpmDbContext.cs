@@ -186,7 +186,10 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
         mb.Entity<LpmVolumeGroup>(e =>
         {
             e.ToTable("LPM_VolumeGroup");
-            e.HasKey(x => new { x.Country, x.GroupCode });
+            // 1.14.39 — PK widened to (Country, DivCode, GroupCode) so each
+            // Division can carry its own bucket distribution. Old PK was
+            // (Country, GroupCode). Migration 051 handles the DB-side swap.
+            e.HasKey(x => new { x.Country, x.DivCode, x.GroupCode });
             e.Property(x => x.Country).HasMaxLength(20);
             e.Property(x => x.GroupCode).HasMaxLength(20);
             e.Property(x => x.GroupName).HasMaxLength(100);

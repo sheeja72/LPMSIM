@@ -172,10 +172,14 @@
             await db.DataSettings.AsNoTracking().Where(s => s.Country != null && s.Country != "")
                 .Select(s => s.Country!).Distinct().ToListAsync(),
             StringComparer.OrdinalIgnoreCase);
-        var groupKeys = new HashSet<(string, string)>(
-            await db.LpmVolumeGroups.AsNoTracking()
-                .Select(g => new { g.Country, g.GroupCode }).ToListAsync()
-                .ContinueWith(t => t.Result.Select(x => (x.Country, x.GroupCode))));
+        // 1.14.39 — Volume Groups are keyed by (Country, DivCode, GroupCode).
+        // Validation now uses the full composite — a SKU Max rule for
+        // ACCESSORIES/A must have a VolumeGroup row for ACCESSORIES/A
+        // (not just any 'A' group in the country).
+        var groupKeys = new HashSet<(string Country, int DivCode, string GroupCode)>(
+            (await db.LpmVolumeGroups.AsNoTracking()
+                .Select(g => new { g.Country, g.DivCode, g.GroupCode }).ToListAsync())
+                .Select(x => (x.Country, x.DivCode, x.GroupCode)));
 
         try
         {
@@ -224,7 +228,8 @@
                 if (string.IsNullOrWhiteSpace(div))                                                  problems.Add("Division blank");
                 else if (divCode is null)                                                            problems.Add($"Division '{div}' not found");
                 if (string.IsNullOrWhiteSpace(grp))                                                  problems.Add("GroupCode blank");
-                else if (!string.IsNullOrEmpty(ctry) && !groupKeys.Contains((ctry, grp)))            problems.Add($"VolumeGroup '{ctry}/{grp}' not found");
+                else if (!string.IsNullOrEmpty(ctry) && divCode is not null
+                         && !groupKeys.Contains((ctry, divCode.Value, grp)))                         problems.Add($"VolumeGroup '{ctry}/Div{divCode}/{grp}' not found");
                 if (fr is null || fr < 0)                                                            problems.Add("WHStockFrom invalid");
                 if (to is null || to < 0)                                                            problems.Add("WHStockTo invalid");
                 else if (fr is not null && to < fr)                                                  problems.Add("WHStockTo < WHStockFrom");

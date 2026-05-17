@@ -11,7 +11,8 @@
         <div class="lpm-section">
             <div class="lpm-section-title">Template</div>
             <div class="lpm-section-sub">
-                Volume group share % per country (A, B, C, D, E). Active rows for a country
+                <strong>1.14.39 — Per-(Country, Division, GroupCode).</strong> Each Division
+                has its own A/B/C/D/E distribution. Active rows for each (Country, Division)
                 should sum to 100%.
             </div>
             <MudChipSet T="string" ReadOnly="true" Class="mb-3">
@@ -23,9 +24,11 @@
         <div class="lpm-section">
             <div class="lpm-section-title">Rules</div>
             <ul class="pl-4 mb-0" style="font-size:0.82rem; color:#64748b;">
+                <li><strong>Division</strong> can be the code (int) or the name (e.g. "ACCESSORIES").</li>
                 <li><strong>SharePct</strong> accepts "25" or "25%" or "0.25".</li>
                 <li><strong>IsActive</strong>: yes/no/true/false/1/0 (default yes).</li>
-                <li>Existing rows on (Country, GroupCode) are replaced.</li>
+                <li>Existing rows on (Country, Division, GroupCode) are replaced.</li>
+                <li>Migration 051 wiped all old rows — first upload after deploy is a clean reload.</li>
             </ul>
         </div>
     </MudItem>
@@ -55,14 +58,49 @@
                 <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber"><div class="lpm-metric-label">Will Upsert</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
             </MudGrid>
 
-            <MudTable Items="_rows.Take(200)" Hover Dense Striped FixedHeader Height="50vh">
+            @* 1.14.39 — Error breakdown above the row table, same pattern
+               as SkuMaxRulesUpload (1.14.38). With per-Division uploads of
+               4000+ rows, the planner needs error PATTERNS not row scrolling. *@
+            @if (_errorCount > 0)
+            {
+                var errorGroups = _rows
+                    .Where(r => r.Error is not null)
+                    .GroupBy(r => r.Error!)
+                    .Select(g => new { Message = g.Key, Count = g.Count(), SampleRows = g.Take(5).Select(r => r.RowNum).ToList() })
+                    .OrderByDescending(x => x.Count)
+                    .ToList();
+                <div class="lpm-section mb-3" style="border-left:4px solid #dc2626;">
+                    <div class="lpm-section-title" style="color:#dc2626;">
+                        Error breakdown — @_errorCount row(s) across @errorGroups.Count distinct issue(s)
+                    </div>
+                    <MudTable Items="errorGroups" Hover Dense Striped Height="240px" FixedHeader>
+                        <HeaderContent>
+                            <MudTh Style="width:90px;">Count</MudTh>
+                            <MudTh>Issue</MudTh>
+                            <MudTh Style="width:220px;">Sample row #s</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd Style="text-align:right;font-weight:600;color:#dc2626;">@context.Count.ToString("N0")</MudTd>
+                            <MudTd><span style="font-family:monospace;font-size:0.85rem;">@context.Message</span></MudTd>
+                            <MudTd Style="color:#64748b;font-size:0.82rem;">@string.Join(", ", context.SampleRows)</MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                </div>
+            }
+
+            var displayRows = _errorCount > 0
+                ? _rows.OrderBy(r => r.Error is null ? 1 : 0).Take(200)
+                : _rows.Take(200);
+            <MudTable Items="displayRows" Hover Dense Striped FixedHeader Height="50vh">
                 <HeaderContent>
-                    <MudTh>Row</MudTh><MudTh>Country</MudTh><MudTh>Code</MudTh><MudTh>Name</MudTh>
+                    <MudTh>Row</MudTh><MudTh>Country</MudTh><MudTh>Division</MudTh>
+                    <MudTh>Code</MudTh><MudTh>Name</MudTh>
                     <MudTh>Sort</MudTh><MudTh>Share%</MudTh><MudTh>Active</MudTh><MudTh>Status</MudTh>
                 </HeaderContent>
                 <RowTemplate>
                     <MudTd>@context.RowNum</MudTd>
                     <MudTd>@context.Country</MudTd>
+                    <MudTd>@(context.DivCode?.ToString() ?? context.DivisionRaw)</MudTd>
                     <MudTd>@context.GroupCode</MudTd>
                     <MudTd>@context.GroupName</MudTd>
                     <MudTd>@context.SortOrder</MudTd>
@@ -87,8 +125,11 @@
 </MudGrid>
 
 @code {
+    // 1.14.39 — Division column inserted as col 2, shifting everything else
+    // right by one. Header order matches the planner's existing per-Division
+    // file (per the spec screenshot).
     private static readonly string[] Header =
-        { "Country", "GroupCode", "GroupName", "SortOrder", "SharePct", "IsActive" };
+        { "Country", "Division", "GroupCode", "GroupName", "SortOrder", "SharePct", "IsActive" };
 
     private string? _fileName;
     private bool _parsing, _committing;
@@ -113,10 +154,17 @@
     private async Task ParseAsync(Stream xlsx)
     {
         await using var db = await DbFactory.CreateDbContextAsync();
+        // 1.14.39 — Pre-load Country + Division lookup sets for validation.
+        // Division accepted as either code (int) or name — same flexibility
+        // as the SKU Max Rules upload.
         var countrySet = new HashSet<string>(
             await db.DataSettings.AsNoTracking().Where(s => s.Country != null && s.Country != "")
                 .Select(s => s.Country!).Distinct().ToListAsync(),
             StringComparer.OrdinalIgnoreCase);
+        var divByCode = await db.Divisions.AsNoTracking().ToDictionaryAsync(d => d.DivCode);
+        var divByName = divByCode.Values.Where(d => !string.IsNullOrEmpty(d.Name))
+            .GroupBy(d => d.Name!, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
 
         try
         {
@@ -140,20 +188,32 @@
                 var xlRow = sheet.Row(r);
                 if (!UploadHelpers.RowIsUsed(xlRow)) continue;
                 var (ctry, e1) = UploadHelpers.CellText(xlRow, 1, "Country");
-                var (code, e2) = UploadHelpers.CellText(xlRow, 2, "GroupCode");
-                var (name, e3) = UploadHelpers.CellText(xlRow, 3, "GroupName");
-                var (sort, e4) = UploadHelpers.CellInt(xlRow, 4, "SortOrder");
-                var (sp,   e5) = UploadHelpers.CellPct(xlRow, 5, "SharePct");
-                var (act,  e6) = UploadHelpers.CellBool(xlRow, 6, "IsActive");
+                var (div,  e2) = UploadHelpers.CellText(xlRow, 2, "Division");
+                var (code, e3) = UploadHelpers.CellText(xlRow, 3, "GroupCode");
+                var (name, e4) = UploadHelpers.CellText(xlRow, 4, "GroupName");
+                var (sort, e5) = UploadHelpers.CellInt(xlRow, 5, "SortOrder");
+                var (sp,   e6) = UploadHelpers.CellPct(xlRow, 6, "SharePct");
+                var (act,  e7) = UploadHelpers.CellBool(xlRow, 7, "IsActive");
+
+                // Resolve Division name → DivCode (or accept DivCode directly).
+                int? divCode = null;
+                if (!string.IsNullOrWhiteSpace(div))
+                {
+                    if (int.TryParse(div, out var c) && divByCode.ContainsKey(c)) divCode = c;
+                    else if (divByName.TryGetValue(div, out var d)) divCode = d.DivCode;
+                }
 
                 var row = new Row
                 {
-                    RowNum = r, Country = ctry, GroupCode = code, GroupName = name,
+                    RowNum = r, Country = ctry, DivisionRaw = div, DivCode = divCode,
+                    GroupCode = code, GroupName = name,
                     SortOrder = sort ?? 0, SharePct = sp, IsActive = act,
                 };
-                var problems = new List<string>(new[] { e1, e2, e3, e4, e5, e6 }.Where(e => !string.IsNullOrEmpty(e)));
+                var problems = new List<string>(new[] { e1, e2, e3, e4, e5, e6, e7 }.Where(e => !string.IsNullOrEmpty(e)));
                 if (string.IsNullOrWhiteSpace(ctry))                problems.Add("Country blank");
                 else if (!countrySet.Contains(ctry))                problems.Add($"Country '{ctry}' not in DataSettings");
+                if (string.IsNullOrWhiteSpace(div))                 problems.Add("Division blank");
+                else if (divCode is null)                           problems.Add($"Division '{div}' not found");
                 if (string.IsNullOrWhiteSpace(code))                problems.Add("GroupCode blank");
                 if (sp is null)                                     problems.Add("SharePct blank");
                 if (problems.Count > 0) row.Error = string.Join("; ", problems);
@@ -177,10 +237,11 @@
             var existing = await db.LpmVolumeGroups
                 .Where(g => countries.Contains(g.Country))
                 .ToListAsync();
-            var idx = existing.ToDictionary(g => (g.Country, g.GroupCode));
+            // 1.14.39 — Index by the new composite key.
+            var idx = existing.ToDictionary(g => (g.Country, g.DivCode, g.GroupCode));
             foreach (var r in valid)
             {
-                var k = (r.Country!, r.GroupCode!);
+                var k = (r.Country!, r.DivCode!.Value, r.GroupCode!);
                 if (idx.TryGetValue(k, out var row))
                 {
                     row.GroupName = r.GroupName ?? "";
@@ -193,6 +254,7 @@
                     db.LpmVolumeGroups.Add(new LpmVolumeGroup
                     {
                         Country   = r.Country!,
+                        DivCode   = r.DivCode!.Value,
                         GroupCode = r.GroupCode!,
                         GroupName = r.GroupName ?? "",
                         SortOrder = r.SortOrder,
@@ -215,12 +277,14 @@
         using var wb = new XLWorkbook();
         var sheet = wb.Worksheets.Add("Volume_Groups");
         UploadHelpers.WriteHeader(sheet, Header);
+        // 1.14.39 — Sample row shows the new Division column (name allowed).
         sheet.Cell(2, 1).Value = "UAE";
-        sheet.Cell(2, 2).Value = "A";
-        sheet.Cell(2, 3).Value = "Group A";
-        sheet.Cell(2, 4).Value = 1;
-        sheet.Cell(2, 5).Value = "25%";
-        sheet.Cell(2, 6).Value = "Y";
+        sheet.Cell(2, 2).Value = "ACCESSORIES";
+        sheet.Cell(2, 3).Value = "A";
+        sheet.Cell(2, 4).Value = "Group A";
+        sheet.Cell(2, 5).Value = 1;
+        sheet.Cell(2, 6).Value = "25%";
+        sheet.Cell(2, 7).Value = "Y";
         await UploadHelpers.DownloadAsync(JS, wb, "VolumeGroups_Template.xlsx");
     }
 
@@ -228,6 +292,10 @@
     {
         public int RowNum { get; init; }
         public string? Country { get; init; }
+        // 1.14.39 — DivisionRaw = the text the user typed in the cell (could
+        // be code or name). DivCode = the resolved int after lookup.
+        public string? DivisionRaw { get; init; }
+        public int? DivCode { get; init; }
         public string? GroupCode { get; init; }
         public string? GroupName { get; init; }
         public int SortOrder { get; init; }

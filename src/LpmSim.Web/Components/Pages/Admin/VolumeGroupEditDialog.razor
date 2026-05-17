@@ -6,6 +6,19 @@
 <MudDialog>
     <DialogContent>
         <MudStack Spacing="3">
+            @* 1.14.39 — Division is now part of the PK. Required on Add.
+               On Edit it's disabled (changing DivCode would orphan the row
+               under the old key). To move a group to a different Division,
+               delete + re-add. *@
+            <MudSelect T="int" Value="Model.DivCode"
+                       ValueChanged="(int v) => Model.DivCode = v"
+                       Label="Division" Required="true"
+                       Disabled="@(!IsNew)" Variant="Variant.Outlined">
+                @foreach (var d in Divisions)
+                {
+                    <MudSelectItem T="int" Value="d.DivCode">@d.Name (@d.DivCode)</MudSelectItem>
+                }
+            </MudSelect>
             <MudTextField T="string" Value="Model.GroupCode"
                           ValueChanged="v => Model.GroupCode = v ?? string.Empty"
                           Label="Code" Placeholder="e.g. A"
@@ -39,6 +52,9 @@
 
     [Parameter] public LpmVolumeGroup Model { get; set; } = new();
     [Parameter] public bool IsNew { get; set; }
+    /// <summary>1.14.39 — Division list passed in by the parent so the
+    /// dropdown doesn't re-query the DB on every dialog open.</summary>
+    [Parameter] public List<Division> Divisions { get; set; } = new();
 
     private bool _saving;
 
@@ -51,20 +67,29 @@
             Snackbar.Add("Code is required.", Severity.Error);
             return;
         }
+        // 1.14.39 — Division required (DivCode is part of the new PK).
+        if (Model.DivCode <= 0)
+        {
+            Snackbar.Add("Division is required.", Severity.Error);
+            return;
+        }
         _saving = true;
         try
         {
             await using var db = await DbFactory.CreateDbContextAsync();
             if (IsNew)
             {
-                if (await db.LpmVolumeGroups.AnyAsync(x => x.Country == Model.Country && x.GroupCode == Model.GroupCode))
+                // Existence check now includes DivCode.
+                if (await db.LpmVolumeGroups.AnyAsync(x =>
+                        x.Country == Model.Country && x.DivCode == Model.DivCode && x.GroupCode == Model.GroupCode))
                 {
-                    Snackbar.Add("A group with that code already exists for this country.", Severity.Warning);
+                    Snackbar.Add($"A group with that code already exists for {Model.Country} / Div {Model.DivCode}.", Severity.Warning);
                     return;
                 }
                 db.LpmVolumeGroups.Add(new LpmVolumeGroup
                 {
                     Country   = Model.Country,
+                    DivCode   = Model.DivCode,
                     GroupCode = Model.GroupCode.Trim(),
                     GroupName = Model.GroupName,
                     SortOrder = Model.SortOrder,
@@ -75,7 +100,8 @@
             }
             else
             {
-                var row = await db.LpmVolumeGroups.FirstAsync(x => x.Country == Model.Country && x.GroupCode == Model.GroupCode);
+                var row = await db.LpmVolumeGroups.FirstAsync(x =>
+                    x.Country == Model.Country && x.DivCode == Model.DivCode && x.GroupCode == Model.GroupCode);
                 row.GroupName = Model.GroupName;
                 row.SortOrder = Model.SortOrder;
                 row.SharePct = Model.SharePct;
@@ -83,11 +109,11 @@
             }
             await db.SaveChangesAsync();
             Snackbar.Add("Saved.", Severity.Success);
-            // 1.14.29 — audit-log this user-initiated action.
             await ActionLog.LogAsync(IsNew ? "VolumeGroups.Add" : "VolumeGroups.Edit",
-                $"{Model.Country}/{Model.GroupCode}",
-                new { country = Model.Country, groupCode = Model.GroupCode, groupName = Model.GroupName,
-                      sortOrder = Model.SortOrder, sharePct = Model.SharePct, isActive = Model.IsActive },
+                $"{Model.Country}/Div{Model.DivCode}/{Model.GroupCode}",
+                new { country = Model.Country, divCode = Model.DivCode, groupCode = Model.GroupCode,
+                      groupName = Model.GroupName, sortOrder = Model.SortOrder, sharePct = Model.SharePct,
+                      isActive = Model.IsActive },
                 action: 'X');
             MudDialog.Close(DialogResult.Ok(true));
         }
