@@ -23,6 +23,42 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.40 — HOTFIX: LpmSKUMaxRule FK widened to match 1.14.39 PK (2026-05-17)
+
+### Bug
+1.14.39 widened the `LpmVolumeGroup` PK to `(Country, DivCode, GroupCode)` but missed updating the matching FK config on `LpmSKUMaxRule.Group` in `LpmDbContext.cs`. EF Core's model build validates FK columns line up with the target PK — when they don't, the model fails to build and **every page that touches DbContext returns HTTP 500**.
+
+This surfaced as a 500 on `/lpm/lpm-sim/generate` immediately after 1.14.39 deployed. The SIM Generate page's `OnInitializedAsync` calls `db.DataSettings.Where(...)` which triggers DbContext initialization → model build → throw.
+
+### Fix
+One-line change to `LpmDbContext.cs:285-288`:
+
+```csharp
+// Before (1.14.39 — 2-column FK, no longer matches 3-column PK):
+e.HasOne(x => x.Group)
+    .HasForeignKey(x => new { x.Country, x.GroupCode });
+
+// After (1.14.40 — 3-column FK matches new PK):
+e.HasOne(x => x.Group)
+    .HasForeignKey(x => new { x.Country, x.DivCode, x.GroupCode });
+```
+
+`LpmSKUMaxRule` already has all 3 columns, so this maps cleanly. The corresponding DB-side FK (`FK_LPM_SKUMaxRule_Group`) was already dropped by migration 051 — app-level upload validation handles the integrity check now.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmDbContext.cs` | `LpmSKUMaxRule.Group` FK config widened from 2-column to 3-column |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.39 → 1.14.40 |
+
+### Why this wasn't caught in build
+The build succeeded (0 errors) because EF Core's model validation runs at **runtime** on first DbContext use, not at C# compile time. A unit test that did anything against the DbContext would have caught it. The existing test surface doesn't cover model build.
+
+### Lesson logged
+When changing a PK column count on any entity, grep for all `HasForeignKey` references to that entity and verify column counts match. (Future-me: add a startup smoke-test that does `using (var db = ...) await db.Database.CanConnectAsync();` to surface model-build errors at deploy time, not first user request.)
+
+---
+
 ## 1.14.39 — Volume Groups per (Country, Division, GroupCode) (2026-05-17)
 
 ### Feature

@@ -281,10 +281,20 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.Country).HasMaxLength(20);
             e.Property(x => x.GroupCode).HasMaxLength(20);
             e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
-            // FK is now composite (Country, GroupCode) since LPM_VolumeGroup is per-country.
+            // 1.14.40 hotfix — FK widened to 3-column composite to match
+            // the new LpmVolumeGroup PK (Country, DivCode, GroupCode) from
+            // 1.14.39. The old 2-column FK config caused EF Core's model
+            // build to fail at startup (PK has 3 cols, FK has 2 → mismatch),
+            // which surfaced as HTTP 500 on EVERY page that touched the
+            // DbContext — including SIM Generate.
+            //
+            // LpmSKUMaxRule already has all 3 columns, so this matches
+            // cleanly. The corresponding DB-side FK was already dropped
+            // by migration 051 (Volume Groups upload validation now does
+            // the (Country, DivCode, GroupCode) check at the app layer).
             e.HasOne(x => x.Group)
                 .WithMany()
-                .HasForeignKey(x => new { x.Country, x.GroupCode })
+                .HasForeignKey(x => new { x.Country, x.DivCode, x.GroupCode })
                 .OnDelete(DeleteBehavior.Restrict);
             e.HasOne(x => x.Division)
                 .WithMany()
