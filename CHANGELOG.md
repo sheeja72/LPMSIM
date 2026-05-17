@@ -23,6 +23,34 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.45 — Deactivate Store×Division dialog: Select all (2026-05-17)
+
+### Feature
+The **Deactivate (Store × Division)** dialog under Admin → Store-Division Access had only individual checkboxes — picking 50 stores or 20 divisions meant 70 clicks. Added **Select all** to both lists.
+
+### Behaviour
+- A `Select all` checkbox sits above each list (Stores + Divisions)
+- It acts on **filtered visible items only** — so a planner can type a prefix in the search box (e.g. `BFL-`) then tick Select all to add only those filtered rows
+- Auto-checks when every filtered row is already picked; unchecks otherwise
+- Disabled when the filter returns zero matches
+- The label shows the live count: `Select all (12 visible)`
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/Admin/StoreDivAccessAddDialog.razor` | Select-all checkbox above each list + `ToggleAllVisibleStores` / `ToggleAllVisibleDivs` helpers |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.44 → 1.14.45 |
+
+### Files NOT touched
+- `StoreDeptAccessAddDialog.razor` — same UX pattern exists there (3-column store × div × dept). Scope kept tight to what was asked. Easy to add later if you want consistency.
+- Other dialogs / pages unchanged
+
+### Notes
+- **No DB migration.** Pure UI change.
+- **No business logic change.** Just adds a convenience selector. Picked items still go through the same Save path.
+
+---
+
 ## 1.14.44 — SkuMax SOH refresh + diagnostic UNKNOWN→CAP fix (2026-05-17)
 
 ### Bug investigation (real-world batch 36, UAE)

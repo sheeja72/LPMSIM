@@ -16,8 +16,23 @@
                               ValueChanged="(string v) => { _storeFilter = v ?? string.Empty; }"
                               Variant="Variant.Outlined" Margin="Margin.Dense"
                               Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                @{ var visStores = FilteredStores.ToList(); }
+                @* 1.14.45 — Select-all toggles every store currently visible
+                   under the filter (not the full master list). Lets the
+                   planner type a prefix like "BFL-" then tick the box to
+                   select every BFL store without 50 individual clicks. *@
+                <div style="margin-top:.4rem;">
+                    <MudCheckBox T="bool"
+                                 Value="@(visStores.Count > 0 && visStores.All(s => _pickedStores.Contains(s.StoreID)))"
+                                 ValueChanged="(bool v) => ToggleAllVisibleStores(v)"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small"
+                                 Disabled="@(visStores.Count == 0)">
+                        <strong>Select all</strong>
+                        <span style="color:#94a3b8;">(@visStores.Count visible)</span>
+                    </MudCheckBox>
+                </div>
                 <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
-                    @foreach (var s in FilteredStores)
+                    @foreach (var s in visStores)
                     {
                         <div>
                             <MudCheckBox T="bool" Value="@_pickedStores.Contains(s.StoreID)"
@@ -39,8 +54,19 @@
                               ValueChanged="(string v) => { _divFilter = v ?? string.Empty; }"
                               Variant="Variant.Outlined" Margin="Margin.Dense"
                               Adornment="Adornment.Start" AdornmentIcon="@Icons.Material.Filled.Search" />
+                @{ var visDivs = FilteredDivisions.ToList(); }
+                <div style="margin-top:.4rem;">
+                    <MudCheckBox T="bool"
+                                 Value="@(visDivs.Count > 0 && visDivs.All(d => _pickedDivs.Contains(d.DivCode)))"
+                                 ValueChanged="(bool v) => ToggleAllVisibleDivs(v)"
+                                 Color="Color.Primary" Dense="true" Size="Size.Small"
+                                 Disabled="@(visDivs.Count == 0)">
+                        <strong>Select all</strong>
+                        <span style="color:#94a3b8;">(@visDivs.Count visible)</span>
+                    </MudCheckBox>
+                </div>
                 <div style="max-height:280px;overflow:auto;border:1px solid #e2e8f0;border-radius:6px;padding:.4rem .6rem;margin-top:.4rem;">
-                    @foreach (var d in FilteredDivisions)
+                    @foreach (var d in visDivs)
                     {
                         <div>
                             <MudCheckBox T="bool" Value="@_pickedDivs.Contains(d.DivCode)"
@@ -113,6 +139,27 @@
     {
         if (on) _pickedDivs.Add(divCode);
         else    _pickedDivs.Remove(divCode);
+    }
+
+    // 1.14.45 — Select/Clear all stores currently visible under the filter.
+    // Acts only on the filtered subset so a planner can scope a bulk
+    // selection by typing a prefix first (e.g. "BFL-" → tick Select all →
+    // every BFL store added, non-BFL untouched).
+    private void ToggleAllVisibleStores(bool on)
+    {
+        foreach (var s in FilteredStores)
+        {
+            if (on) _pickedStores.Add(s.StoreID);
+            else    _pickedStores.Remove(s.StoreID);
+        }
+    }
+    private void ToggleAllVisibleDivs(bool on)
+    {
+        foreach (var d in FilteredDivisions)
+        {
+            if (on) _pickedDivs.Add(d.DivCode);
+            else    _pickedDivs.Remove(d.DivCode);
+        }
     }
 
     private void Save()
