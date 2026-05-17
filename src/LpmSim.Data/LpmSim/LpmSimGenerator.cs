@@ -1337,9 +1337,25 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // reading the SkuMax table after a SIM run would see ToFillQty
         // values that don't match what the allocator just decided.
         //
-        // With this refresh, ToFillQty becomes "what-you-see-is-what-the-
-        // allocator-saw". ToFillQty is a computed PERSISTED column so SQL
-        // re-derives it automatically from the new SOH + existing SKUMax.
+        // 1.14.46 — Scope the refresh to ITEMS THIS BATCH TOUCHED, not the
+        // whole SkuMax snapshot. The 1.14.44 implementation updated all
+        // ~13.8M LPM_SimItemSkuMax rows for the period, regardless of how
+        // small the SIM run was (e.g. a 4K-box LPM batch). With ToFillQty
+        // being a PERSISTED computed column, every UPDATE triggers a
+        // recompute + persisted-write — added 2-5 minutes to every SIM
+        // Generate.
+        //
+        // The new scope is "items in any eligible box from this batch" —
+        // union of items in LPMSIM_Output (successfully allocated) and
+        // items in boxes that appear in LPMSIM_UnallocatedDiagnostic
+        // (eligible but not fully allocated). This covers every item the
+        // planner might investigate after the run. Items NOT in this
+        // batch's box set keep their last-built snapshot SOH, which is
+        // correct because the allocator didn't touch them this run.
+        //
+        // Expected speedup: 13.8M-row UPDATE → typically 100K-2M-row
+        // UPDATE depending on batch size. SIM Generate's tail drops from
+        // 2-5 min back to 5-20 seconds.
         //
         // Best-effort: wrapped in try/catch so any failure here doesn't
         // affect the build. Values just stay stale until the next Build
@@ -1348,9 +1364,25 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         {
             using var refresh = conn.CreateCommand();
             refresh.CommandText = @"
+                WITH BatchItems AS (
+                    -- Items the allocator successfully placed
+                    SELECT DISTINCT Itemcode
+                      FROM dbo.LPMSIM_Output
+                     WHERE LPMBatchNo = @batchNo
+                    UNION
+                    -- Items in eligible-but-unallocated boxes (so the planner
+                    -- investigating an UNKNOWN/CAP diagnostic also gets fresh
+                    -- ToFillQty for those items, not just allocated ones).
+                    SELECT DISTINCT w.itemcode
+                      FROM racks.dbo.whboxitems w
+                      INNER JOIN dbo.LPMSIM_UnallocatedDiagnostic ud
+                              ON ud.BoxNo = w.BoxNo
+                     WHERE ud.LPMBatchNo = @batchNo
+                )
                 UPDATE sm
                    SET sm.SOH = CAST(ISNULL(s.SohLive, 0) AS int)
                   FROM dbo.LPM_SimItemSkuMax sm
+                  INNER JOIN BatchItems bi ON bi.Itemcode = sm.ItemCode
                   LEFT JOIN (
                       SELECT ls.StoreID, ls.Itemcode,
                              SohLive = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
@@ -1367,6 +1399,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             refresh.Parameters.Add(new SqlParameter("@country", req.Country));
             refresh.Parameters.Add(new SqlParameter("@y", req.RunYear));
             refresh.Parameters.Add(new SqlParameter("@m", req.RunMonth));
+            refresh.Parameters.Add(new SqlParameter("@batchNo", batch.LPMBatchNo));
             refresh.CommandTimeout = 300;
             await refresh.ExecuteNonQueryAsync(ct);
         }

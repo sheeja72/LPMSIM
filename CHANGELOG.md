@@ -23,6 +23,64 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.46 — SOH refresh scoped to batch items (1.14.44 perf fix) (2026-05-17)
+
+### Bug
+1.14.44 added an end-of-SIM-Generate UPDATE that refreshed `LPM_SimItemSkuMax.SOH` from live `racks.dbo.LPM_LocStock`, so planners reading the SkuMax snapshot after a SIM run would see truthful `ToFillQty` instead of stale values. Side effect: the UPDATE blindly hit **every row** in the period — ~13.8M rows for UAE — regardless of how many items the SIM run actually touched. Combined with `ToFillQty` being a PERSISTED computed column (one write per row × two columns), this added **2–5 minutes** to every SIM Generate, including small LPM runs (4K boxes, 25K lines, 27K qty — work that should have completed in 30-60s).
+
+Planner noticed it after an LPM run that took unexpectedly long.
+
+### Fix
+Scope the UPDATE to **items the batch actually touched**, not the whole snapshot:
+
+```sql
+WITH BatchItems AS (
+    -- Items the allocator successfully placed
+    SELECT DISTINCT Itemcode FROM dbo.LPMSIM_Output WHERE LPMBatchNo = @batchNo
+    UNION
+    -- Items in eligible-but-unallocated boxes (so the planner investigating
+    -- an UNKNOWN/CAP diagnostic also gets fresh ToFillQty for those items)
+    SELECT DISTINCT w.itemcode
+      FROM racks.dbo.whboxitems w
+      INNER JOIN dbo.LPMSIM_UnallocatedDiagnostic ud ON ud.BoxNo = w.BoxNo
+     WHERE ud.LPMBatchNo = @batchNo
+)
+UPDATE sm
+   SET sm.SOH = CAST(ISNULL(s.SohLive, 0) AS int)
+  FROM dbo.LPM_SimItemSkuMax sm
+  INNER JOIN BatchItems bi ON bi.Itemcode = sm.ItemCode
+  LEFT JOIN (SUM SOH per (Store, Item) from racks..LPM_LocStock × DataSettings) s
+        ON s.StoreID = sm.StoreID AND s.Itemcode = sm.ItemCode
+ WHERE sm.Country = @country AND sm.Year1 = @y AND sm.Month1 = @m;
+```
+
+### Why "items in this batch" and not just "items allocated"
+Using only `LPMSIM_Output` would leave items in CAP/UNKNOWN-flagged boxes with stale ToFillQty — exactly the case the planner is investigating after a run. The UNION with `LPMSIM_UnallocatedDiagnostic × whboxitems` ensures every item the planner might look at gets a fresh SOH.
+
+### Expected speedup
+- **LPM run (4K boxes, 25K lines)**: UPDATE drops from ~13.8M rows → ~50–100K rows. End-of-SIM tail drops from 2-5 min → 5-15 sec.
+- **Non-LPM run (30K boxes, 230K lines)**: UPDATE drops from ~13.8M rows → ~1-2M rows. Tail drops from 3-5 min → 15-40 sec.
+- **Items NOT in this batch's box set** keep their last-built snapshot SOH — correct, because the allocator didn't read live SOH for them this run.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | End-of-SIM SOH refresh: added `WITH BatchItems AS (...)` CTE + `INNER JOIN BatchItems` to scope the UPDATE; added `@batchNo` parameter |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.45 → 1.14.46 |
+
+### Risk
+**Low.**
+- Still wrapped in try/catch — any failure here doesn't fail the build
+- No DB schema change
+- Refresh still happens for every (Store, Item) row in the SkuMax snapshot that this batch's items touch — so all relevant rows are still kept current
+- Items the batch genuinely didn't touch keep their snapshot values, which is consistent with "Build SKU Max sets the snapshot; SIM Generate refreshes only what it processed"
+
+### Notes
+- **No DB migration.** Same query shape, just narrower scope.
+- **1.14.44 behaviour preserved for items in the batch** — the use case ("planner can trust ToFillQty after a SIM run") still holds for every item the planner might investigate.
+
+---
+
 ## 1.14.45 — Deactivate Store×Division dialog: Select all (2026-05-17)
 
 ### Feature
