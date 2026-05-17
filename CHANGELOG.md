@@ -23,6 +23,57 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.37 — LPM_SKUMaxRule: Country-leading index for fast lookups (2026-05-17)
+
+### Bug
+Opening the **SKU Max Rules** admin page and picking a country with zero rules (e.g. KUWAIT) showed a noticeable lag before the "No rules yet for …" alert appeared. Planner reported it.
+
+### Root cause
+`LPM_SKUMaxRule` had the wrong index in prod. Migration 008 was supposed to drop the original `IX_LPM_SKUMaxRule_Lookup (GroupCode, WHStockFrom, WHStockTo)` from migration 006 and replace it with `(Country, DivCode, GroupCode, WHStockFrom, WHStockTo)` — but only when the table was empty at migration time:
+
+```sql
+-- migration 008
+IF NOT EXISTS (... Country IS NULL ...) AND @rowcount = 0
+BEGIN
+    DROP INDEX IX_LPM_SKUMaxRule_Lookup ON dbo.LPM_SKUMaxRule;
+    CREATE INDEX IX_LPM_SKUMaxRule_Lookup
+        ON dbo.LPM_SKUMaxRule(Country, DivCode, GroupCode, WHStockFrom, WHStockTo);
+END
+```
+
+Existing servers with rules at migration time kept the original GroupCode-leading index. Every `WHERE Country = ?` then became a clustered scan instead of a seek. For KUWAIT (zero rows), the engine still had to scan every row in the table to confirm none matched.
+
+### Fix
+New migration `050_lpm_skumaxrule_country_index.sql`:
+- Detects whether *any* existing non-clustered index on `LPM_SKUMaxRule` already leads with `Country`. If yes, leaves everything alone.
+- Otherwise drops the old `IX_LPM_SKUMaxRule_Lookup` (any shape) and creates the new composite:
+
+```sql
+CREATE INDEX IX_LPM_SKUMaxRule_Lookup
+    ON dbo.LPM_SKUMaxRule (Country, DivCode, GroupCode, WHStockFrom, WHStockTo)
+    INCLUDE (SKUMax, IsActive);
+```
+
+The `INCLUDE (SKUMax, IsActive)` covers the BuildSkuMax rule-lookup `SELECT DivCode, GroupCode, WHStockFrom, WHStockTo, SKUMax FROM LPM_SKUMaxRule WHERE IsActive=1 AND Country=@country` so the engine never has to touch the clustered table.
+
+### What this fixes
+- **SKU Max Rules admin page** — Country dropdown changes load near-instantly. KUWAIT (no rules) returns in <100ms instead of multiple seconds.
+- **`BuildSkuMax` `#Rules` populate step** (`LpmSimGenerator.cs:2792`) — same `WHERE Country = @country` query, same speedup. Bigger benefit on countries with thousands of rules.
+
+### Files changed
+| File | Change |
+|---|---|
+| **NEW** `db/050_lpm_skumaxrule_country_index.sql` | Idempotent index swap. Detects current state and only acts when needed. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.36 → 1.14.37 |
+
+### Notes
+- **No code change.** Pure DB index fix — EF Core's generated SQL was already correct (`WHERE Country = ?`); it just needed the right index.
+- **Apply migration 050 in SSMS** — single short ALTER, idempotent, takes a second on any realistic table size.
+- **Old IX_LPM_SKUMaxRule_Lookup (GroupCode, …)** — dropped. No current query benefited from that leading column; the new composite still has GroupCode as the 3rd key, so any future GroupCode-first lookup still gets index assistance (just not a pure seek).
+- **Country/DivCode columns may still be nullable** if migration 008 couldn't tighten them at the time. The new index works fine on nullable columns. Tightening NULLability is a separate (optional) cleanup.
+
+---
+
 ## 1.14.36 — Division Summary perf: temp tables vs CTE re-scans (2026-05-16)
 
 ### Bug
