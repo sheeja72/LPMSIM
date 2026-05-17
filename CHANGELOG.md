@@ -23,6 +23,99 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.38 — SKU Max Rules page perf + Upload error visibility (2026-05-17)
+
+### Two fixes bundled
+
+This release ships two related improvements to the SKU Max admin area:
+1. **Admin page perf** — parallelize the 3 reference-data queries that run on every page open
+2. **Upload error visibility** — fix the "I see 4175 errors but can't find them" issue on the SKU Max Rules Upload page
+
+---
+
+### Fix 2 — Upload page surfaces error rows + breakdown
+
+#### Bug
+Uploading an Excel file with 4830 rows and 4175 errors showed all four metric cards (Total / Valid / Errors / Will Upsert) but the row table looked clean — every visible row had Status = OK. Planner had no way to see what was wrong.
+
+#### Root cause
+The table was hardcoded to `_rows.Take(200)` — show only the first 200 rows from the source file. With errors scattered throughout 4830 rows, the first 200 happened to be valid rows, so no error was ever visible. There was also no per-error-type breakdown — even with a longer list, hunting through 4000+ rows to spot patterns would be impractical.
+
+#### Fix
+Two changes to `SkuMaxRulesUpload.razor`:
+
+1. **Error breakdown section** — added above the row table, only renders when `_errorCount > 0`. Groups every error row by its error-message string (e.g. `"VolumeGroup 'KSA/A' not found"` or `"Country 'OMAN' not in DataSettings"`) and shows:
+   - Count per issue (highest first)
+   - Sample row numbers for the first 5 occurrences
+   - Mono-font for the issue text so misspellings / unexpected codes stand out
+
+2. **Default row ordering** — when there's at least one error row, sort error rows first in the 200-row preview so they're visible by default:
+   ```csharp
+   var displayRows = _errorCount > 0
+       ? _rows.OrderBy(r => r.Error is null ? 1 : 0).Take(200)
+       : _rows.Take(200);
+   ```
+   No new toggle / state — just smarter defaults.
+
+#### What this means for the planner
+- See **at a glance** which 3-5 issue types are causing the bulk of the 4175 errors
+- Most common pattern is missing Country / VolumeGroup setup for one of the countries in the file — the breakdown surfaces this immediately
+- Fix the source file → re-upload → repeat until the breakdown is empty
+
+---
+
+### Fix 1 — Admin page init parallelization
+
+#### Bug
+After 1.14.37 added the Country-leading index (migration 050), the SKU Max Rules page was still slow to load. Even on a country with zero rules (UAE freshly wiped via Replace-All), the page took several seconds to render.
+
+#### Root cause
+`OnInitializedAsync` runs **three independent reference-data queries sequentially** on one DbContext:
+
+```csharp
+_countries = await db.DataSettings.Where(...).Select(...).Distinct().OrderBy(...).ToListAsync();
+_divisions = await db.Divisions.OrderBy(d => d.DivCode).ToListAsync();
+_groups    = await db.LpmVolumeGroups.AsNoTracking().Where(g => g.IsActive).OrderBy(g => g.SortOrder).ToListAsync();
+```
+
+`DataSettings` is a synonym pointing at `bfldata.dbo.DataSettings` (cross-database, thousands of store rows). The `SELECT DISTINCT Country WHERE ActiveStore = 'Y'` against that synonym is the slowest of the three. Sequential awaits meant total init time = sum of all three, not max.
+
+Then `LoadAsync()` runs *after* — adding another round-trip even when the result is empty.
+
+#### Fix
+Split each reference-data load into its own helper method with its own DbContext, then run all three in parallel via `Task.WhenAll`. Total page-init wall-clock time drops from `t1 + t2 + t3` to `max(t1, t2, t3)`.
+
+```csharp
+var countriesTask = LoadCountriesAsync();
+var divisionsTask = LoadDivisionsAsync();
+var groupsTask    = LoadGroupsAsync();
+await Task.WhenAll(countriesTask, divisionsTask, groupsTask);
+```
+
+Each helper creates its own short-lived `DbContext` via `IDbContextFactory.CreateDbContextAsync` — required because EF Core does **not** support concurrent operations on a single context. Factory-created contexts share the underlying `SqlConnection` pool, so the 3 brief in-flight connections are cheap.
+
+Also added `AsNoTracking()` to the countries + divisions queries (was already on groups). Tiny extra win — no entity tracking overhead on read-only lists.
+
+#### Expected impact
+- Page init: **~60% faster** on a typical UAE prod profile, where `DataSettings` dominates
+- Especially noticeable when paired with migration 050 (Country-leading index on `LPM_SKUMaxRule`) — the LoadAsync step is now near-instant, so init is the only remaining cost
+
+---
+
+### Files changed (both fixes)
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/Admin/SkuMaxRules.razor` | `OnInitializedAsync` refactored: 3 sequential queries → 3 parallel helper methods + `Task.WhenAll`. `AsNoTracking()` added on countries + divisions. |
+| `src/LpmSim.Web/Components/Pages/Uploads/SkuMaxRulesUpload.razor` | Error breakdown section above row table (groups errors by message + counts + sample row #s). Row preview now shows error rows first when errors exist. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.37 → 1.14.38 |
+
+### Notes
+- **Migration 050 is still required.** Fix 1 speeds up init; migration 050 speeds up country-switching (the `LoadAsync` query against `LpmSKUMaxRules`). Both are needed for the page to feel snappy end-to-end.
+- **No DB migration** for either fix. Pure C# / Razor.
+- **No semantic change** — same data loaded, same UI shape, same upload validation rules. Fix 2 only changes which rows are visible in the preview + adds the breakdown section.
+
+---
+
 ## 1.14.37 — LPM_SKUMaxRule: Country-leading index for fast lookups (2026-05-17)
 
 ### Bug

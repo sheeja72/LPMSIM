@@ -62,7 +62,50 @@
                 <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber"><div class="lpm-metric-label">Will Upsert</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
             </MudGrid>
 
-            <MudTable Items="_rows.Take(200)" Hover Dense Striped FixedHeader Height="50vh">
+            @* 1.14.39: Error breakdown — group every error row by its
+               error-message string and show counts. With 4000+ error
+               rows, the planner needs to see error PATTERNS, not
+               scroll through individual rows. Each problem string is
+               unique (e.g. "VolumeGroup 'KSA/A' not found") so grouping
+               surfaces the systematic issues immediately. *@
+            @if (_errorCount > 0)
+            {
+                var errorGroups = _rows
+                    .Where(r => r.Error is not null)
+                    .GroupBy(r => r.Error!)
+                    .Select(g => new { Message = g.Key, Count = g.Count(), SampleRows = g.Take(5).Select(r => r.RowNum).ToList() })
+                    .OrderByDescending(x => x.Count)
+                    .ToList();
+                <div class="lpm-section mb-3" style="border-left:4px solid #dc2626;">
+                    <div class="lpm-section-title" style="color:#dc2626;">
+                        Error breakdown — @_errorCount row(s) across @errorGroups.Count distinct issue(s)
+                    </div>
+                    <div class="lpm-section-sub mb-2">
+                        Highest counts first. Fix the most common issues first — usually missing Country / VolumeGroup setup or wrong Division codes for the file's data.
+                    </div>
+                    <MudTable Items="errorGroups" Hover Dense Striped Height="240px" FixedHeader>
+                        <HeaderContent>
+                            <MudTh Style="width:90px;">Count</MudTh>
+                            <MudTh>Issue</MudTh>
+                            <MudTh Style="width:220px;">Sample row #s</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd Style="text-align:right;font-weight:600;color:#dc2626;">@context.Count.ToString("N0")</MudTd>
+                            <MudTd><span style="font-family:monospace;font-size:0.85rem;">@context.Message</span></MudTd>
+                            <MudTd Style="color:#64748b;font-size:0.82rem;">@string.Join(", ", context.SampleRows)</MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                </div>
+            }
+
+            @* Default ordering: error rows FIRST when present so the
+               first 200 shown surfaces problems immediately. Was just
+               `_rows.Take(200)` which silently lost errors when they
+               sat past row 200 in the source file. *@
+            var displayRows = _errorCount > 0
+                ? _rows.OrderBy(r => r.Error is null ? 1 : 0).Take(200)
+                : _rows.Take(200);
+            <MudTable Items="displayRows" Hover Dense Striped FixedHeader Height="50vh">
                 <HeaderContent>
                     <MudTh>Row</MudTh><MudTh>Country</MudTh><MudTh>Division</MudTh><MudTh>Group</MudTh>
                     <MudTh>From</MudTh><MudTh>To</MudTh><MudTh>SKU Max</MudTh><MudTh>Active</MudTh><MudTh>Status</MudTh>
