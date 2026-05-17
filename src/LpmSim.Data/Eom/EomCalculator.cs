@@ -166,7 +166,19 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 "SKU Max Rules",
                 activeRules.Count == 0
                     ? $"No active rules for {country}."
-                    : $"{activeRules.Count} active rules for {country} across {activeRules.Select(r => r.DivCode).Distinct().Count()} division(s)."),
+                    : rulesOk
+                        ? $"{activeRules.Count} active rules for {country} across {activeRules.Select(r => r.DivCode).Distinct().Count()} division(s)."
+                        // 1.14.41 — Blocked state now lists the SPECIFIC
+                        // (DivCode, GroupCode) pairs in active Volume Groups
+                        // that have no matching active SKU Max rule. Was just
+                        // a generic count, which left the planner guessing
+                        // which (Division, GroupCode) to fix.
+                        : $"{activeRules.Count} active rules but {activeGroups.Count(g => !activeRules.Any(r => r.DivCode == g.DivCode && r.GroupCode == g.GroupCode))} (Division, Group) pair(s) have no matching rule: " +
+                          string.Join(", ", activeGroups
+                              .Where(g => !activeRules.Any(r => r.DivCode == g.DivCode && r.GroupCode == g.GroupCode))
+                              .Take(8)
+                              .Select(g => $"Div{g.DivCode}/{g.GroupCode}")) +
+                          (activeGroups.Count(g => !activeRules.Any(r => r.DivCode == g.DivCode && r.GroupCode == g.GroupCode)) > 8 ? ", …" : "")),
         };
     }
 

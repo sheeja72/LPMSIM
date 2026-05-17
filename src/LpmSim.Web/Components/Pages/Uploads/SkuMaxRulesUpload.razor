@@ -176,10 +176,17 @@
         // Validation now uses the full composite — a SKU Max rule for
         // ACCESSORIES/A must have a VolumeGroup row for ACCESSORIES/A
         // (not just any 'A' group in the country).
+        //
+        // 1.14.41 — HashSet uses CountryDivGroupComparerCI so the
+        // case-insensitive comparison matches SQL Server's default
+        // collation. Without this, 'Kuwait/419/A' in the upload would
+        // fail to match 'KUWAIT/419/A' in the DB even though SQL would
+        // treat them as the same row.
         var groupKeys = new HashSet<(string Country, int DivCode, string GroupCode)>(
             (await db.LpmVolumeGroups.AsNoTracking()
                 .Select(g => new { g.Country, g.DivCode, g.GroupCode }).ToListAsync())
-                .Select(x => (x.Country, x.DivCode, x.GroupCode)));
+                .Select(x => (x.Country, x.DivCode, x.GroupCode)),
+            CountryDivGroupComparerCI.Instance);
 
         try
         {

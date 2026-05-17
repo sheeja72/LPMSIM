@@ -23,6 +23,99 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.41 — Upload validation fixes (2026-05-17)
+
+### Three input-validation bugs surfaced + fixed in one release
+
+| # | Page | Bug | Symptom |
+|---|---|---|---|
+| 1 | SKU Max Rules Upload | Group-existence check was case-sensitive | "`VolumeGroup 'Kuwait/Div419/A' not found`" even though `KUWAIT/Div419/A` exists in the DB |
+| 2 | Volume Groups Upload | Upsert dictionary was case-sensitive | Re-upload of `Kuwait` after `KUWAIT` rows existed would try to INSERT duplicates, then trip the PK on commit (SQL Server's default collation treats them as equal) |
+| 3 | Monthly Weights Upload | Same `(PeriodYear, PeriodMonth)` accepted twice under different `PeriodSeq` | One run period summing to 200% → EOM Generate readiness blocked |
+
+All three are the same class of bug — **upload validation gaps**. SQL Server's default collation is case-insensitive but .NET in-memory `HashSet` / `Dictionary` default to case-sensitive, and the table PK on `LPM_MonthlyWeight` includes `PeriodSeq` (not `PeriodYear`/`PeriodMonth`) which let semantic duplicates slip past the PK guard.
+
+### Fix 1 — SKU Max Rules Upload: case-insensitive group key lookup
+
+```csharp
+// Before — default tuple equality is case-sensitive:
+var groupKeys = new HashSet<(string Country, int DivCode, string GroupCode)>(...);
+
+// After — explicit IEqualityComparer that uses StringComparer.OrdinalIgnoreCase
+// for the two string components:
+var groupKeys = new HashSet<(string Country, int DivCode, string GroupCode)>(
+    ..., CountryDivGroupComparerCI.Instance);
+```
+
+The new `CountryDivGroupComparerCI` is a shared `IEqualityComparer` in `UploadHelpers.cs`. Same instance reused by Fix 2.
+
+### Fix 2 — Volume Groups Upload: case-insensitive upsert dictionary
+
+```csharp
+// Before — case-sensitive Dictionary:
+var idx = existing.ToDictionary(g => (g.Country, g.DivCode, g.GroupCode));
+
+// After — same comparer as Fix 1:
+var idx = new Dictionary<(string Country, int DivCode, string GroupCode), LpmVolumeGroup>(
+    CountryDivGroupComparerCI.Instance);
+foreach (var g in existing) idx[(g.Country, g.DivCode, g.GroupCode)] = g;
+```
+
+### Fix 3 — Monthly Weights Upload: dupe detection + replace-all per run period
+
+Two layered defenses:
+
+1. **In-file dupe detection during ParseAsync.** Iterate parsed rows; for each `(Country, RunYear, RunMonth, PeriodYear, PeriodMonth)`, remember the row number on first sight. If the key shows up again, BOTH the earlier row and this one get flagged with a cross-reference: `"Duplicate period (2026-3) for (UAE, RunY=2026, RunM=5) — also at row 11"`. The Error Breakdown section above the row preview surfaces the count.
+
+2. **Replace-all per `(Country, RunYear, RunMonth)` in CommitAsync.** Was: upsert by `(Country, RunYear, RunMonth, PeriodSeq)` — which let stale PeriodSeq rows from prior uploads survive alongside new ones. Now: for every distinct `(Country, RunYear, RunMonth)` in the file, **DELETE every existing row** before inserting the new ones. Atomic in a single `SaveChangesAsync`. The success message reports both counts:
+   > Replaced 1 run period(s) — removed 13 old row(s), inserted 13 new row(s).
+
+This makes "partial upload" impossible: the natural unit is 13 rows summing to 100% for one run period, and that's exactly what the upload now enforces.
+
+### Also added on Monthly Weights — error breakdown section
+
+Same UX as `SkuMaxRulesUpload` (1.14.38) and `VolumeGroupsUpload` (1.14.39):
+- Above the row preview when `_errorCount > 0`
+- Groups error rows by message, shows count + sample row #s
+- Error rows sorted first in the 200-row preview
+
+### Bonus — SKU Max Rules readiness message now identifies missing pairs
+
+The blocked-state message previously said only "`845 active rules for UAE across 20 division(s).`" — useless for diagnosing which division/group was actually missing a rule. It now lists the specific `(DivCode, GroupCode)` pairs that have no matching active rule:
+
+> `845 active rules but 3 (Division, Group) pair(s) have no matching rule: Div407/D, Div407/E, Div414/A`
+
+Capped at 8 pairs in the message (with `…` suffix if more) so it stays readable on the readiness card. Anything past 8 is still findable via the diagnostic SQL.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/Uploads/UploadHelpers.cs` | New `CountryDivGroupComparerCI` shared comparer |
+| `src/LpmSim.Web/Components/Pages/Uploads/SkuMaxRulesUpload.razor` | Group-existence HashSet uses the comparer |
+| `src/LpmSim.Web/Components/Pages/Uploads/VolumeGroupsUpload.razor` | Upsert Dictionary uses the comparer |
+| `src/LpmSim.Web/Components/Pages/Uploads/MonthlyWeightsUpload.razor` | In-file dupe detection; replace-all per run period; error breakdown; rules text updated |
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | SKU Max Rules blocked-state message lists specific missing (DivCode, GroupCode) pairs |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.40 → 1.14.41 |
+
+### Notes
+- **No DB migration.** Pure Razor / C# refactor.
+- **No semantic change for clean files.** Files that didn't trigger any of these bugs continue to work exactly as before.
+- **Replace-all behaviour on Monthly Weights is a meaningful semantic change** — uploading a partial file (e.g. only PeriodSeq 1-5) for a run period will now DELETE the other PeriodSeq rows for that period before inserting. If you previously relied on partial Monthly Weights uploads, upload the full 13 rows from now on.
+
+### Action — clean up the existing 200% data
+Migration 051 wiped `LPM_VolumeGroup`, but the duplicate rows in `LPM_MonthlyWeight` from the original screenshot still exist. Run one of these in SSMS:
+
+```sql
+-- Pick one — both pairs are identical, so either result is correct.
+DELETE FROM dbo.LPM_MonthlyWeight
+ WHERE Country='UAE' AND RunYear=2026 AND RunMonth=5
+   AND PeriodSeq IN (1, 2);  -- OR (11, 12)
+```
+
+Then re-run EOM Generate readiness — the Monthly Weights blocker should clear (13 → 11 rows, total back to 100%).
+
+---
+
 ## 1.14.40 — HOTFIX: LpmSKUMaxRule FK widened to match 1.14.39 PK (2026-05-17)
 
 ### Bug

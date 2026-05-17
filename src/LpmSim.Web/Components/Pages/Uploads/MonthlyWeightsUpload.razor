@@ -23,9 +23,10 @@
         <div class="lpm-section">
             <div class="lpm-section-title">Rules</div>
             <ul class="pl-4 mb-0" style="font-size:0.82rem; color:#64748b;">
-                <li><strong>Country</strong> must exist in DataSettings.</li>
+                <li><strong>Country</strong> must exist in DataSettings (case-insensitive).</li>
                 <li><strong>PeriodSeq</strong> 1–13. <strong>WeightPct</strong> accepts "25" or "25%" or "0.25".</li>
-                <li>Existing rows on the same (Country, RunYear, RunMonth, PeriodSeq) are replaced.</li>
+                <li><strong>1.14.41:</strong> Two rows sharing the same <code>(PeriodYear, PeriodMonth)</code> within one <code>(Country, RunYear, RunMonth)</code> are flagged as errors — fix in Excel before committing.</li>
+                <li><strong>1.14.41:</strong> Commit is now <strong>replace-all per run period</strong>. Every existing row for each <code>(Country, RunYear, RunMonth)</code> in the file is wiped before the new rows are inserted — no orphaned PeriodSeq survives from a prior upload.</li>
             </ul>
         </div>
     </MudItem>
@@ -58,7 +59,41 @@
                 <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber"><div class="lpm-metric-label">Will Upsert</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
             </MudGrid>
 
-            <MudTable Items="_rows.Take(200)" Hover Dense Striped FixedHeader Height="50vh">
+            @* 1.14.41 — Error breakdown section, same UX as SkuMaxRulesUpload
+               (1.14.38) and VolumeGroupsUpload (1.14.39). Groups error rows
+               by message + shows counts so the planner sees the dominant
+               issue pattern (e.g. "Duplicate (PeriodYear, PeriodMonth): 4 rows"). *@
+            @if (_errorCount > 0)
+            {
+                var errorGroups = _rows
+                    .Where(r => r.Error is not null)
+                    .GroupBy(r => r.Error!)
+                    .Select(g => new { Message = g.Key, Count = g.Count(), SampleRows = g.Take(5).Select(r => r.RowNum).ToList() })
+                    .OrderByDescending(x => x.Count)
+                    .ToList();
+                <div class="lpm-section mb-3" style="border-left:4px solid #dc2626;">
+                    <div class="lpm-section-title" style="color:#dc2626;">
+                        Error breakdown — @_errorCount row(s) across @errorGroups.Count distinct issue(s)
+                    </div>
+                    <MudTable Items="errorGroups" Hover Dense Striped Height="240px" FixedHeader>
+                        <HeaderContent>
+                            <MudTh Style="width:90px;">Count</MudTh>
+                            <MudTh>Issue</MudTh>
+                            <MudTh Style="width:220px;">Sample row #s</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd Style="text-align:right;font-weight:600;color:#dc2626;">@context.Count.ToString("N0")</MudTd>
+                            <MudTd><span style="font-family:monospace;font-size:0.85rem;">@context.Message</span></MudTd>
+                            <MudTd Style="color:#64748b;font-size:0.82rem;">@string.Join(", ", context.SampleRows)</MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                </div>
+            }
+
+            var displayRows = _errorCount > 0
+                ? _rows.OrderBy(r => r.Error is null ? 1 : 0).Take(200)
+                : _rows.Take(200);
+            <MudTable Items="displayRows" Hover Dense Striped FixedHeader Height="50vh">
                 <HeaderContent>
                     <MudTh>Row</MudTh><MudTh>Country</MudTh><MudTh>RunY</MudTh><MudTh>RunM</MudTh>
                     <MudTh>Seq</MudTh><MudTh>PeriodY</MudTh><MudTh>PeriodM</MudTh><MudTh>Weight%</MudTh><MudTh>Status</MudTh>
@@ -170,6 +205,43 @@
             }
         }
         catch (Exception ex) { _fatalError = $"Failed to open workbook: {ex.Message}"; return; }
+
+        // 1.14.41 — In-file duplicate detection on
+        // (Country, RunYear, RunMonth, PeriodYear, PeriodMonth). PK on
+        // LPM_MonthlyWeight is (Country, RunYear, RunMonth, PeriodSeq) —
+        // PeriodSeq makes it possible to enter the same period TWICE under
+        // different seq numbers (e.g. 2026-3 at seq 1 AND at seq 11). SQL
+        // accepts both, total becomes 200%, EOM Generate fails readiness.
+        // Surfacing this at parse time forces the planner to fix the file
+        // before commit.
+        //
+        // Only checks among rows that are otherwise valid — already-errored
+        // rows don't need extra noise.
+        var firstSeenAt = new Dictionary<(string Country, int RunYear, int RunMonth, int PeriodYear, int PeriodMonth), int>();
+        foreach (var r in _rows.Where(x => x.Error is null && x.Country is not null
+                                        && x.RunYear is not null && x.RunMonth is not null
+                                        && x.PeriodYear is not null && x.PeriodMonth is not null))
+        {
+            // Country normalised to uppercase so case differences within
+            // the same upload still trigger the dup check.
+            var key = (r.Country!.ToUpperInvariant(), r.RunYear!.Value, r.RunMonth!.Value,
+                       r.PeriodYear!.Value, r.PeriodMonth!.Value);
+            if (firstSeenAt.TryGetValue(key, out var firstRow))
+            {
+                // Both the earlier row AND this one get the error so the
+                // planner can find both in the row preview.
+                var msg = $"Duplicate period ({r.PeriodYear}-{r.PeriodMonth:D2}) for ({r.Country}, RunY={r.RunYear}, RunM={r.RunMonth}) — also at row {firstRow}";
+                r.Error = msg;
+                var prior = _rows.FirstOrDefault(x => x.RowNum == firstRow);
+                if (prior is not null && prior.Error is null)
+                    prior.Error = $"Duplicate period ({r.PeriodYear}-{r.PeriodMonth:D2}) for ({r.Country}, RunY={r.RunYear}, RunM={r.RunMonth}) — also at row {r.RowNum}";
+            }
+            else
+            {
+                firstSeenAt[key] = r.RowNum;
+            }
+        }
+
         _validCount = _rows.Count(r => r.Error is null);
         _errorCount = _rows.Count - _validCount;
     }
@@ -182,41 +254,86 @@
             await using var db = await DbFactory.CreateDbContextAsync();
             var now = DateTime.Now;
             var valid = _rows.Where(r => r.Error is null).ToList();
-            var keys = valid.Select(r => (r.Country!, r.RunYear!.Value, r.RunMonth!.Value, r.PeriodSeq!.Value)).ToHashSet();
-            var existing = await db.LpmMonthlyWeights
-                .Where(w => keys.Select(k => k.Item1).Contains(w.Country))
+            if (valid.Count == 0) return;
+
+            // 1.14.41 — Commit is now replace-all per run period. The natural
+            // unit of Monthly Weights is "13 rows summing to 100% for one
+            // (Country, RunYear, RunMonth)". Partial uploads — keeping some
+            // old PeriodSeq rows alongside new ones — never make sense and
+            // were the root of the duplicate-period bug surfaced in 1.14.41.
+            //
+            // For each (Country, RunYear, RunMonth) in the upload: DELETE
+            // every existing row, then INSERT the new ones. Atomic in a single
+            // SaveChanges so we never leave the table in a half-old/half-new
+            // state.
+            var periods = valid
+                .Select(r => (Country: r.Country!, RunYear: r.RunYear!.Value, RunMonth: r.RunMonth!.Value))
+                .Distinct()
+                .ToList();
+
+            // Load all existing rows for these (Country, RunYear, RunMonth)
+            // periods in a single round-trip. EF can't directly translate
+            // a multi-tuple-IN, so we build a flat OR over the periods.
+            var countries  = periods.Select(p => p.Country).Distinct().ToList();
+            var runYears   = periods.Select(p => p.RunYear).Distinct().ToList();
+            var runMonths  = periods.Select(p => p.RunMonth).Distinct().ToList();
+            var candidates = await db.LpmMonthlyWeights
+                .Where(w => countries.Contains(w.Country)
+                         && runYears.Contains(w.RunYear)
+                         && runMonths.Contains(w.RunMonth))
                 .ToListAsync();
-            var idx = existing.ToDictionary(w => (w.Country, w.RunYear, w.RunMonth, w.PeriodSeq));
+            // Filter to exact (Country, RunYear, RunMonth) tuples after the
+            // round-trip — the broad IN above can over-fetch when one of the
+            // periods doesn't share Country/Year/Month with another in the
+            // batch, but the in-memory filter is cheap.
+            var periodSet = new HashSet<(string, int, int)>(
+                periods.Select(p => (p.Country, p.RunYear, p.RunMonth)),
+                new TupleCountryRunComparerCI());
+            var toRemove = candidates
+                .Where(w => periodSet.Contains((w.Country, w.RunYear, w.RunMonth)))
+                .ToList();
+            db.LpmMonthlyWeights.RemoveRange(toRemove);
+
             foreach (var r in valid)
             {
-                var k = (r.Country!, r.RunYear!.Value, r.RunMonth!.Value, r.PeriodSeq!.Value);
-                if (idx.TryGetValue(k, out var row))
+                db.LpmMonthlyWeights.Add(new LpmMonthlyWeight
                 {
-                    row.PeriodYear  = r.PeriodYear!.Value;
-                    row.PeriodMonth = r.PeriodMonth!.Value;
-                    row.WeightPct   = r.WeightPct!.Value;
-                }
-                else
-                {
-                    db.LpmMonthlyWeights.Add(new LpmMonthlyWeight
-                    {
-                        Country     = r.Country!,
-                        RunYear     = r.RunYear.Value,
-                        RunMonth    = r.RunMonth.Value,
-                        PeriodSeq   = r.PeriodSeq.Value,
-                        PeriodYear  = r.PeriodYear!.Value,
-                        PeriodMonth = r.PeriodMonth!.Value,
-                        WeightPct   = r.WeightPct!.Value,
-                        CreateTS    = now,
-                    });
-                }
+                    Country     = r.Country!,
+                    RunYear     = r.RunYear!.Value,
+                    RunMonth    = r.RunMonth!.Value,
+                    PeriodSeq   = r.PeriodSeq!.Value,
+                    PeriodYear  = r.PeriodYear!.Value,
+                    PeriodMonth = r.PeriodMonth!.Value,
+                    WeightPct   = r.WeightPct!.Value,
+                    CreateTS    = now,
+                });
             }
+
             await db.SaveChangesAsync();
-            Snackbar.Add($"Committed {valid.Count} Monthly Weight rows.", Severity.Success);
+            Snackbar.Add(
+                $"Replaced {periods.Count} run period(s) — removed {toRemove.Count} old row(s), inserted {valid.Count} new row(s).",
+                Severity.Success);
             _rows.Clear(); _fileName = null; _validCount = _errorCount = 0;
         }
         catch (Exception ex) { Snackbar.Add($"Commit failed: {ex.Message}", Severity.Error); }
         finally { _committing = false; StateHasChanged(); }
+    }
+
+    /// <summary>
+    /// 1.14.41 — Case-insensitive equality on (Country, RunYear, RunMonth)
+    /// so a re-upload of 'Uae' after 'UAE' rows exist still wipes them.
+    /// </summary>
+    private sealed class TupleCountryRunComparerCI : IEqualityComparer<(string Country, int RunYear, int RunMonth)>
+    {
+        public bool Equals((string Country, int RunYear, int RunMonth) x, (string Country, int RunYear, int RunMonth) y)
+            => StringComparer.OrdinalIgnoreCase.Equals(x.Country, y.Country)
+            && x.RunYear == y.RunYear
+            && x.RunMonth == y.RunMonth;
+        public int GetHashCode((string Country, int RunYear, int RunMonth) obj)
+            => HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Country ?? ""),
+                obj.RunYear,
+                obj.RunMonth);
     }
 
     private async Task DownloadTemplate()

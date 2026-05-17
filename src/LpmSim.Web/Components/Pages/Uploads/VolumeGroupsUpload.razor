@@ -238,7 +238,13 @@
                 .Where(g => countries.Contains(g.Country))
                 .ToListAsync();
             // 1.14.39 — Index by the new composite key.
-            var idx = existing.ToDictionary(g => (g.Country, g.DivCode, g.GroupCode));
+            // 1.14.41 — Case-insensitive dictionary so re-upload of 'Kuwait'
+            // doesn't try to INSERT a duplicate alongside an existing 'KUWAIT'
+            // row (which would trip the PK on commit since SQL Server's
+            // default collation treats them as equal).
+            var idx = new Dictionary<(string Country, int DivCode, string GroupCode), LpmVolumeGroup>(
+                CountryDivGroupComparerCI.Instance);
+            foreach (var g in existing) idx[(g.Country, g.DivCode, g.GroupCode)] = g;
             foreach (var r in valid)
             {
                 var k = (r.Country!, r.DivCode!.Value, r.GroupCode!);

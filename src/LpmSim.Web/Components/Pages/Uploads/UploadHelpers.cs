@@ -9,6 +9,32 @@ namespace LpmSim.Web.Components.Pages.Uploads;
 /// upload component. Each upload deals only with its domain (header, rules,
 /// commit) and lets these helpers handle ClosedXML quirks consistently.
 /// </summary>
+/// <summary>
+/// 1.14.41 — Case-insensitive equality comparer for the
+/// (Country, DivCode, GroupCode) composite key used by the SKU Max Rules
+/// and Volume Groups uploads. SQL Server's default collation is
+/// case-insensitive, but in-memory .NET HashSet / Dictionary lookups
+/// default to case-sensitive — that mismatch caused false-positive
+/// "VolumeGroup 'Kuwait/Div419/A' not found" errors when the file's
+/// case differed from the stored data's case.
+/// </summary>
+internal sealed class CountryDivGroupComparerCI
+    : IEqualityComparer<(string Country, int DivCode, string GroupCode)>
+{
+    public static readonly CountryDivGroupComparerCI Instance = new();
+    public bool Equals(
+        (string Country, int DivCode, string GroupCode) x,
+        (string Country, int DivCode, string GroupCode) y)
+        => StringComparer.OrdinalIgnoreCase.Equals(x.Country, y.Country)
+        && x.DivCode == y.DivCode
+        && StringComparer.OrdinalIgnoreCase.Equals(x.GroupCode, y.GroupCode);
+    public int GetHashCode((string Country, int DivCode, string GroupCode) obj)
+        => HashCode.Combine(
+            StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Country ?? ""),
+            obj.DivCode,
+            StringComparer.OrdinalIgnoreCase.GetHashCode(obj.GroupCode ?? ""));
+}
+
 internal static class UploadHelpers
 {
     public static string TryString(IXLCell cell)

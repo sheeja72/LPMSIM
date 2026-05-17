@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.40</Version>
-    <AssemblyVersion>1.14.40.0</AssemblyVersion>
-    <FileVersion>1.14.40.0</FileVersion>
-    <InformationalVersion>1.14.40 (HOTFIX: LpmSKUMaxRule FK widened to match 1.14.39 PK)</InformationalVersion>
+    <Version>1.14.41</Version>
+    <AssemblyVersion>1.14.41.0</AssemblyVersion>
+    <FileVersion>1.14.41.0</FileVersion>
+    <InformationalVersion>1.14.41 (Upload fixes: case-insensitive + Monthly Weights dupe prevention)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
