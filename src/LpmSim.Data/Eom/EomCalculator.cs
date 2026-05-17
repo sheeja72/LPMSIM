@@ -668,11 +668,25 @@ SELECT id.DivCode,
         // LPM_SimItemSkuMax build. (LpmSKUMaxRules still queried elsewhere
         // when SIM rebuilds the per-item table.)
 
-        // Number of periods with a positive weight — the divisor for the
-        // weighted MONTHLY AVERAGE. We divide the weighted sum by this count
-        // (NOT by SUM(WeightPct)) so the column reads as a per-period
-        // average rather than a normalised weighted total.
-        var periodCount = weights.Count(w => w.WeightPct > 0m);
+        // 1.14.42 — TRUE weighted average per (Store, Division).
+        // Formula:  WtAvg = Σ (Qty × WeightPct) / Σ WeightPct
+        //
+        // Previously we divided by periodCount (count of weights with
+        // WeightPct > 0). That gave a "per-period average weighted
+        // contribution" — which read as roughly monthly_qty / N for N
+        // active periods. Two periods at 40/60 with the same monthly
+        // qty showed HALF the actual monthly qty, which was unintuitive.
+        //
+        // The new divisor is Σ WeightPct. When weights sum to 1.0
+        // (enforced by the Monthly Weights readiness check), the divisor
+        // is 1.0 and the result reads as "monthly-equivalent sold qty
+        // weighted by recency" — the standard weighted-average reading.
+        //
+        // Downstream Step 3 (TargetSales) and Step 4 (TargetEOM) are
+        // share-based — (r.WtAvgSoldQty / totalWt) × Planned — so scaling
+        // every WtAvg by the same constant leaves their results identical.
+        // Ranks (SoldQtyRank, TurnsRank) are order-based — also unchanged.
+        var weightSum = weights.Sum(w => w.WeightPct);
 
         // Build (Store × Division) grid with Step 1 weighted averages.
         var rows = new List<EomRow>(stores.Count * divisions.Count);
@@ -688,10 +702,10 @@ SELECT id.DivCode,
                     wtTurn += (st.TurnsQty ?? 0m) * w.WeightPct;
                 }
             }
-            if (periodCount > 0)
+            if (weightSum > 0m)
             {
-                wtSold /= periodCount;
-                wtTurn /= periodCount;
+                wtSold /= weightSum;
+                wtTurn /= weightSum;
             }
             rows.Add(new EomRow
             {

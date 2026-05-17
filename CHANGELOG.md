@@ -23,6 +23,58 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.42 — EOM Wt Avg Sold/Turn: true weighted average (2026-05-17)
+
+### Bug
+On the EOM Generate preview, the **Wt Avg Sold** total looked unintuitively low — e.g. 545,991 for UAE across 1,113 (Store × Division) rows with only 2 active weighted periods (2026-3 at 40%, 2026-4 at 60%). That works out to ~490 per row, which reverse-engineers to ~980 units of monthly sold qty per (store, div) — roughly **half** the actual monthly sales.
+
+### Root cause
+The old formula divided the weighted sum by `periodCount` (number of weights with `WeightPct > 0`), not by `Σ WeightPct`:
+
+```csharp
+// Old (1.14.41 and earlier):
+wtSold = Σ (SoldQty × WeightPct) / periodCount
+```
+
+For N active periods, this halved (or N-thed) the result vs. what a planner reads as "weighted average". Two periods at 40/60 with the same monthly sales → result = monthly_sold / 2.
+
+### Fix
+Divide by `Σ WeightPct` — the standard weighted-average formula:
+
+```csharp
+// New (1.14.42):
+wtSold = Σ (SoldQty × WeightPct) / Σ WeightPct
+```
+
+When weights sum to 1.0 (enforced by the Monthly Weights readiness check), the divisor is 1.0 and the result reads as **"monthly-equivalent sold qty weighted by recency"** — the intuitive interpretation.
+
+For your UAE batch: the displayed Wt Avg Sold total will roughly **double** (~1.1M instead of ~545K), aligning with actual monthly sales weighted between March (40%) and April (60%).
+
+### What this changes downstream — nothing
+Critical math check: Step 3 (TargetSales) and Step 4 (TargetEOM) are share-based:
+
+```csharp
+r.TargetSales = (r.WtAvgSoldQty / totalWt) * p.PlannedSalesQty;
+r.TargetEOM   = (r.WtAvgSoldQty / totalWt) * p.PlannedEOM;
+```
+
+If every `WtAvgSoldQty` doubles, `totalWt` (the division-wide sum) also doubles. The ratio `WtAvgSoldQty / totalWt` is identical. Same for `SoldQtyRank` / `TurnsRank` — ranks are order-based, not value-based, so they don't shift.
+
+**Net effect:** only the displayed `Wt Avg Sold` / `Wt Avg Turn` column values change. TargetSales, TargetEOM, ranks, Grade assignments, VolumeGroup bucket assignments — all bit-for-bit identical to 1.14.41 output.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | Step 1 divisor switched from `periodCount` to `Σ WeightPct` |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.41 → 1.14.42 |
+
+### Notes
+- **No DB migration.** Pure calculation change in EomCalculator.
+- **Existing saved batches.** `LPM_EOM_Output.WtAvgSoldQty` / `WtAvgTurn` columns on batches generated before 1.14.42 retain their old (smaller) values. Re-running EOM Generate for the same period regenerates with the new (larger) values. Final TargetSales/TargetEOM are stable across both.
+- **No risk to allocator.** SIM Generate reads `TargetEOM` / `TargetSales` from `LPM_EOM_Output` — both unchanged numerically. No effect on box selection, cap math, allocation phases.
+
+---
+
 ## 1.14.41 — Upload validation fixes (2026-05-17)
 
 ### Three input-validation bugs surfaced + fixed in one release
