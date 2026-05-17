@@ -1309,6 +1309,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 (SqlConnection)conn,
                 batch.LPMBatchNo,
                 batch.CreateTS,
+                req.Country,       // 1.14.44 — needed for the boxesWithViableLines
+                req.RunYear,       // SkuMax lookup that reclassifies UNKNOWN → CAP
+                req.RunMonth,      // when the box's items have SkuMax rows for this period
                 eligibleBoxes,
                 filteredOutBoxes,
                 excludedByRuleBoxes,
@@ -1324,6 +1327,52 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         catch (Exception)
         {
             // Diagnostic write is best-effort — never fail the build over it.
+        }
+
+        // 1.14.44 — Refresh LPM_SimItemSkuMax.SOH with the live SOH that the
+        // allocator actually used. The snapshot's SOH was frozen at Build
+        // SKU Max time. If stock moved (new arrivals, ETL refresh) between
+        // the build and this SIM run, the snapshot's SOH (and the computed
+        // ToFillQty column derived from it) would be stale — planners
+        // reading the SkuMax table after a SIM run would see ToFillQty
+        // values that don't match what the allocator just decided.
+        //
+        // With this refresh, ToFillQty becomes "what-you-see-is-what-the-
+        // allocator-saw". ToFillQty is a computed PERSISTED column so SQL
+        // re-derives it automatically from the new SOH + existing SKUMax.
+        //
+        // Best-effort: wrapped in try/catch so any failure here doesn't
+        // affect the build. Values just stay stale until the next Build
+        // SKU Max or the next SIM run.
+        try
+        {
+            using var refresh = conn.CreateCommand();
+            refresh.CommandText = @"
+                UPDATE sm
+                   SET sm.SOH = CAST(ISNULL(s.SohLive, 0) AS int)
+                  FROM dbo.LPM_SimItemSkuMax sm
+                  LEFT JOIN (
+                      SELECT ls.StoreID, ls.Itemcode,
+                             SohLive = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
+                        FROM racks.dbo.LPM_LocStock ls
+                        INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+                       WHERE ds.SIMCountry = @country
+                         AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
+                         AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> ''
+                       GROUP BY ls.StoreID, ls.Itemcode
+                  ) s ON s.StoreID = sm.StoreID AND s.Itemcode = sm.ItemCode
+                 WHERE sm.Country = @country
+                   AND sm.Year1   = @y
+                   AND sm.Month1  = @m;";
+            refresh.Parameters.Add(new SqlParameter("@country", req.Country));
+            refresh.Parameters.Add(new SqlParameter("@y", req.RunYear));
+            refresh.Parameters.Add(new SqlParameter("@m", req.RunMonth));
+            refresh.CommandTimeout = 300;
+            await refresh.ExecuteNonQueryAsync(ct);
+        }
+        catch
+        {
+            // Best-effort — build is committed; refresh is just a UX nicety.
         }
 
         return new LpmSimGenerateResult
@@ -4303,6 +4352,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         SqlConnection conn,
         long batchNo,
         DateTime createTs,
+        string country,
+        int year,
+        int month,
         Dictionary<string, EligibleBoxSummary> eligibleBoxes,
         HashSet<string> filteredOutBoxes,
         HashSet<string> excludedByRuleBoxes,
@@ -4340,6 +4392,77 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             var key = (t.BoxNo, t.Decision);
             skipCountsByBox.TryGetValue(key, out var prev);
             skipCountsByBox[key] = prev + 1;
+        }
+
+        // 1.14.44 — "Box considered by allocator but no trace emitted" check.
+        // In non-verbose-trace runs the allocator drops SKIP_SKUMAX /
+        // SKIP_TARGET rows. A box whose every item × eligible store had
+        // SOH ≥ SKUMax leaves no trace at all (no ALLOC, no SKIP). The
+        // pre-1.14.44 classifier then fell back to UNKNOWN, which is
+        // misleading — the gap really was CAP saturation. Detect this
+        // case by querying once per build: which boxes have AT LEAST one
+        // item with a SKUMax > 0 row for ANY store in this period?
+        // Those are boxes the allocator definitely iterated over — if
+        // they show no trace + no output, the gap is CAP, not UNKNOWN.
+        var boxesWithViableLines = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            // Stage the candidate box list into tempdb so the EXISTS join
+            // can use it efficiently. Only boxes with remaining > 0 are
+            // candidates for UNKNOWN — fully-allocated boxes don't end up
+            // in the diagnostic anyway.
+            using (var ddl = conn.CreateCommand())
+            {
+                ddl.CommandText = @"
+                    IF OBJECT_ID('tempdb..#DiagBoxes') IS NOT NULL DROP TABLE #DiagBoxes;
+                    CREATE TABLE #DiagBoxes (BoxNo varchar(100) NOT NULL PRIMARY KEY);";
+                await ddl.ExecuteNonQueryAsync(ct);
+            }
+
+            using (var diagBulk = new SqlBulkCopy(conn) { DestinationTableName = "#DiagBoxes" })
+            {
+                using var dtBoxes = new System.Data.DataTable();
+                dtBoxes.Columns.Add("BoxNo", typeof(string));
+                foreach (var boxNo in eligibleBoxes.Keys) dtBoxes.Rows.Add(boxNo);
+                await diagBulk.WriteToServerAsync(dtBoxes, ct);
+            }
+
+            using (var q = conn.CreateCommand())
+            {
+                q.CommandText = @"
+                    SELECT DISTINCT w.BoxNo
+                      FROM racks.dbo.whboxitems w
+                      INNER JOIN #DiagBoxes b ON b.BoxNo = w.BoxNo
+                     WHERE EXISTS (
+                          SELECT 1 FROM dbo.LPM_SimItemSkuMax sm
+                           WHERE sm.Country  = @country
+                             AND sm.Year1    = @y
+                             AND sm.Month1   = @m
+                             AND sm.ItemCode = w.itemcode
+                             AND sm.SKUMax   > 0);";
+                q.Parameters.Add(new SqlParameter("@country", country));
+                q.Parameters.Add(new SqlParameter("@y", year));
+                q.Parameters.Add(new SqlParameter("@m", month));
+                q.CommandTimeout = 120;
+                using var rdr = await q.ExecuteReaderAsync(ct);
+                while (await rdr.ReadAsync(ct))
+                {
+                    if (rdr.IsDBNull(0)) continue;
+                    boxesWithViableLines.Add(rdr.GetString(0));
+                }
+            }
+
+            using (var cleanup = conn.CreateCommand())
+            {
+                cleanup.CommandText = "DROP TABLE IF EXISTS #DiagBoxes;";
+                await cleanup.ExecuteNonQueryAsync(ct);
+            }
+        }
+        catch
+        {
+            // Best-effort. If the viability query fails, classifier falls
+            // back to the old behaviour (UNKNOWN for "no trace, no output").
+            boxesWithViableLines.Clear();
         }
 
         using var dt = new System.Data.DataTable();
@@ -4406,12 +4529,28 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     topReason = "CAP";
                     reasons   = $"CAP — {remaining} qty unallocated; SKU Max or EOM Merch Need (Week) cap saturated at every eligible store. Enable VerboseTrace on the run to see the precise SKU vs Target split in the Allocation Trace tab.";
                 }
+                else if (boxesWithViableLines.Contains(boxNo))
+                {
+                    // 1.14.44 — Box has items with SKUMax > 0 in this period's
+                    // snapshot. The allocator definitely iterated this box's
+                    // lines but found zero headroom at every (Store, Item)
+                    // combination — likely because the live SOH at allocation
+                    // time exceeded SKUMax at every eligible store (the
+                    // SkuMax build's snapshot was stale relative to the
+                    // current LocStock). In non-verbose mode the SKIP_SKUMAX
+                    // rows get dropped, leaving zero trace for the box.
+                    // Pre-1.14.44 this fell to UNKNOWN; now correctly CAP.
+                    topReason = "CAP";
+                    reasons   = $"CAP — {remaining} qty unallocated; box's items have viable SkuMax rows but the allocator found 0 headroom at every eligible store (likely SOH ≥ SKUMax at allocation time after the build's snapshot was taken). Enable VerboseTrace for the per-store SKU Balance / Target Remain split.";
+                }
                 else
                 {
                     // Box was in the eligible set, not filtered out, but
-                    // didn't surface in output OR trace at all. Defensive.
+                    // didn't surface in output OR trace at all, AND none of
+                    // its items have a SKUMax > 0 row for this period.
+                    // Genuinely no viable allocation pathway — true UNKNOWN.
                     topReason = "UNKNOWN";
-                    reasons   = "UNKNOWN — box was eligible but produced no output and no trace rows. Investigate.";
+                    reasons   = "UNKNOWN — box was eligible but produced no output, no trace rows, and no item in the box has a SKUMax > 0 row in this period's snapshot. Investigate the SKU Max build coverage.";
                 }
             }
 

@@ -23,6 +23,102 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.44 — SkuMax SOH refresh + diagnostic UNKNOWN→CAP fix (2026-05-17)
+
+### Bug investigation (real-world batch 36, UAE)
+Planner found boxes flagged `UNKNOWN` in `LPMSIM_UnallocatedDiagnostic` with the items showing `ToFillQty > 0` in `LPM_SimItemSkuMax`. Verbose-trace re-run revealed the truth — all 2550 trace rows for the missing item were `SKIP_SKUMAX` with negative `SkuBalance`:
+
+```
+Store      SKUMax  SOH_Item  SkuBalance
+BFL-ACC    12      20        -8
+BFL-CAL    18      20        -2
+BFL-CIRC   12      18        -6
+…
+```
+
+Two root issues:
+
+1. **The allocator was reading live SOH from `racks.dbo.LPM_LocStock`** (which had increased since BuildSkuMax ran), while `LPM_SimItemSkuMax.SOH` still showed the stale snapshot value (often 0 for items that hadn't yet been stocked when the build ran). `ToFillQty` (computed from snapshot SOH) was lying about real headroom.
+
+2. **The diagnostic mis-classified these boxes as UNKNOWN** instead of CAP. In non-verbose-trace mode the `SKIP_SKUMAX` rows are dropped, so the classifier had no trace to attribute the gap. The pre-1.14.44 logic only knew "CAP" when it saw an `ALLOC*` trace row OR partial `SimQty > 0`. Boxes where **every** eligible store had SOH ≥ SKUMax fell through to UNKNOWN — making real cap saturation look like a bug.
+
+### Fix 1 — Refresh `LPM_SimItemSkuMax.SOH` at end of SIM Generate
+
+After the build commits (after diagnostic), `LpmSimGenerator.GenerateAsync` now runs:
+
+```sql
+UPDATE sm
+   SET sm.SOH = CAST(ISNULL(s.SohLive, 0) AS int)
+  FROM dbo.LPM_SimItemSkuMax sm
+  LEFT JOIN (
+      SELECT ls.StoreID, ls.Itemcode,
+             SohLive = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
+        FROM racks.dbo.LPM_LocStock ls
+        INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+       WHERE ds.SIMCountry = @country
+         AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
+         AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> ''
+       GROUP BY ls.StoreID, ls.Itemcode
+  ) s ON s.StoreID = sm.StoreID AND s.Itemcode = sm.ItemCode
+ WHERE sm.Country = @country AND sm.Year1 = @y AND sm.Month1 = @m;
+```
+
+`ToFillQty` is a computed PERSISTED column derived from SOH + SKUMax, so SQL recomputes it automatically. Result: after every SIM run, the snapshot's `ToFillQty` reflects what the allocator actually used — what-you-see-is-what-the-allocator-saw.
+
+Best-effort: wrapped in try/catch so any failure here doesn't roll back the build.
+
+### Fix 2 — Diagnostic classifies "all eligible stores capped" as CAP, not UNKNOWN
+
+`BuildAndInsertUnallocatedDiagnosticAsync` now accepts `country / year / month` and runs a once-per-build viability check:
+
+```sql
+SELECT DISTINCT w.BoxNo
+  FROM racks.dbo.whboxitems w
+  INNER JOIN #DiagBoxes b ON b.BoxNo = w.BoxNo
+ WHERE EXISTS (SELECT 1 FROM dbo.LPM_SimItemSkuMax sm
+                WHERE sm.Country=@country AND sm.Year1=@y AND sm.Month1=@m
+                  AND sm.ItemCode = w.itemcode AND sm.SKUMax > 0);
+```
+
+Boxes returned = "the allocator definitely iterated this box because it had at least one item with a non-zero SkuMax row". The classifier now:
+
+```csharp
+else if (sawAllocByBox.Contains(boxNo) || simQty > 0)         → CAP    (pre-existing)
+else if (boxesWithViableLines.Contains(boxNo))                → CAP    (NEW 1.14.44)
+else                                                          → UNKNOWN (genuine outlier)
+```
+
+So a box where every (Store, Item) hit `SkuBalance ≤ 0` and the SKIP_SKUMAX trace got dropped now correctly reads **CAP** with this message:
+
+> CAP — N qty unallocated; box's items have viable SkuMax rows but the allocator found 0 headroom at every eligible store (likely SOH ≥ SKUMax at allocation time after the build's snapshot was taken). Enable VerboseTrace for the per-store SKU Balance / Target Remain split.
+
+`UNKNOWN` is now reserved for the truly anomalous case: box was eligible, no items have any `SKUMax > 0` row at all — which would point to a SkuMax build coverage gap worth investigating.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | `GenerateAsync` adds end-of-build SOH refresh; `BuildAndInsertUnallocatedDiagnosticAsync` accepts country/year/month + runs viability check + uses it in the classifier |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.43 → 1.14.44 |
+
+### Risk
+**Low.**
+- SOH refresh is wrapped in try/catch → build never fails because of it
+- Diagnostic viability query is wrapped in try/catch → falls back to pre-1.14.44 behaviour if it errors
+- No DB schema change
+- Existing semantics preserved: ToFillQty still = `max(SKUMax − max(SOH,0), 0)`; just SOH is now fresher
+
+### Build & perf
+- Build clean (0 errors)
+- SOH refresh: ~1 second on a typical UAE batch (LocStock × DataSettings JOIN with country filter)
+- Diagnostic viability check: ~1 second (uses temp table + indexed lookup on LPM_SimItemSkuMax)
+
+### Notes
+- **No DB migration.** Reads existing tables.
+- **Pre-1.14.44 batches** in `LPMSIM_UnallocatedDiagnostic` keep their UNKNOWN labels (the classifier doesn't retroactively reclassify). New batches use the new logic.
+- **Verbose Trace is still useful** for per-row SKIP details — just no longer required to get a correct top-level CAP vs UNKNOWN classification.
+
+---
+
 ## 1.14.43 — BuildSkuMax: persistent staging table fixes #NewSnap session reset (2026-05-17)
 
 ### Bug
