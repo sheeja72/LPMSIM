@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.42</Version>
-    <AssemblyVersion>1.14.42.0</AssemblyVersion>
-    <FileVersion>1.14.42.0</FileVersion>
-    <InformationalVersion>1.14.42 (EOM Wt Avg Sold/Turn: true weighted average)</InformationalVersion>
+    <Version>1.14.43</Version>
+    <AssemblyVersion>1.14.43.0</AssemblyVersion>
+    <FileVersion>1.14.43.0</FileVersion>
+    <InformationalVersion>1.14.43 (BuildSkuMax: persistent staging table — fixes #NewSnap session reset)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

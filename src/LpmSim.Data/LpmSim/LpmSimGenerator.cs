@@ -2934,7 +2934,6 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 -- table-persistence issues across SqlCommand boundaries.
                 SET NOCOUNT ON;
 
-                IF OBJECT_ID('tempdb..#NewSnap') IS NOT NULL DROP TABLE #NewSnap;
                 IF OBJECT_ID('tempdb..#SohLookup') IS NOT NULL DROP TABLE #SohLookup;
 
                 -- 1.14.35 — Per-(Store, Item) SOH from racks.dbo.LPM_LocStock for
@@ -2942,8 +2941,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 -- LpmSimGenerator.GenerateAsync: DataSettings.SIMCountry filter
                 -- (bulletproof against empty / mis-tagged LocStock.Country),
                 -- SUM across multiple LocStock rows for the same (Store, Item).
-                -- LEFT-joined into #NewSnap below so items not in LocStock get
-                -- SOH=0, matching the same default the allocator uses.
+                -- LEFT-joined into the staging insert below so items not in
+                -- LocStock get SOH=0, matching the same default the allocator
+                -- uses.
                 SELECT ls.StoreID,
                        ls.Itemcode,
                        SOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
@@ -2957,16 +2957,33 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
                 CREATE CLUSTERED INDEX IX_SohLookup ON #SohLookup (StoreID, Itemcode);
 
+                -- 1.14.43 — Persistent staging table replaces the old
+                -- session-scoped #NewSnap. SqlClient connection pooling
+                -- occasionally triggers a session reset between this
+                -- SqlCommand and the exclusions SqlCommand, which would
+                -- drop #NewSnap mid-build (the documented intermittent
+                -- 'Invalid object name #NewSnap' bug). The persistent
+                -- table survives session resets, so the exclusions and
+                -- delta-apply phases that read it always find data.
+                --
+                -- Clear THIS country's prior staging rows. Other
+                -- countries' rows (if any) are left alone so concurrent
+                -- builds for different countries don't collide.
+                DELETE FROM dbo.LPM_SimItemSkuMax_Staging
+                 WHERE Country = @country;
+
+                INSERT INTO dbo.LPM_SimItemSkuMax_Staging
+                       (Country, StoreID, ItemCode, Season, DivCode, WHBoxQty,
+                        VolumeGroup, SKUMax, SOH)
                 SELECT
-                    s.StoreID, iw.ItemCode, iw.Season,
+                    @country, s.StoreID, iw.ItemCode, iw.Season,
                     iw.DivCode, iw.WHBoxQty, s.VolumeGroup,
-                    CAST(ISNULL(r.SKUMax, 0) AS int) AS SKUMax,
+                    CAST(ISNULL(r.SKUMax, 0) AS int),
                     -- Clamp at int range (SOH can theoretically exceed int if
                     -- summed across many sub-locations, but realistically per
                     -- (Store, Item) it stays small). Falls back to 0 for
                     -- items not in LocStock for this country.
-                    CAST(ISNULL(sl.SOH, 0) AS int) AS SOH
-                  INTO #NewSnap
+                    CAST(ISNULL(sl.SOH, 0) AS int)
                   FROM #ItemWh iw
                   INNER JOIN #Stores s
                           ON s.DivCode = iw.DivCode
@@ -2984,11 +3001,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
                 DECLARE @rc bigint = @@ROWCOUNT;
 
-                -- Clustered key matches the rule + delta JOIN pattern
-                -- (StoreID, ItemCode, Season). Country/Year/Month are
-                -- constants for the whole table so don't need to be in
-                -- the key.
-                CREATE CLUSTERED INDEX IX_NewSnap ON #NewSnap (StoreID, ItemCode, Season);
+                -- Clustered index already present on the staging table as
+                -- PK_LPM_SimItemSkuMax_Staging (Country, StoreID, ItemCode,
+                -- Season). No CREATE INDEX needed here.
 
                 SELECT @rc AS Rc;";
             // 1.14.35 — @country needed for the #SohLookup CTE (filter by
@@ -3087,7 +3102,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     SELECT n.StoreID, n.ItemCode, n.Season, n.DivCode, n.SKUMax AS OrigSku,
                            ds.Shopname
                       INTO #SkuSnap
-                      FROM #NewSnap n
+                      FROM dbo.LPM_SimItemSkuMax_Staging n
                       OUTER APPLY (
                           SELECT TOP 1 Shopname
                             FROM dbo.DataSettings d
@@ -3095,7 +3110,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                              AND (d.SIMCountry = @country OR d.SIMCountry IS NULL)
                            ORDER BY CASE WHEN d.SIMCountry = @country THEN 0 ELSE 1 END
                       ) ds
-                     WHERE n.SKUMax > 0;
+                     WHERE n.Country = @country AND n.SKUMax > 0;
                     CREATE CLUSTERED INDEX IX_SkuSnap ON #SkuSnap (StoreID, ItemCode);
 
                     CREATE TABLE #ExcludeMatches (
@@ -3650,15 +3665,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                         -- that actually changed get touched).
                         UPDATE n
                            SET n.SKUMax = pc.NewSku
-                          FROM #NewSnap n
+                          FROM dbo.LPM_SimItemSkuMax_Staging n
                           INNER JOIN #PriceCapMatches pc
                                   ON pc.StoreID  = n.StoreID
-                                 AND pc.ItemCode = n.ItemCode;
+                                 AND pc.ItemCode = n.ItemCode
+                         WHERE n.Country = @country;
 
                         UPDATE n
                            SET n.SKUMax = 0
-                          FROM #NewSnap n
-                         WHERE (
+                          FROM dbo.LPM_SimItemSkuMax_Staging n
+                         WHERE n.Country = @country
+                           AND (
                                EXISTS (SELECT 1 FROM #ExcludeMatches em
                                         WHERE em.StoreID  = n.StoreID
                                           AND em.ItemCode = n.ItemCode)
@@ -3814,16 +3831,22 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                     BEGIN TRY
                         BEGIN TRAN;
 
-                        -- DELETE rows in target not in #NewSnap (scoped to
-                        -- the period; LpmOnly/NonLpmOnly preserve out-of-
-                        -- scope rows via the deleteScopeFilter).
+                        -- DELETE rows in target not in the staging table
+                        -- (scoped to the period; LpmOnly/NonLpmOnly preserve
+                        -- out-of-scope rows via the deleteScopeFilter).
+                        -- 1.14.43 — #NewSnap → dbo.LPM_SimItemSkuMax_Staging.
+                        -- Country filter added to the EXISTS sub-query so
+                        -- only this build's staging rows participate (other
+                        -- countries' rows might sit in the table from
+                        -- concurrent or prior builds).
                         DELETE tgt
                           FROM dbo.LPM_SimItemSkuMax tgt
                          WHERE tgt.Country = @country AND tgt.Year1 = @y AND tgt.Month1 = @m
                            {deleteScopeFilter}
                            AND NOT EXISTS (
-                               SELECT 1 FROM #NewSnap s
-                                WHERE s.StoreID  = tgt.StoreID
+                               SELECT 1 FROM dbo.LPM_SimItemSkuMax_Staging s
+                                WHERE s.Country  = @country
+                                  AND s.StoreID  = tgt.StoreID
                                   AND s.ItemCode = tgt.ItemCode
                                   AND s.Season   = tgt.Season
                            );
@@ -3839,8 +3862,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                                tgt.SOH         = s.SOH,            -- 1.14.35
                                tgt.CreateTS    = @now
                           FROM dbo.LPM_SimItemSkuMax tgt
-                          INNER JOIN #NewSnap s
-                                  ON s.StoreID  = tgt.StoreID
+                          INNER JOIN dbo.LPM_SimItemSkuMax_Staging s
+                                  ON s.Country  = @country
+                                 AND s.StoreID  = tgt.StoreID
                                  AND s.ItemCode = tgt.ItemCode
                                  AND s.Season   = tgt.Season
                          WHERE tgt.Country = @country AND tgt.Year1 = @y AND tgt.Month1 = @m
@@ -3853,14 +3877,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                            );
                         SET @updated = @@ROWCOUNT;
 
-                        -- INSERT rows in #NewSnap not yet in target.
+                        -- INSERT staging rows not yet in target.
                         INSERT INTO dbo.LPM_SimItemSkuMax WITH (TABLOCK)
                                (Country, Year1, Month1, StoreID, ItemCode, Season,
                                 DivCode, WHBoxQty, VolumeGroup, SKUMax, SOH, CreateTS, CreatedBy)
                         SELECT @country, @y, @m, s.StoreID, s.ItemCode, s.Season,
                                s.DivCode, s.WHBoxQty, s.VolumeGroup, s.SKUMax, s.SOH, @now, @user
-                          FROM #NewSnap s
-                         WHERE NOT EXISTS (
+                          FROM dbo.LPM_SimItemSkuMax_Staging s
+                         WHERE s.Country = @country
+                           AND NOT EXISTS (
                              SELECT 1 FROM dbo.LPM_SimItemSkuMax tgt
                               WHERE tgt.Country  = @country
                                 AND tgt.Year1    = @y
@@ -3982,12 +4007,18 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         progress?.Report("Cleaning up…");
         using (var ddl = conn.CreateCommand())
         {
+            // 1.14.43 — #NewSnap removed from this drop list. It's no
+            // longer a temp table; the persistent staging table
+            // dbo.LPM_SimItemSkuMax_Staging holds the post-override
+            // snapshot and is cleared on the NEXT build's first step
+            // (DELETE WHERE Country = @country). Leaving rows in place
+            // between builds lets debug queries inspect what the
+            // exclusions phase actually wrote.
             ddl.CommandText = @"
                 DROP TABLE IF EXISTS #ItemWh;
                 DROP TABLE IF EXISTS #Stores;
                 DROP TABLE IF EXISTS #Rules;
-                DROP TABLE IF EXISTS #Deact;
-                DROP TABLE IF EXISTS #NewSnap;";
+                DROP TABLE IF EXISTS #Deact;";
             await ddl.ExecuteNonQueryAsync(ct);
         }
 

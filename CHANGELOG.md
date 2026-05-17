@@ -23,6 +23,77 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.43 — BuildSkuMax: persistent staging table fixes #NewSnap session reset (2026-05-17)
+
+### Bug
+Intermittent failure in BuildSkuMax: on a fresh 270k-SKU UAE build, the staging command staged 13.7M rows successfully, then the exclusions command failed with `Invalid object name '#NewSnap'`. Result: all 7 exclusion rules skipped, delta-apply detected "target unchanged" and skipped, build "succeeded" with a green toast but **wrote zero rows** to `dbo.LPM_SimItemSkuMax`. Stale indicator kept showing the previous day's timestamp.
+
+### Root cause
+Documented in `LpmSimGenerator.cs:2920-2934`. SqlClient's connection pooling occasionally triggers a session reset between back-to-back SqlCommand executions on the same connection. Session-scoped temp tables (`#name`) get dropped on session reset; the next command sees them as missing. Pre-existing intermittent bug, but the bigger 1.14.35 staging command (added `#SohLookup` ahead of `#NewSnap`) may have made the connection state more sensitive.
+
+### Fix
+Replace the session-scoped `#NewSnap` with a persistent staging table `dbo.LPM_SimItemSkuMax_Staging`. Persistent tables survive session resets, so the exclusions and delta-apply SqlCommands always find data.
+
+**Lifecycle:**
+1. Build starts: `DELETE FROM dbo.LPM_SimItemSkuMax_Staging WHERE Country = @country` (clears this country's prior rows, leaves other countries alone)
+2. `INSERT INTO ... SELECT FROM #ItemWh × #Stores × OUTER APPLY #Rules × LEFT JOIN #SohLookup` — populates staging (same query as the old `SELECT INTO #NewSnap`, just an explicit `INSERT`)
+3. Override rules `UPDATE` the staging table's `SKUMax` (zero-outs + price cap) — same SQL as before, just retargeted at the persistent table
+4. Delta-apply reads from staging, writes the final delta to `LPM_SimItemSkuMax` — same DELETE/UPDATE/INSERT pattern, all references updated to the new table
+5. Build ends: staging rows are **left in place** until the next build for that Country clears them — lets debug queries inspect the post-override snapshot
+
+**Concurrency:** the staging table includes `Country` in the PK (`Country, StoreID, ItemCode, Season`) so two simultaneous builds for different countries don't collide.
+
+### Migration
+New migration `db/052_lpm_sim_item_skumax_staging.sql` creates the table:
+
+```sql
+CREATE TABLE dbo.LPM_SimItemSkuMax_Staging (
+    Country     varchar(20)  NOT NULL,
+    StoreID     varchar(25)  NOT NULL,
+    ItemCode    varchar(30)  NOT NULL,
+    Season      char(1)      NOT NULL,
+    DivCode     int          NOT NULL,
+    WHBoxQty    bigint       NOT NULL,
+    VolumeGroup varchar(20)  NULL,
+    SKUMax      int          NOT NULL DEFAULT (0),
+    SOH         int          NOT NULL DEFAULT (0),
+    CONSTRAINT PK_LPM_SimItemSkuMax_Staging
+        PRIMARY KEY CLUSTERED (Country, StoreID, ItemCode, Season),
+    CONSTRAINT CK_LPM_SimItemSkuMax_Staging_Season CHECK (Season IN ('S','W'))
+);
+```
+
+Idempotent guard via `OBJECT_ID IS NULL`.
+
+### Files changed
+| File | Change |
+|---|---|
+| **NEW** `db/052_lpm_sim_item_skumax_staging.sql` | Persistent staging table + PK |
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | All `#NewSnap` references in SQL → `dbo.LPM_SimItemSkuMax_Staging`; `Country = @country` filter added to every reference; staging DELETE replaces old `IF DROP TABLE` + `CREATE CLUSTERED INDEX`; final cleanup no longer drops the staging table |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.42 → 1.14.43 |
+
+### Risk
+**Medium** — touches the BuildSkuMax pipeline at staging + exclusions + delta-apply. But:
+- Every `#NewSnap` reference was systematically updated with `Country = @country` filter
+- Same SQL logic; just the table target changes
+- New migration is additive (creates table, doesn't touch existing)
+- Build succeeded clean (0 errors, 49 pre-existing warnings)
+- Output (`LPM_SimItemSkuMax`) shape and content unchanged when the build runs end-to-end
+
+### Rollout order
+1. **Push 1.14.43** (this commit) — wait for GitHub Actions deploy
+2. **Apply migration 052** in SSMS — creates the staging table
+3. **Click Build SKU Max** — should now complete with real insert/update/delete counts (no more "overrides SKIPPED")
+
+⚠ Between steps 1 and 2, BuildSkuMax will fail with `Invalid object name 'dbo.LPM_SimItemSkuMax_Staging'` because the table doesn't exist yet. Apply mig 052 right after the deploy lands.
+
+### Notes
+- **No effect on existing data.** `LPM_SimItemSkuMax` schema unchanged.
+- **Other temp tables unchanged.** `#ItemWh`, `#Stores`, `#Rules`, `#Deact`, `#SohLookup`, `#SkuSnap`, `#PriceCapMatches`, etc. all stay as session-scoped temp tables — they're created and consumed within a single SqlCommand each, so session resets between commands can't break them.
+- **Future cleanup option.** If the staging table accumulates rows across countries and grows undesirably (~13M per country), add a scheduled `DELETE` of stale rows or shrink the table periodically. For now the per-build DELETE pattern keeps it bounded.
+
+---
+
 ## 1.14.42 — EOM Wt Avg Sold/Turn: true weighted average (2026-05-17)
 
 ### Bug
