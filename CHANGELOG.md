@@ -23,6 +23,49 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.57 — EOM + SIM Generate: Generate / Approve / Delete restricted to Admin (2026-05-18)
+
+### What changed
+
+The action buttons on the two batch-producing pages now render only for users in the `Admin` role:
+
+| Page | Buttons hidden from non-Admin |
+|---|---|
+| EOM Generate | Generate, Generate & Approve |
+| SIM Generate | Generate, Approve, Delete |
+
+Non-Admin users see a small italic caption in place of the buttons: "Generate / Approve restricted to Admin users." All other surfaces on the page (readiness checks, preview tables, summary tabs, exports, batch history, View Saved, etc.) remain visible — only the irreversible run/save/delete operations are locked down.
+
+### How it works
+
+Each button group is wrapped in `<AuthorizeView Roles="Admin">`. Blazor Server never renders the wrapped buttons for non-Admin sessions, so the `OnClick` handlers can't be invoked — the action surface is effectively unreachable. No changes to the server-side handlers themselves; they still trust the page's auth context as before.
+
+The page-level `[Authorize]` attributes are left as-is:
+- `EomGenerate.razor` — `AdminOrEditor` (Editors can still view EOM)
+- `LpmSimGenerate.razor` — `AdminOrEditorOrPlanner` (Editors / PlanningManagers can still view SIM)
+
+### What was NOT touched
+- **Build SKU Max** (SIM Generate page) — stays open to all page-authorized roles. It's a prep step, not a batch commitment.
+- **Adm.razor** Generate / Approve / Delete buttons — different page, not in this request's scope. Flag if you want them locked down too.
+- **ProductionSchedule.razor** Generate — same reason.
+- **All view-only surfaces** (readiness cards, preview tables, exports, summary tabs, batch history list, View Saved, Load by Batch No) — non-Admins keep full visibility.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | Generate + Generate & Approve buttons wrapped in `<AuthorizeView Roles="Admin">`; `<NotAuthorized>` shows a small italic caption. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | Generate (inside MudTooltip) + Approve + Delete wrapped in `<AuthorizeView Roles="Admin">`; `<NotAuthorized>` shows the same caption. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.56 → 1.14.57. |
+
+### Risk
+**Very low.** Pure UI gate. Admin users see no difference. Non-Admin users lose access to 5 buttons but retain all read-only views.
+
+### Verification after deploy
+1. Sign in as an Editor (or PlanningManager) → EOM Generate / SIM Generate: the action buttons are gone, replaced by the italic caption.
+2. Sign in as Admin → buttons appear and behave exactly as before.
+
+---
+
 ## 1.14.56 — EOM Generate: Ini.EOM formula change (divide by 4) (2026-05-18)
 
 ### What changed

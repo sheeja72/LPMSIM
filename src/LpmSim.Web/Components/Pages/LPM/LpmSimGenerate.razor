@@ -460,25 +460,41 @@
                        OnClick="@(async () => { _loadedBatchNo = null; await CheckAsync(); })">
                 Re-check
             </MudButton>
-            <MudTooltip Text="@(_skuMaxStatus?.LastBuildTS is null ? "Click Build SKU Max first — no snapshot exists for this period" : "")"
-                        Disabled="@(_skuMaxStatus?.LastBuildTS is not null)">
-                <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
-                           StartIcon="@Icons.Material.Filled.PlayArrow"
-                           Disabled="@(_readiness?.CanGenerate != true || _busy || _isBuildingSkuMax || _skuMaxStatus?.LastBuildTS is null)"
-                           OnClick="GenerateAsync">
-                    Generate
-                </MudButton>
-            </MudTooltip>
-            <MudButton Color="Color.Success" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
-                       StartIcon="@Icons.Material.Filled.CheckCircle"
-                       Disabled="@(_readiness?.CanApprove != true || _busy)" OnClick="ApproveAsync">
-                Approve
-            </MudButton>
-            <MudButton Color="Color.Error" Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
-                       StartIcon="@Icons.Material.Filled.DeleteForever"
-                       Disabled="@(_readiness?.CanDelete != true || _busy)" OnClick="DeleteAsync">
-                Delete
-            </MudButton>
+            @* 1.14.57 — Generate / Approve / Delete restricted to Admin.
+               Editors and PlanningManagers retain page-view access (readiness,
+               summary tabs, exports, batch history) via the page-level
+               [Authorize(Roles = AdminOrEditorOrPlanner)] attribute but cannot
+               run / approve / delete a SIM batch. Build SKU Max stays open to
+               all roles since it's a planning prep step, not a batch
+               commitment. *@
+            <AuthorizeView Roles="Admin">
+                <Authorized>
+                    <MudTooltip Text="@(_skuMaxStatus?.LastBuildTS is null ? "Click Build SKU Max first — no snapshot exists for this period" : "")"
+                                Disabled="@(_skuMaxStatus?.LastBuildTS is not null)">
+                        <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                                   StartIcon="@Icons.Material.Filled.PlayArrow"
+                                   Disabled="@(_readiness?.CanGenerate != true || _busy || _isBuildingSkuMax || _skuMaxStatus?.LastBuildTS is null)"
+                                   OnClick="GenerateAsync">
+                            Generate
+                        </MudButton>
+                    </MudTooltip>
+                    <MudButton Color="Color.Success" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.CheckCircle"
+                               Disabled="@(_readiness?.CanApprove != true || _busy)" OnClick="ApproveAsync">
+                        Approve
+                    </MudButton>
+                    <MudButton Color="Color.Error" Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.DeleteForever"
+                               Disabled="@(_readiness?.CanDelete != true || _busy)" OnClick="DeleteAsync">
+                        Delete
+                    </MudButton>
+                </Authorized>
+                <NotAuthorized>
+                    <MudText Typo="Typo.caption" Style="color:#94a3b8;font-style:italic;">
+                        Generate / Approve / Delete restricted to Admin users.
+                    </MudText>
+                </NotAuthorized>
+            </AuthorizeView>
         </MudItem>
 
         @* ─── Row 3 — Current Batch banner (full-width, centered) ───

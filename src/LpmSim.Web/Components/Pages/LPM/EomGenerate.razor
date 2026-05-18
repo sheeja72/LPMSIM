@@ -316,24 +316,38 @@
                        OnClick="ViewSavedAsync">
                 View Saved
             </MudButton>
-            <MudButton Variant="Variant.Filled" Color="Color.Secondary" DropShadow="false"
-                       StartIcon="@Icons.Material.Filled.PlayArrow"
-                       Disabled="@(_readiness?.IsReady != true || _running)"
-                       OnClick="GenerateAsync">
-                Generate
-            </MudButton>
-            @* 1.14.4: button renamed from "Approve" → "Generate & Approve"
-               because it actually calls Eom.GenerateAsync — i.e. it RUNS
-               the engine and SAVES in a single call, regardless of whether
-               a preview-via-Generate was clicked first. The old name
-               implied "approve what was just previewed" which was misleading
-               (no preview is required, and Approve always re-calculates). *@
-            <MudButton Variant="Variant.Filled" Color="Color.Primary" DropShadow="false"
-                       StartIcon="@Icons.Material.Filled.CheckCircle"
-                       Disabled="@(_readiness?.IsReady != true || _running)"
-                       OnClick="ApproveAsync">
-                Generate &amp; Approve
-            </MudButton>
+            @* 1.14.57 — Generate and Generate & Approve restricted to Admin.
+               Editors retain page-view access (readiness, preview, exports)
+               via the page-level [Authorize(Roles = AdminOrEditor)] attribute
+               but cannot trigger a run / save. Non-Admin users see no buttons
+               here; the action surface is empty. *@
+            <AuthorizeView Roles="Admin">
+                <Authorized>
+                    <MudButton Variant="Variant.Filled" Color="Color.Secondary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.PlayArrow"
+                               Disabled="@(_readiness?.IsReady != true || _running)"
+                               OnClick="GenerateAsync">
+                        Generate
+                    </MudButton>
+                    @* 1.14.4: button renamed from "Approve" → "Generate & Approve"
+                       because it actually calls Eom.GenerateAsync — i.e. it RUNS
+                       the engine and SAVES in a single call, regardless of whether
+                       a preview-via-Generate was clicked first. The old name
+                       implied "approve what was just previewed" which was misleading
+                       (no preview is required, and Approve always re-calculates). *@
+                    <MudButton Variant="Variant.Filled" Color="Color.Primary" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.CheckCircle"
+                               Disabled="@(_readiness?.IsReady != true || _running)"
+                               OnClick="ApproveAsync">
+                        Generate &amp; Approve
+                    </MudButton>
+                </Authorized>
+                <NotAuthorized>
+                    <MudText Typo="Typo.caption" Style="color:#94a3b8;font-style:italic;">
+                        Generate / Approve restricted to Admin users.
+                    </MudText>
+                </NotAuthorized>
+            </AuthorizeView>
         </MudItem>
     </MudGrid>
 </div>
