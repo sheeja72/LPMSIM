@@ -33,27 +33,40 @@ public enum WhItemsBoxSource
 ///   <paramref name="BoxSource"/> is <see cref="WhItemsBoxSource.LpmOnly"/>;
 ///   ignored for All / NonLpmOnly because LPMDt = NULL for those. Null /
 ///   empty list = no month restriction. 1.14.50.</param>
+/// <param name="Divisions">Optional Division filter (multi-select). Applied
+///   to the displayed Division (TOP-1 reduction over
+///   <c>upc_subclass × subclassmaster</c>) — so an item appears only if its
+///   shown Division is in the set. Null / empty = no division restriction.
+///   1.14.52.</param>
 public record WhItemsReportFilter(
     string Country,
     IReadOnlyList<string>? PalletCategories,
     WhHoSeason Season,
     WhItemsBoxSource BoxSource,
-    IReadOnlyList<DateTime>? LpmMonths);
+    IReadOnlyList<DateTime>? LpmMonths,
+    IReadOnlyList<string>? Divisions);
 
 /// <summary>
 /// One row of the WH Items report. One row per ItemCode that has at least
 /// one whboxitems entry matching the page filters.
 /// </summary>
+/// <param name="SkuMax">Total SKU Max — SUM(SKUMax) across all stores with a
+///   rule for this item in the latest period.</param>
+/// <param name="AvgSkuMax">Average SKU Max per store, across stores that have
+///   a rule for this item (denominator = count of (Country, StoreID) rows in
+///   LPM_SimItemSkuMax for this item × latest period). Stores without a rule
+///   are excluded from the denominator. 1.14.52.</param>
 public record WhItemsReportRow(
-    string ItemCode,
-    string ItemName,
-    string Division,
-    string Department,
-    string Brand,
-    long   WhQty,
-    long   StoresSoh,
-    long   SkuMax,
-    long   ToFillQty);
+    string  ItemCode,
+    string  ItemName,
+    string  Division,
+    string  Department,
+    string  Brand,
+    long    WhQty,
+    long    StoresSoh,
+    long    SkuMax,
+    decimal AvgSkuMax,
+    long    ToFillQty);
 
 /// <summary>
 /// Data access for Reports → WH Items. Lists every (warehouse-resident) item
@@ -159,6 +172,25 @@ public sealed class WhItemsReportService
             lpmMonthsFrag = sb.ToString();
         }
 
+        // 1.14.52 — Division filter (multi-select). Empty = no filter. Applied
+        // at the final SELECT against the displayed Division (TOP-1 from
+        // #WhItemsDiv) so what the user picks matches what they see.
+        var divFrag = "";
+        var divParms = new List<SqlParameter>();
+        if (filter.Divisions is { Count: > 0 })
+        {
+            var sb = new StringBuilder(" WHERE ISNULL(wdiv.Division, '') IN (");
+            for (int i = 0; i < filter.Divisions.Count; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                var name = $"@div{i}";
+                sb.Append(name);
+                divParms.Add(new SqlParameter(name, filter.Divisions[i]));
+            }
+            sb.Append(')');
+            divFrag = sb.ToString();
+        }
+
         var sql = $@"
             SET NOCOUNT ON;
 
@@ -173,15 +205,19 @@ public sealed class WhItemsReportService
 
             -- 1) WH Qty per itemcode. This defines the row universe — any
             --    itemcode in the country's warehouse, filtered by pallet
-            --    category + season + LPM/Non-LPM + LPM months. Excludes
-            --    purchased boxes (ShopEligible = 'E') so totals match the
-            --    other reports.
+            --    category + season + LPM/Non-LPM + LPM months.
+            --    Excludes Non-Purchased rows (ShopEligible = 'E' marks boxes
+            --    still in-process / not yet purchased) so the WH Qty totals
+            --    reconcile with WH Stock Position. 1.14.52 — also excludes
+            --    PalletCategory = 'NON-PURCHASED' to drop the rows the
+            --    planner flagged on the screenshot.
             SELECT w.itemcode,
                    WhQty = SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
               INTO #WhItemsAgg
               FROM {whSrc} w
              WHERE w.itemcode IS NOT NULL AND w.itemcode <> ''
                AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+               AND (w.PalletCategory IS NULL OR UPPER(w.PalletCategory) <> 'NON-PURCHASED')
                -- 1.14.50: Season filter (A=All / S / W)
                AND (@season = 'A' OR UPPER(ISNULL(w.Season, '')) = @season)
                -- 1.14.50: Box source filter (A=All / L=LpmOnly / N=NonLpmOnly)
@@ -229,8 +265,16 @@ public sealed class WhItemsReportService
              WHERE Country = @country
              ORDER BY Year1 DESC, Month1 DESC;
 
+            -- 1.14.52: AvgSkuMax = per-store mean across the stores that have
+            -- a rule for this item in the latest period. Each row in
+            -- LPM_SimItemSkuMax is one (Country, StoreID, ItemCode, Year, Month)
+            -- tuple, so AVG over (ItemCode, latest period) computes
+            -- SUM(SKUMax) / COUNT(rows with rule) directly — stores without
+            -- a rule for this item are excluded from the denominator, which
+            -- matches what the planner asked for.
             SELECT sm.ItemCode,
                    SkuMax    = SUM(CAST(ISNULL(sm.SKUMax,    0) AS bigint)),
+                   AvgSkuMax = AVG(CAST(ISNULL(sm.SKUMax,    0) AS decimal(18,2))),
                    ToFillQty = SUM(CAST(ISNULL(sm.ToFillQty, 0) AS bigint))
               INTO #WhItemsSkuMax
               FROM LPMSIM.dbo.LPM_SimItemSkuMax sm
@@ -306,6 +350,7 @@ public sealed class WhItemsReportService
                     WhQty     = wa.WhQty,
                     StoresSoh = ISNULL(ws.StoresSoh,  0),
                     SkuMax    = ISNULL(wsm.SkuMax,    0),
+                    AvgSkuMax = ISNULL(wsm.AvgSkuMax, CAST(0 AS decimal(18,2))),
                     ToFillQty = CASE
                                   WHEN ISNULL(wsm.ToFillQty, 0) > wa.WhQty
                                        THEN wa.WhQty
@@ -317,6 +362,7 @@ public sealed class WhItemsReportService
               LEFT  JOIN #WhItemsBrand  wb   ON wb.itemcode  = wa.itemcode
               LEFT  JOIN #WhItemsSoh    ws   ON ws.Itemcode  = wa.itemcode
               LEFT  JOIN #WhItemsSkuMax wsm  ON wsm.ItemCode = wa.itemcode
+              {divFrag}
               ORDER BY Division, ItemCode;
         ";
 
@@ -326,6 +372,7 @@ public sealed class WhItemsReportService
         cmd.Parameters.Add(new SqlParameter("@boxSource", boxSourceCode));
         foreach (var p in palletParms)    cmd.Parameters.Add(p);
         foreach (var p in lpmMonthsParms) cmd.Parameters.Add(p);
+        foreach (var p in divParms)       cmd.Parameters.Add(p);
 
         var rows = new List<WhItemsReportRow>();
         using var rdr = await cmd.ExecuteReaderAsync(ct);
@@ -340,7 +387,8 @@ public sealed class WhItemsReportService
                 WhQty:      rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5),
                 StoresSoh:  rdr.IsDBNull(6) ? 0L : rdr.GetInt64(6),
                 SkuMax:     rdr.IsDBNull(7) ? 0L : rdr.GetInt64(7),
-                ToFillQty:  rdr.IsDBNull(8) ? 0L : rdr.GetInt64(8)));
+                AvgSkuMax:  rdr.IsDBNull(8) ? 0m : rdr.GetDecimal(8),
+                ToFillQty:  rdr.IsDBNull(9) ? 0L : rdr.GetInt64(9)));
         }
         return rows;
     }

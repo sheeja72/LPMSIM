@@ -23,6 +23,36 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.52 — WH Items: exclude NON-PURCHASED pallets; add Avg SKU Max + Division filter (2026-05-18)
+
+### Four changes (Reports → WH Items)
+
+1. **Exclude `PalletCategory = 'NON-PURCHASED'`.** Added to the WH Qty source filter alongside the existing `ShopEligible <> 'E'` guard. The two exclusions cover different shapes of "not yet bought":
+   - `ShopEligible = 'E'` → boxes still in-process at the WH (existing exclusion).
+   - `PalletCategory = 'NON-PURCHASED'` → boxes flagged on the pallet master as not-yet-purchased (new exclusion).
+   Both now drop. Same shape as the long-standing `PalletCategory NOT IN ('NON ELIGIBLE', 'ECOM')` rule used by WH Stock Position / Variance.
+
+2. **New `Avg SKU Max` column.** Per-store mean across stores that have a rule for the item in the latest period (denominator = `COUNT(rows in LPM_SimItemSkuMax)` for that ItemCode × period — stores without a rule are excluded from the average). Adds a "what's the typical ceiling per store" read alongside the existing total.
+
+3. **Renamed `SKU Max` → `Total SKU Max`.** The existing column was always the SUM across stores; the new label removes ambiguity now that `Avg SKU Max` sits next to it.
+
+4. **New `Division` filter (multi-select).** Populated from `Datareporting.dbo.subclassmaster.Division` — same source the displayed Division comes from, so what you pick matches what you see. Empty = all divisions. Applied at the final SELECT against the TOP-1 reduced Division (the same value shown in the row).
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Reports/WhItemsReportService.cs` | `WhItemsReportRow` gains `AvgSkuMax` (decimal); `WhItemsReportFilter` gains `Divisions` (multi-select); `#WhItemsAgg` adds `PalletCategory <> 'NON-PURCHASED'` filter; `#WhItemsSkuMax` adds `AvgSkuMax = AVG(SKUMax)`; final SELECT gains parameterised `WHERE wdiv.Division IN (...)`; reader updated. Inline comment around the `ShopEligible` filter fixed (it was inverted). |
+| `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` | Header rename + new Avg SKU Max column (sortable, right-aligned, 1-decimal display); footer shows the average-of-averages across loaded rows; Excel export gains the new column with `#,##0.0` number format. New Division `MultiSelectFilter` wired to `Warehouse.GetDistinctDivisionsAsync()`; layout reflowed (Pallet Categories now wraps to its own row when LPM Months is shown so neither dropdown gets squashed). Page subtitle expanded. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.51 → 1.14.52 |
+
+### Risk
+**Low.** Existing rows still surface — the NON-PURCHASED exclusion drops a category the planner already wanted off the report, and the Avg column is purely additive (sums and ToFillQty cap unchanged). No DB schema change, no migration.
+
+### Comment fix worth noting
+The old inline comment around the `ShopEligible` filter claimed it "excludes purchased boxes (ShopEligible = 'E')". That was backwards — `'E'` marks Non-Purchased per the 1.14.11 / 1.10.x labels. Comment now states the actual intent so the next reader doesn't get misled.
+
+---
+
 ## 1.14.51 — Planning Config → Stores Capacity EOM + Excel upload (2026-05-18)
 
 ### What's new

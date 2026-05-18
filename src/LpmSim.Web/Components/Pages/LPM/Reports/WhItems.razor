@@ -20,9 +20,10 @@
 <div class="lpm-page-title">WH Items</div>
 <div class="lpm-page-subtitle">
     Per-item view of every warehouse-resident itemcode, with the item's master metadata
-    (Division / Department / Brand) and the four quantity columns that drive planning:
+    (Division / Department / Brand) and the quantity columns that drive planning:
     <strong>WH Qty</strong> (warehouse stock), <strong>Stores SOH</strong> (current stock at country's
-    active stores), <strong>SKU Max</strong> (per-item ceiling sum across stores, latest period), and
+    active stores), <strong>Total SKU Max</strong> (per-item ceiling sum across stores, latest period),
+    <strong>Avg SKU Max</strong> (per-store mean across stores that have a rule), and
     <strong>To Fill Qty</strong> (room left before hitting SKU Max). Country switches the whboxitems
     source (UAE → <code>racks.dbo.whboxitems</code>; other countries → <code>[&lt;DataName&gt;].dbo.WHBoxItemsExport</code>).
 </div>
@@ -87,8 +88,16 @@
             </MudItem>
         }
 
+        @* Division — multi-select. Empty = all divisions. 1.14.52. *@
+        <MudItem xs="12" sm="6" md="2">
+            <MultiSelectFilter Label="Division"
+                               Items="_divisions"
+                               Selected="_selectedDivisions"
+                               SelectedChanged="@((HashSet<string> s) => { _selectedDivisions = s; StateHasChanged(); })" />
+        </MudItem>
+
         @* Pallet Categories — multi-select. Empty = all categories. *@
-        <MudItem xs="12" sm="6" md="@(_boxSource == WhItemsBoxSource.LpmOnly ? 3 : 5)">
+        <MudItem xs="12" sm="6" md="@(_boxSource == WhItemsBoxSource.LpmOnly ? 12 : 3)">
             <MultiSelectFilter Label="Pallet Categories"
                                Items="_palletCategories"
                                Selected="_selectedPalletCategories"
@@ -173,7 +182,10 @@
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.StoresSoh">Stores SOH</MudTableSortLabel>
             </MudTh>
             <MudTh Style="text-align:right;">
-                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SkuMax">SKU Max</MudTableSortLabel>
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SkuMax">Total SKU Max</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.AvgSkuMax">Avg SKU Max</MudTableSortLabel>
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.ToFillQty">To Fill Qty</MudTableSortLabel>
@@ -188,6 +200,7 @@
             <MudTd Style="text-align:right;">@context.WhQty.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.StoresSoh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.SkuMax.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.AvgSkuMax.ToString("N1")</MudTd>
             <MudTd Style="text-align:right;">@context.ToFillQty.ToString("N0")</MudTd>
         </RowTemplate>
         <PagerContent>
@@ -198,6 +211,10 @@
             <MudTd Style="text-align:right;font-weight:600;">@totWh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totSoh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totSku.ToString("N0")</MudTd>
+            @* Avg-of-averages across loaded rows — equal weight per item.
+               Not a SUM (the per-row metric is already an average) so the
+               footer column shows the typical per-store ceiling, not a total. *@
+            <MudTd Style="text-align:right;font-weight:600;">@(_rows.Count > 0 ? _rows.Average(r => r.AvgSkuMax).ToString("N1") : "0.0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totFill.ToString("N0")</MudTd>
         </FooterContent>
     </MudTable>
@@ -220,6 +237,7 @@ else
     private List<string>   _countries        = new() { "UAE" };
     private List<string>   _palletCategories = new();
     private List<DateTime> _allLpmMonths     = new();    // 1.14.50
+    private List<string>   _divisions        = new();    // 1.14.52
 
     // ─── Filter values ──────────────────────────────────────────────────
     private string             _country                  = "UAE";
@@ -227,6 +245,7 @@ else
     private WhHoSeason         _season                   = WhHoSeason.All;           // 1.14.50
     private WhItemsBoxSource   _boxSource                = WhItemsBoxSource.All;     // 1.14.50
     private HashSet<DateTime>  _selectedLpmMonths        = new();                    // 1.14.50
+    private HashSet<string>    _selectedDivisions        = new(StringComparer.OrdinalIgnoreCase); // 1.14.52
     private string             _textFilter               = "";
 
     // ─── Result + UI state ──────────────────────────────────────────────
@@ -236,16 +255,19 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        // Three filter-list queries in parallel (different sources).
+        // Filter-list queries in parallel (different sources).
         var countriesTask = Warehouse.GetCountriesAsync();
         var palletsTask   = Warehouse.GetPalletCategoriesAsync();
         var lpmMonthsTask = SimReports.GetDistinctLpmMonthsAsync();
+        var divisionsTask = Warehouse.GetDistinctDivisionsAsync();    // 1.14.52
         try
         {
             _countries        = await countriesTask;
             _palletCategories = await palletsTask;
             try { _allLpmMonths = await lpmMonthsTask; }
             catch { _allLpmMonths = new(); }    // best-effort; LPM Months dropdown just stays empty
+            try { _divisions = await divisionsTask; }
+            catch { _divisions = new(); }       // best-effort; Division dropdown just stays empty
         }
         catch (Exception ex)
         {
@@ -293,7 +315,8 @@ else
             PalletCategories: _selectedPalletCategories.Count == 0 ? null : _selectedPalletCategories.ToList(),
             Season:           _season,
             BoxSource:        _boxSource,
-            LpmMonths:        _selectedLpmMonths.Count == 0 ? null : _selectedLpmMonths.ToList());
+            LpmMonths:        _selectedLpmMonths.Count == 0 ? null : _selectedLpmMonths.ToList(),
+            Divisions:        _selectedDivisions.Count == 0 ? null : _selectedDivisions.ToList());
         try
         {
             _rows = await Report.GetAsync(filter);
@@ -334,7 +357,7 @@ else
             using var wb = new XLWorkbook();
             var ws = wb.Worksheets.Add("WH Items");
             string[] headers = { "Itemcode", "Item Name", "Division", "Department", "Brand",
-                                 "WH Qty", "Stores SOH", "SKU Max", "To Fill Qty" };
+                                 "WH Qty", "Stores SOH", "Total SKU Max", "Avg SKU Max", "To Fill Qty" };
             for (int i = 0; i < headers.Length; i++)
             {
                 ws.Cell(1, i + 1).Value = headers[i];
@@ -352,19 +375,24 @@ else
                 ws.Cell(row, 6).Value = r.WhQty;
                 ws.Cell(row, 7).Value = r.StoresSoh;
                 ws.Cell(row, 8).Value = r.SkuMax;
-                ws.Cell(row, 9).Value = r.ToFillQty;
+                ws.Cell(row, 9).Value = r.AvgSkuMax;
+                ws.Cell(row, 10).Value = r.ToFillQty;
             }
-            // TOTAL row
+            // TOTAL row. Avg column shows the average of the row averages
+            // (equal weight per item) — same as the on-screen footer.
             var totalRow = _rows.Count + 2;
             ws.Cell(totalRow, 1).Value = $"TOTAL ({_rows.Count:N0} items)";
             ws.Cell(totalRow, 1).Style.Font.Bold = true;
             ws.Cell(totalRow, 6).Value = _rows.Sum(r => r.WhQty);
             ws.Cell(totalRow, 7).Value = _rows.Sum(r => r.StoresSoh);
             ws.Cell(totalRow, 8).Value = _rows.Sum(r => r.SkuMax);
-            ws.Cell(totalRow, 9).Value = _rows.Sum(r => r.ToFillQty);
-            for (int c = 6; c <= 9; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
-            // Number format for quantity columns.
-            ws.Range(2, 6, totalRow, 9).Style.NumberFormat.Format = "#,##0";
+            ws.Cell(totalRow, 9).Value = _rows.Count > 0 ? _rows.Average(r => r.AvgSkuMax) : 0m;
+            ws.Cell(totalRow, 10).Value = _rows.Sum(r => r.ToFillQty);
+            for (int c = 6; c <= 10; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
+            // Number formats: integer cols / Avg col with 1 decimal.
+            ws.Range(2, 6, totalRow, 8).Style.NumberFormat.Format  = "#,##0";
+            ws.Range(2, 9, totalRow, 9).Style.NumberFormat.Format  = "#,##0.0";
+            ws.Range(2, 10, totalRow, 10).Style.NumberFormat.Format = "#,##0";
             ws.Columns().AdjustToContents();
 
             var fileName = $"WhItems_{_country}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
