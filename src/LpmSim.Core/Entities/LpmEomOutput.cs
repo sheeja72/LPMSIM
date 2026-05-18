@@ -16,10 +16,14 @@ public class LpmEomOutput
     public decimal? TargetSales { get; set; }
 
     /// <summary>
-    /// Initial EOM (1.14.53) — <c>TargetSales × TargetTurn</c>. Per
-    /// (Store × Division). Unranked stores (TargetTurn = 0) → Ini.EOM = 0.
-    /// Used as the per-store weight when apportioning PlannedEOM into
-    /// <see cref="PreStoreCapEom"/>. NULL on rows generated before 1.14.53.
+    /// Initial EOM (1.14.53; formula updated in 1.14.56) —
+    /// <c>(TargetTurn × TargetSales) / 4</c>. Per (Store × Division).
+    /// Unranked stores (TargetTurn = 0) → Ini.EOM = 0. Used as the per-store
+    /// weight when apportioning PlannedEOM into <see cref="PreStoreCapEom"/>.
+    /// Because that apportionment is share-based, scaling Ini.EOM by a constant
+    /// (the /4) does not change PreStoreCapEom or TargetEOM — only the column
+    /// itself reads 1/4 the value the pre-1.14.56 formula produced.
+    /// NULL on rows generated before 1.14.53.
     /// </summary>
     public decimal? IniEom { get; set; }
 

@@ -167,14 +167,18 @@
                        on the grid so the planner can read the calc. *@
                     <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Ini. EOM</strong></td>
                         <td style="padding:6px 10px;border:1px solid #e2e8f0;">
-                            <strong>Initial EOM — naive per-store demand:</strong>
+                            <strong>Initial EOM — weekly-equivalent per-store demand:</strong>
                             <br/>
-                            <code>Ini.EOM[store, div] = TargetSales × TargetTurn</code>
+                            <code>Ini.EOM[store, div] = (TargetTurn × TargetSales) / 4</code>
                             <br/>
                             <span style="color:#64748b;font-size:.8rem;">
-                                Reads as "if the store sold its TgtSales at its TgtTurn, this is the stock it would
-                                carry." Unranked stores (TgtTurn = 0 because no Grade) → Ini.EOM = 0. Feeds the
-                                next column's apportionment as a per-store weight.
+                                1.14.56: divided by 4 so the figure reads as a weekly-equivalent demand
+                                rather than the previous monthly-sales × annual-turns product.
+                                Unranked stores (TgtTurn = 0 because no Grade) → Ini.EOM = 0. Feeds the
+                                next column's apportionment as a per-store weight — and because that
+                                apportionment is share-based, the /4 cancels: Pre-Store CAP EOM and
+                                Tgt EOM are unchanged by this scaling, only the displayed Ini.EOM column
+                                reads 1/4 the value the pre-1.14.56 formula produced.
                             </span>
                         </td></tr>
 
@@ -571,7 +575,7 @@
 
                 @* 1.14.53 — Ini.EOM column inserted before Tgt EOM.
                    Ini.EOM = TargetSales × TargetTurn. *@
-                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalIniEom.ToString("N0")</div><span title="Ini.EOM = TargetSales × TargetTurn. Naive per-store demand: how much stock the store would carry if you held its sales × its target turn target. Feeds the Pre-Store CAP EOM apportionment.">
+                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalIniEom.ToString("N0")</div><span title="Ini.EOM = (TargetTurn × TargetSales) / 4. Weekly-equivalent per-store demand figure. Feeds the Pre-Store CAP EOM apportionment as a per-store weight (share-based, so the /4 cancels — only the displayed Ini.EOM column scales).">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.IniEom">Ini.<br />EOM</MudTableSortLabel></span></MudTh>
 
                 @* 1.14.53 — Pre-Store CAP EOM column inserted before Tgt EOM.

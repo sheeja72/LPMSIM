@@ -23,6 +23,47 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.56 — EOM Generate: Ini.EOM formula change (divide by 4) (2026-05-18)
+
+### What changed
+
+The Ini.EOM column on the EOM Generate Full preview now reads as a weekly-equivalent figure instead of the monthly-sales × annual-turns product:
+
+| | Before (1.14.53–1.14.55) | After (1.14.56) |
+|---|---|---|
+| Formula | `TargetSales × TargetTurn` | `(TargetTurn × TargetSales) / 4` |
+| Reads as | Monthly sales × annual turns | Weekly-equivalent demand |
+
+### Downstream impact: zero
+
+Pre-Store CAP EOM and Tgt EOM are unchanged. The apportionment step that consumes Ini.EOM is share-based:
+
+```
+PreStoreCapEom = (IniEom[store, div] / Σ IniEom in Div) × PlannedEOM[div]
+```
+
+Dividing the numerator AND the denominator by the same constant (4) cancels — so PreStoreCapEom and the cap-aware TargetEOM produce identical values to 1.14.55. **Only the Ini.EOM column reads 1/4 the value** it did before. SIM Generate, ADM, Reports, and saved batches are not affected by the scaling.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | Stage 4a formula `r.TargetSales * r.TargetTurn` → `(r.TargetTurn * r.TargetSales) / 4m`. Block comment updated to explain the new shape + the cancellation property. |
+| `src/LpmSim.Core/Entities/LpmEomOutput.cs` | `IniEom` doc-comment updated to new formula. |
+| `src/LpmSim.Data/Eom/EomModels.cs` | `EomRow.IniEom` doc-comment updated. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | Column tooltip + help-card "Ini. EOM" row updated to the new formula with the weekly-equivalent reading and the cancellation note. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.55 → 1.14.56. |
+
+### Risk
+**Very low.** Pure scaling on a display column. No schema change, no migration, no behavioural change downstream. Old batches in `LPM_EOM_Output` keep their saved Ini.EOM values; only freshly-generated batches use the new formula.
+
+### Verification after deploy
+Re-run EOM Generate for the current period and confirm:
+- Ini.EOM column ≈ 1/4 of what it showed in the previous 1.14.53–1.14.55 preview.
+- Pre-Store CAP EOM unchanged vs 1.14.55 (cross-check Σ within a Division should still equal that division's PlannedEOM).
+- Tgt EOM unchanged vs 1.14.55.
+
+---
+
 ## 1.14.55 — dbo.Division.IsActive flag — retire DivCode 420 globally (2026-05-18)
 
 ### What changed

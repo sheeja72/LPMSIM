@@ -866,9 +866,12 @@ SELECT id.DivCode,
         // with three sequential stages so the planner can read the calc as a
         // waterfall on the EOM grid:
         //
-        //   4a. Ini.EOM[store, div]        = TargetSales × TargetTurn
-        //       (a "naive demand" figure: how much stock the store would
-        //        carry if you held its sales × its target turn target).
+        //   4a. Ini.EOM[store, div]        = (TargetTurn × TargetSales) / 4
+        //       (1.14.56: divided by 4 to read as a weekly-equivalent figure
+        //        instead of the previous monthly-sales × annual-turns product.
+        //        Downstream Pre-Store CAP EOM is share-based — IniEom / Σ IniEom
+        //        — so the /4 cancels out and PreStoreCapEom / TargetEOM are
+        //        unchanged. Only the displayed Ini.EOM column scales by 1/4.)
         //
         //   4b. PreStoreCapEom[store, div] = (Ini.EOM[store, div] / Σ Ini.EOM in Div)
         //                                    × PlannedEOM[div]
@@ -891,9 +894,9 @@ SELECT id.DivCode,
         // falls short by the capped delta — that's intentional (the cap is a
         // ceiling, accepting less stock is the whole point).
         //
-        // Stage 4a — Ini.EOM per row.
+        // Stage 4a — Ini.EOM per row. 1.14.56: divided by 4.
         foreach (var r in rows)
-            r.IniEom = r.TargetSales * r.TargetTurn;
+            r.IniEom = (r.TargetTurn * r.TargetSales) / 4m;
 
         // Stage 4b — PreStoreCapEom per division by Ini.EOM share.
         // Divisions with Σ IniEom <= 0 (e.g. nothing planned, or every store

@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.55</Version>
-    <AssemblyVersion>1.14.55.0</AssemblyVersion>
-    <FileVersion>1.14.55.0</FileVersion>
-    <InformationalVersion>1.14.55 (dbo.Division.IsActive flag — retire DivCode 420 globally)</InformationalVersion>
+    <Version>1.14.56</Version>
+    <AssemblyVersion>1.14.56.0</AssemblyVersion>
+    <FileVersion>1.14.56.0</FileVersion>
+    <InformationalVersion>1.14.56 (EOM Generate: Ini.EOM formula → (TargetTurn × TargetSales) / 4)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

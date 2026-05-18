@@ -37,7 +37,8 @@ public class EomRow
     public decimal TargetTurn { get; set; }
     public decimal TargetSales { get; set; }
 
-    /// <summary>1.14.53 — Ini.EOM = <c>TargetSales × TargetTurn</c>.</summary>
+    /// <summary>1.14.53 (formula updated in 1.14.56) — Ini.EOM =
+    /// <c>(TargetTurn × TargetSales) / 4</c>.</summary>
     public decimal IniEom { get; set; }
 
     /// <summary>1.14.53 — Pre-Store-Cap EOM: apportionment of PlannedEOM by
