@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.46</Version>
-    <AssemblyVersion>1.14.46.0</AssemblyVersion>
-    <FileVersion>1.14.46.0</FileVersion>
-    <InformationalVersion>1.14.46 (SOH refresh scoped to batch items — fixes 1.14.44 perf regression)</InformationalVersion>
+    <Version>1.14.47</Version>
+    <AssemblyVersion>1.14.47.0</AssemblyVersion>
+    <FileVersion>1.14.47.0</FileVersion>
+    <InformationalVersion>1.14.47 (New Reports → WH Items page)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -23,6 +23,52 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.47 — New Reports → WH Items page (2026-05-18)
+
+### Feature
+New page under **Reports → WH Items** for a per-itemcode view of warehouse-resident stock with master metadata and the four key planning quantities.
+
+### Page layout
+- **Filters**: Country (single, defaults to UAE) + Pallet Categories (multi-select, empty = all)
+- **Columns** (per item):
+  - `Itemcode` · `Item Name` · `Division` · `Department` · `Brand`
+  - `WH Qty` — sum of warehouse stock for that item across the country's whboxitems source
+  - `Stores SOH` — sum of `LPM_LocStock.SOH` across the country's active stores (excludes HO)
+  - `SKU Max` — sum of `LPM_SimItemSkuMax.SKUMax` across stores for the LATEST period present for that country
+  - `To Fill Qty` — sum of `LPM_SimItemSkuMax.ToFillQty` for the same latest period
+- **Search-as-you-type** filter box (Itemcode / Item Name / Division / Brand)
+- **Sortable** columns, paginated (50/100/250/500 page sizes)
+- **Excel export** with TOTAL row
+
+### Country-awareness
+Same `WhBoxItemsSource.ResolveAsync` pattern as the existing WH Stock Position page:
+- UAE → `racks.dbo.whboxitems`
+- Other countries → `[<DataName>].dbo.WHBoxItemsExport`
+
+Stores SOH filter resolves to `DataSettings.SIMCountry = @country AND ActiveStore = 'Y'` — HO storeids are naturally excluded since they have no SIMCountry.
+
+### Performance
+Same temp-table staging pattern as `WhHoStockService` (1.14.12 perf refactor). One INSERT per lookup → one final SELECT joining indexed temps. Item-name / Division / Brand metadata lookups all reduce to TOP-1 per itemcode via `ROW_NUMBER OVER (PARTITION BY itemcode)` so the result has exactly one row per item.
+
+### Files changed
+| File | Change |
+|---|---|
+| **NEW** `src/LpmSim.Data/Reports/WhItemsReportService.cs` | Service with `WhItemsReportFilter` / `WhItemsReportRow` records + temp-table-staged query |
+| **NEW** `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` | Razor page with filters, sortable table, in-table text search, Excel export |
+| `src/LpmSim.Web/Components/Layout/NavMenu.razor` | New "WH Items" link in the Reports group (between WH Stock Position and Variance Report) |
+| `src/LpmSim.Web/Program.cs` | DI registration: `AddScoped<WhItemsReportService>()` |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.46 → 1.14.47 |
+
+### Access control
+Same as the other Reports pages — `Roles.AnyRole` so Admin / Planner / PlanningManager / Reports (Viewer) can all open it.
+
+### Notes
+- **No DB migration.** Reads existing tables only.
+- **Item universe** = items present in the country's whboxitems source for the filter. Items that exist only in stores (no warehouse stock) won't appear; can be widened in a future release if needed.
+- **SKU Max period** = latest `(Year1, Month1)` in `LPM_SimItemSkuMax` for the country. If no SkuMax build has run for the country, both columns show 0.
+
+---
+
 ## 1.14.46 — SOH refresh scoped to batch items (1.14.44 perf fix) (2026-05-17)
 
 ### Bug
