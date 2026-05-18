@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.49</Version>
-    <AssemblyVersion>1.14.49.0</AssemblyVersion>
-    <FileVersion>1.14.49.0</FileVersion>
-    <InformationalVersion>1.14.49 (HOTFIX: WH Items cross-DB table qualifications)</InformationalVersion>
+    <Version>1.14.50</Version>
+    <AssemblyVersion>1.14.50.0</AssemblyVersion>
+    <FileVersion>1.14.50.0</FileVersion>
+    <InformationalVersion>1.14.50 (WH Items: Season + LPM/Non-LPM + LPM Months filters; ToFillQty capped at WH Qty; negative SOH clamped)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -23,6 +23,36 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.50 — WH Items: Season + LPM/Non-LPM + LPM Months filters; ToFillQty cap; SOH clamp (2026-05-18)
+
+### Three filter additions
+
+| New filter | Behaviour |
+|---|---|
+| **Season** (single) | All / Summer / Winter. Narrows `whboxitems.Season`. Active state highlights the filter when not "All". |
+| **Box Source** (single) | All / LPM / Non-LPM. `LpmOnly` → `whboxitems.LPMDt IS NOT NULL`; `NonLpmOnly` → `LPMDt IS NULL`. Same semantic as the SIM Generate Box Source dropdown. |
+| **LPM Months** (multi-select) | Specific LPM months to include, e.g. May-26 / Jun-26. **Only visible when Box Source = LPM** (Non-LPM has no LPMDt to filter on). Pulls the distinct months list via the same `LpmSimReports.GetDistinctLpmMonthsAsync` call SIM Generate uses. |
+
+Filter combinations narrow the WH Qty universe at the source query, so all downstream columns (Stores SOH / SKU Max / To Fill Qty) reflect only items in the filtered box set.
+
+### Two correctness fixes
+
+1. **`To Fill Qty` capped at `WH Qty`.** The raw `LPM_SimItemSkuMax.ToFillQty` summed across stores is *demand capacity* — it can exceed the actual warehouse stock available to ship. Example: 18 units of demand across stores, but only 16 units in the warehouse → effective fillable quantity is 16, not 18. The displayed value is now `MIN(ToFillQty, WhQty)` so it reads as "what can actually be filled this period given current supply".
+
+2. **Negative SOH treated as zero in Stores SOH.** Oversold rows in `LPM_LocStock` (`SOH < 0`) used to subtract from the column total, distorting it. Per the planner's rule "if SOH is negative consider as zero", the sum now uses `CASE WHEN SOH < 0 THEN 0 ELSE SOH END`. Same clamp pattern the allocator already applies in cap math (1.14.31).
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Reports/WhItemsReportService.cs` | `WhItemsBoxSource` enum; `WhItemsReportFilter` widened with `Season / BoxSource / LpmMonths`; SQL gets `@season` / `@boxSource` predicates + LPM-months OR-chain; Stores SOH clamps negatives; ToFillQty CASE caps at WhQty |
+| `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` | New filter MudSelects (Season, Box Source); conditional LPM Months multi-select; `LpmSimReports` injection for the months source; `SelectedLpmMonthsText` helper for compact chip display; `LoadAsync` passes the new fields |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.49 → 1.14.50 |
+
+### Risk
+**Low.** Pure additive filtering + display-cap. Existing semantics preserved (when all filters = All, the report returns the same rows as 1.14.49 minus the negative-SOH distortion). No DB schema change.
+
+---
+
 ## 1.14.49 — HOTFIX: WH Items cross-DB table qualifications (2026-05-18)
 
 ### Bug

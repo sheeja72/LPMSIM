@@ -7,8 +7,10 @@
 @using LpmSim.Data.Auditing
 @using ClosedXML.Excel
 @using LpmSim.Web.Components.Pages.Uploads
+@using LpmSim.Data.LpmSim
 @inject WhItemsReportService Report
 @inject WarehouseQueryService Warehouse
+@inject LpmSimReportService SimReports
 @inject IActionLogger ActionLog
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
@@ -27,7 +29,7 @@
 
 <div class="lpm-section lpm-filter-bar lpm-filter-bar-lg">
     <MudGrid Spacing="2">
-        <MudItem xs="12" sm="6" md="3">
+        <MudItem xs="12" sm="6" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
                        ValueChanged="@OnCountryChanged"
                        Variant="Variant.Outlined" Margin="Margin.Dense"
@@ -39,15 +41,61 @@
             </MudSelect>
         </MudItem>
 
+        @* Season — single. All / Summer / Winter. 1.14.50. *@
+        <MudItem xs="6" sm="4" md="2">
+            <MudSelect T="WhHoSeason" Label="Season" Value="_season"
+                       ValueChanged="v => { _season = v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       Class="@(_season == WhHoSeason.All ? "" : "lpm-filter-active")">
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.All">All</MudSelectItem>
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.Summer">Summer</MudSelectItem>
+                <MudSelectItem T="WhHoSeason" Value="WhHoSeason.Winter">Winter</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+
+        @* Box Source — LPM / Non-LPM / All. 1.14.50. *@
+        <MudItem xs="6" sm="4" md="2">
+            <MudSelect T="WhItemsBoxSource" Label="Box Source" Value="_boxSource"
+                       ValueChanged="v => { _boxSource = v; StateHasChanged(); }"
+                       Variant="Variant.Outlined" Margin="Margin.Dense"
+                       Class="@(_boxSource == WhItemsBoxSource.All ? "" : "lpm-filter-active")">
+                <MudSelectItem T="WhItemsBoxSource" Value="WhItemsBoxSource.All">All</MudSelectItem>
+                <MudSelectItem T="WhItemsBoxSource" Value="WhItemsBoxSource.LpmOnly">LPM</MudSelectItem>
+                <MudSelectItem T="WhItemsBoxSource" Value="WhItemsBoxSource.NonLpmOnly">Non-LPM</MudSelectItem>
+            </MudSelect>
+        </MudItem>
+
+        @* LPM Months — multi-select. Only shown / usable when Box Source = LPM,
+           matching SIM Generate's pattern. 1.14.50. *@
+        @if (_boxSource == WhItemsBoxSource.LpmOnly)
+        {
+            <MudItem xs="6" sm="4" md="2">
+                <MudSelect T="DateTime" Label="LPM Months"
+                           SelectedValues="_selectedLpmMonths"
+                           SelectedValuesChanged="(IEnumerable<DateTime> vs) => { _selectedLpmMonths = vs?.ToHashSet() ?? new HashSet<DateTime>(); StateHasChanged(); }"
+                           MultiSelection="true"
+                           Variant="Variant.Outlined" Margin="Margin.Dense"
+                           Clearable
+                           Placeholder="(All months)"
+                           SelectAll="true" SelectAllText="All months"
+                           MultiSelectionTextFunc="@(new Func<List<string>, string>(SelectedLpmMonthsText))">
+                    @foreach (var m in _allLpmMonths)
+                    {
+                        <MudSelectItem T="DateTime" Value="m">@m.ToString("MMM-yy")</MudSelectItem>
+                    }
+                </MudSelect>
+            </MudItem>
+        }
+
         @* Pallet Categories — multi-select. Empty = all categories. *@
-        <MudItem xs="12" sm="6" md="5">
+        <MudItem xs="12" sm="6" md="@(_boxSource == WhItemsBoxSource.LpmOnly ? 3 : 5)">
             <MultiSelectFilter Label="Pallet Categories"
                                Items="_palletCategories"
                                Selected="_selectedPalletCategories"
                                SelectedChanged="@((HashSet<string> s) => { _selectedPalletCategories = s; StateHasChanged(); })" />
         </MudItem>
 
-        <MudItem xs="12" md="4" Class="d-flex align-center justify-end gap-2">
+        <MudItem xs="12" md="@(_boxSource == WhItemsBoxSource.LpmOnly ? 1 : 1)" Class="d-flex align-center justify-end gap-2">
             <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false" Size="Size.Small"
                        StartIcon="@Icons.Material.Filled.PlayArrow"
                        Disabled="_loading" OnClick="LoadAsync">
@@ -169,13 +217,17 @@ else
 
 @code {
     // ─── Dropdown sources ───────────────────────────────────────────────
-    private List<string> _countries        = new() { "UAE" };
-    private List<string> _palletCategories = new();
+    private List<string>   _countries        = new() { "UAE" };
+    private List<string>   _palletCategories = new();
+    private List<DateTime> _allLpmMonths     = new();    // 1.14.50
 
     // ─── Filter values ──────────────────────────────────────────────────
-    private string          _country                  = "UAE";
-    private HashSet<string> _selectedPalletCategories = new(StringComparer.OrdinalIgnoreCase);
-    private string          _textFilter               = "";
+    private string             _country                  = "UAE";
+    private HashSet<string>    _selectedPalletCategories = new(StringComparer.OrdinalIgnoreCase);
+    private WhHoSeason         _season                   = WhHoSeason.All;           // 1.14.50
+    private WhItemsBoxSource   _boxSource                = WhItemsBoxSource.All;     // 1.14.50
+    private HashSet<DateTime>  _selectedLpmMonths        = new();                    // 1.14.50
+    private string             _textFilter               = "";
 
     // ─── Result + UI state ──────────────────────────────────────────────
     private List<WhItemsReportRow> _rows       = new();
@@ -184,18 +236,33 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        // Two filter-list queries in parallel (different sources).
+        // Three filter-list queries in parallel (different sources).
         var countriesTask = Warehouse.GetCountriesAsync();
         var palletsTask   = Warehouse.GetPalletCategoriesAsync();
+        var lpmMonthsTask = SimReports.GetDistinctLpmMonthsAsync();
         try
         {
             _countries        = await countriesTask;
             _palletCategories = await palletsTask;
+            try { _allLpmMonths = await lpmMonthsTask; }
+            catch { _allLpmMonths = new(); }    // best-effort; LPM Months dropdown just stays empty
         }
         catch (Exception ex)
         {
             Snackbar.Add($"Could not load filter lists: {ex.Message}", Severity.Error);
         }
+    }
+
+    /// <summary>
+    /// Compact display text for the LPM Months multi-select chip — mirrors
+    /// the SIM Generate page pattern. (1.14.50)
+    /// </summary>
+    private string SelectedLpmMonthsText(List<string> selected)
+    {
+        if (selected is null || selected.Count == 0) return "(All months)";
+        if (selected.Count == _allLpmMonths.Count)   return "All months";
+        if (selected.Count == 1)                     return selected[0];
+        return $"{selected.Count} months";
     }
 
     private void OnCountryChanged(string? v)
@@ -223,7 +290,10 @@ else
         _rows.Clear();
         var filter = new WhItemsReportFilter(
             Country:          _country,
-            PalletCategories: _selectedPalletCategories.Count == 0 ? null : _selectedPalletCategories.ToList());
+            PalletCategories: _selectedPalletCategories.Count == 0 ? null : _selectedPalletCategories.ToList(),
+            Season:           _season,
+            BoxSource:        _boxSource,
+            LpmMonths:        _selectedLpmMonths.Count == 0 ? null : _selectedLpmMonths.ToList());
         try
         {
             _rows = await Report.GetAsync(filter);

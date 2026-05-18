@@ -6,6 +6,17 @@ using LpmSim.Data.Warehouse;
 namespace LpmSim.Data.Reports;
 
 /// <summary>
+/// Box-source filter for the WH Items report. 1.14.50 — separates LPM-tagged
+/// boxes (whboxitems.LPMDt IS NOT NULL) from Non-LPM boxes (LPMDt IS NULL).
+/// </summary>
+public enum WhItemsBoxSource
+{
+    All        = 0,
+    LpmOnly    = 1,
+    NonLpmOnly = 2,
+}
+
+/// <summary>
 /// Page filters for the WH Items report (Reports → WH Items).
 /// </summary>
 /// <param name="Country">SIMCountry — drives the whboxitems source table (UAE
@@ -13,9 +24,21 @@ namespace LpmSim.Data.Reports;
 ///   AND the store filter for the Stores SOH column.</param>
 /// <param name="PalletCategories">Optional pallet-category filter (multi-select).
 ///   Null / empty list = no filter (all categories included).</param>
+/// <param name="Season">Page-level season filter. <see cref="WhHoSeason.All"/>
+///   = no filter; Summer/Winter narrow whboxitems.Season directly. 1.14.50.</param>
+/// <param name="BoxSource">LPM vs Non-LPM. <see cref="WhItemsBoxSource.All"/>
+///   = no filter; LpmOnly → LPMDt NOT NULL; NonLpmOnly → LPMDt IS NULL. 1.14.50.</param>
+/// <param name="LpmMonths">Optional set of specific LPM months to include
+///   (matches whboxitems.LPMDt within the given month). Only meaningful when
+///   <paramref name="BoxSource"/> is <see cref="WhItemsBoxSource.LpmOnly"/>;
+///   ignored for All / NonLpmOnly because LPMDt = NULL for those. Null /
+///   empty list = no month restriction. 1.14.50.</param>
 public record WhItemsReportFilter(
     string Country,
-    IReadOnlyList<string>? PalletCategories);
+    IReadOnlyList<string>? PalletCategories,
+    WhHoSeason Season,
+    WhItemsBoxSource BoxSource,
+    IReadOnlyList<DateTime>? LpmMonths);
 
 /// <summary>
 /// One row of the WH Items report. One row per ItemCode that has at least
@@ -94,6 +117,48 @@ public sealed class WhItemsReportService
             palletFrag = sb.ToString();
         }
 
+        // 1.14.50 — Season filter. Encoded as a single @season param so the
+        // SQL stays parameterised. 'A' = All; 'S' = Summer; 'W' = Winter.
+        var seasonCode = filter.Season switch
+        {
+            WhHoSeason.Summer => "S",
+            WhHoSeason.Winter => "W",
+            _                 => "A",
+        };
+
+        // 1.14.50 — Box source filter (LPM vs Non-LPM). Encoded as a single
+        // @boxSource param. 'A' = All; 'L' = LpmOnly (LPMDt NOT NULL);
+        // 'N' = NonLpmOnly (LPMDt IS NULL).
+        var boxSourceCode = filter.BoxSource switch
+        {
+            WhItemsBoxSource.LpmOnly    => "L",
+            WhItemsBoxSource.NonLpmOnly => "N",
+            _                           => "A",
+        };
+
+        // 1.14.50 — LPM Months filter. Only meaningful when BoxSource = LpmOnly
+        // (Non-LPM has LPMDt = NULL so months don't apply). Builds an OR-chain
+        // of (LPMDt >= month_start AND LPMDt < next_month_start) ranges.
+        // Empty/null = no month restriction.
+        var lpmMonthsFrag = "";
+        var lpmMonthsParms = new List<SqlParameter>();
+        if (filter.BoxSource == WhItemsBoxSource.LpmOnly
+            && filter.LpmMonths is { Count: > 0 })
+        {
+            var sb = new StringBuilder(" AND (");
+            for (int i = 0; i < filter.LpmMonths.Count; i++)
+            {
+                if (i > 0) sb.Append(" OR ");
+                var ms = new DateTime(filter.LpmMonths[i].Year, filter.LpmMonths[i].Month, 1);
+                var me = ms.AddMonths(1);
+                sb.Append("(w.LPMDt >= @lm").Append(i).Append("_s AND w.LPMDt < @lm").Append(i).Append("_e)");
+                lpmMonthsParms.Add(new SqlParameter($"@lm{i}_s", ms));
+                lpmMonthsParms.Add(new SqlParameter($"@lm{i}_e", me));
+            }
+            sb.Append(')');
+            lpmMonthsFrag = sb.ToString();
+        }
+
         var sql = $@"
             SET NOCOUNT ON;
 
@@ -108,15 +173,23 @@ public sealed class WhItemsReportService
 
             -- 1) WH Qty per itemcode. This defines the row universe — any
             --    itemcode in the country's warehouse, filtered by pallet
-            --    category. Excludes purchased boxes (ShopEligible = 'E')
-            --    so the totals match the other reports.
+            --    category + season + LPM/Non-LPM + LPM months. Excludes
+            --    purchased boxes (ShopEligible = 'E') so totals match the
+            --    other reports.
             SELECT w.itemcode,
                    WhQty = SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
               INTO #WhItemsAgg
               FROM {whSrc} w
              WHERE w.itemcode IS NOT NULL AND w.itemcode <> ''
                AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
+               -- 1.14.50: Season filter (A=All / S / W)
+               AND (@season = 'A' OR UPPER(ISNULL(w.Season, '')) = @season)
+               -- 1.14.50: Box source filter (A=All / L=LpmOnly / N=NonLpmOnly)
+               AND (@boxSource = 'A'
+                    OR (@boxSource = 'L' AND w.LPMDt IS NOT NULL)
+                    OR (@boxSource = 'N' AND w.LPMDt IS NULL))
                {palletFrag}
+               {lpmMonthsFrag}
              GROUP BY w.itemcode;
             CREATE CLUSTERED INDEX IX_WhItemsAgg ON #WhItemsAgg (itemcode);
 
@@ -129,8 +202,14 @@ public sealed class WhItemsReportService
             --    active store for the country (DataSettings.SIMCountry +
             --    ActiveStore = 'Y'). HO storeids (no SIMCountry) are
             --    naturally excluded since they have no SIMCountry row.
+            --    1.14.50 — Negative SOH (oversold rows in LocStock) clamped
+            --    to zero per the planner spec: if SOH is negative, treat
+            --    it as zero. Same clamp pattern the allocator uses in
+            --    cap math (1.14.31).
             SELECT ls.Itemcode,
-                   StoresSoh = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
+                   StoresSoh = SUM(CAST(
+                       CASE WHEN ISNULL(ls.SOH, 0) < 0 THEN 0
+                            ELSE ls.SOH END AS bigint))
               INTO #WhItemsSoh
               FROM racks.dbo.LPM_LocStock ls
               INNER JOIN bfldata.dbo.DataSettings ds ON ds.StoreID = ls.StoreID
@@ -212,6 +291,13 @@ public sealed class WhItemsReportService
             -- 8) Final result. LEFT JOIN every enrichment so items missing
             --    from the lookup tables still produce a row (with empty
             --    metadata / zero quantity for the missing dimension).
+            --
+            --    1.14.50 — ToFillQty is capped at WhQty. The raw column on
+            --    LPM_SimItemSkuMax sums fill-capacity per store across
+            --    stores, which can exceed the actual warehouse stock
+            --    available to ship (e.g. SkuMax demand totals 18 but only
+            --    16 units exist in the warehouse). The displayed value is
+            --    the effective fillable quantity = MIN(demand, supply).
             SELECT  ItemCode  = wa.itemcode,
                     ItemName  = ISNULL(wd.ItemName,   ''),
                     Division  = ISNULL(wdiv.Division,    ''),
@@ -220,7 +306,11 @@ public sealed class WhItemsReportService
                     WhQty     = wa.WhQty,
                     StoresSoh = ISNULL(ws.StoresSoh,  0),
                     SkuMax    = ISNULL(wsm.SkuMax,    0),
-                    ToFillQty = ISNULL(wsm.ToFillQty, 0)
+                    ToFillQty = CASE
+                                  WHEN ISNULL(wsm.ToFillQty, 0) > wa.WhQty
+                                       THEN wa.WhQty
+                                  ELSE ISNULL(wsm.ToFillQty, 0)
+                                END
               FROM  #WhItemsAgg   wa
               LEFT  JOIN #WhItemsDesc   wd   ON wd.Itemcode  = wa.itemcode
               LEFT  JOIN #WhItemsDiv    wdiv ON wdiv.itemcode= wa.itemcode
@@ -232,7 +322,10 @@ public sealed class WhItemsReportService
 
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 300 };
         cmd.Parameters.Add(new SqlParameter("@country", filter.Country));
-        foreach (var p in palletParms) cmd.Parameters.Add(p);
+        cmd.Parameters.Add(new SqlParameter("@season", seasonCode));
+        cmd.Parameters.Add(new SqlParameter("@boxSource", boxSourceCode));
+        foreach (var p in palletParms)    cmd.Parameters.Add(p);
+        foreach (var p in lpmMonthsParms) cmd.Parameters.Add(p);
 
         var rows = new List<WhItemsReportRow>();
         using var rdr = await cmd.ExecuteReaderAsync(ct);
