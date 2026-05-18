@@ -48,6 +48,9 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.ToTable("Division");
             e.HasKey(x => x.DivCode);
             e.Property(x => x.Name).HasColumnName("Division").HasMaxLength(50);
+            // 1.14.55 — Soft-delete flag. NOT NULL with DB-side default of 1
+            // (existing rows stay active after migration 055).
+            e.Property(x => x.IsActive).HasDefaultValue(true);
         });
 
         mb.Entity<DataSetting>(e =>

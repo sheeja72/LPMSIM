@@ -34,7 +34,9 @@ public class WeeklySalesTargetSplitService(
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
 
+        // 1.14.55 — Active divisions only (retired ones like 420 don't appear).
         var divisions = await db.Divisions.AsNoTracking()
+            .Where(d => d.IsActive)
             .OrderBy(d => d.DivCode)
             .Select(d => new { d.DivCode, d.Name })
             .ToListAsync(ct);

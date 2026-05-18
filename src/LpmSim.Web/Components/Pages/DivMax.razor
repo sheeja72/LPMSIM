@@ -162,7 +162,8 @@ else if (_rows.Count > 0)
             .OrderBy(c => c)
             .ToListAsync();
 
-        _divisions = await db.Divisions.OrderBy(d => d.Name).ToListAsync();
+        // 1.14.55 — Active divisions only.
+        _divisions = await db.Divisions.Where(d => d.IsActive).OrderBy(d => d.Name).ToListAsync();
     }
 
     private async Task OnCountryChangedAsync(string? value)

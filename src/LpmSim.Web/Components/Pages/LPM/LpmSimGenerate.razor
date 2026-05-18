@@ -3299,7 +3299,9 @@
         _countries = await db.DataSettings
             .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
             .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        // 1.14.55 — Active divisions only in the SIM Generate filter dropdown.
         _allDivisions = await db.Divisions.AsNoTracking()
+            .Where(d => d.IsActive)
             .Select(d => d.Name ?? "")
             .Where(n => n != "")
             .OrderBy(n => n)

@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.54</Version>
-    <AssemblyVersion>1.14.54.0</AssemblyVersion>
-    <FileVersion>1.14.54.0</FileVersion>
-    <InformationalVersion>1.14.54 (Rename Reports → "WH Items" to "WH SKU Investigation")</InformationalVersion>
+    <Version>1.14.55</Version>
+    <AssemblyVersion>1.14.55.0</AssemblyVersion>
+    <FileVersion>1.14.55.0</FileVersion>
+    <InformationalVersion>1.14.55 (dbo.Division.IsActive flag — retire DivCode 420 globally)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

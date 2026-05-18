@@ -31,10 +31,18 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 .Where(s => s.ActiveStore == "Y" && s.Country == country)
                 .Select(s => s.StoreID).Distinct().ToListAsync(ct);
         }
-        async Task<int> LoadDivCount()
+        // 1.14.55 — Returns the SET of active DivCodes (not just a count) so the
+        // plannedOk / whOk checks below can verify "every active division has a
+        // matching row" instead of comparing raw counts. Raw counts would have
+        // mismatched when LPM_Planned / LPM_WHStock still hold rows for a
+        // retired division (e.g. 420) — the row counts wouldn't match the
+        // shrunken active-division count.
+        async Task<HashSet<int>> LoadActiveDivCodes()
         {
             await using var db = await dbFactory.CreateDbContextAsync(ct);
-            return await db.Divisions.AsNoTracking().CountAsync(ct);
+            var codes = await db.Divisions.AsNoTracking()
+                .Where(d => d.IsActive).Select(d => d.DivCode).ToListAsync(ct);
+            return new HashSet<int>(codes);
         }
         async Task<List<LpmPlanned>> LoadPlanned()
         {
@@ -43,12 +51,16 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 .Where(p => p.Country == country && p.Year1 == year && p.Month1 == month)
                 .ToListAsync(ct);
         }
-        async Task<int> LoadWhStockCount()
+        // 1.14.55 — Returns the SET of DivCodes that have a WH stock row for the
+        // period (was just a Count). Lets the wh check filter to active divisions
+        // only without re-querying the active set.
+        async Task<HashSet<int>> LoadWhStockDivCodes()
         {
             await using var db = await dbFactory.CreateDbContextAsync(ct);
-            return await db.LpmWHStocks.AsNoTracking()
+            var codes = await db.LpmWHStocks.AsNoTracking()
                 .Where(w => w.Country == country && w.Year1 == year && w.Month1 == month)
-                .CountAsync(ct);
+                .Select(w => w.DivCode).ToListAsync(ct);
+            return new HashSet<int>(codes);
         }
         async Task<List<LpmStoreGrade>> LoadActiveGrades()
         {
@@ -71,31 +83,50 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         }
 
         // Wave 1 — fire all 8 in parallel.
-        var weightsTask  = LoadWeights();
-        var storeIdsTask = LoadStoreIds();
-        var divCountTask = LoadDivCount();
-        var plannedTask  = LoadPlanned();
-        var whStockTask  = LoadWhStockCount();
-        var gradesTask   = LoadActiveGrades();
-        var groupsTask   = LoadActiveGroups();
-        var rulesTask    = LoadActiveRules();
-        await Task.WhenAll(weightsTask, storeIdsTask, divCountTask, plannedTask,
-                           whStockTask, gradesTask, groupsTask, rulesTask);
+        var weightsTask        = LoadWeights();
+        var storeIdsTask       = LoadStoreIds();
+        var activeDivCodesTask = LoadActiveDivCodes();
+        var plannedTask        = LoadPlanned();
+        var whStockDivsTask    = LoadWhStockDivCodes();
+        var gradesTask         = LoadActiveGrades();
+        var groupsTask         = LoadActiveGroups();
+        var rulesTask          = LoadActiveRules();
+        await Task.WhenAll(weightsTask, storeIdsTask, activeDivCodesTask, plannedTask,
+                           whStockDivsTask, gradesTask, groupsTask, rulesTask);
 
-        var weights      = await weightsTask;
-        var storeIds     = await storeIdsTask;
-        var divCount     = await divCountTask;
-        var planned      = await plannedTask;
-        var whStockCount = await whStockTask;
-        var activeGrades = await gradesTask;
-        var activeGroups = await groupsTask;
-        var activeRules  = await rulesTask;
+        var weights         = await weightsTask;
+        var storeIds        = await storeIdsTask;
+        var activeDivCodes  = await activeDivCodesTask;
+        var divCount        = activeDivCodes.Count;
+        var planned         = await plannedTask;
+        var whStockDivs     = await whStockDivsTask;
+        var activeGrades    = await gradesTask;
+        var activeGroups    = await groupsTask;
+        var activeRules     = await rulesTask;
+
+        // 1.14.55 — Filter Volume Groups and SKU Max Rules to active divisions
+        // only. Without this, a leftover LPM_VolumeGroup row for an inactive
+        // division (e.g. Country/420/E) with IsActive = true would still fail
+        // the rules-coverage check below because the rule for that (Div,Group)
+        // pair would (correctly) be missing. By dropping inactive-division
+        // groups upfront, the check only verifies coverage for what actually
+        // participates in the EOM run.
+        activeGroups = activeGroups.Where(g => activeDivCodes.Contains(g.DivCode)).ToList();
+        activeRules  = activeRules .Where(r => activeDivCodes.Contains(r.DivCode)).ToList();
 
         // Computed flags (no DB).
         var weightSum = weights.Sum(w => w.WeightPct);
         var weightsOk = weights.Count >= 1 && Math.Abs(weightSum - 1m) < 0.0001m;
-        var plannedOk = planned.Count == divCount;
-        var whOk      = whStockCount == divCount;
+        // 1.14.55 — Compare against ACTIVE divisions only. Rows in LPM_Planned /
+        // LPM_WHStock for inactive divisions are ignored so the readiness flag
+        // still flips green after a division is retired (e.g. DivCode 420).
+        var plannedDivs = planned.Select(p => p.DivCode).ToHashSet();
+        var plannedOk   = activeDivCodes.IsSubsetOf(plannedDivs);
+        var whOk        = activeDivCodes.IsSubsetOf(whStockDivs);
+        // Counts for the user-visible "X of Y divisions" message — both are
+        // active-only so the text reads consistently.
+        var plannedActiveCount = plannedDivs.Count(d => activeDivCodes.Contains(d));
+        var whActiveCount      = whStockDivs.Count(d => activeDivCodes.Contains(d));
         var gradeSum  = activeGrades.Sum(g => g.SharePct);
         var gradesOk  = activeGrades.Count > 0 && Math.Abs(gradeSum - 1m) < 0.0001m;
         // 1.14.39 — Volume Groups are now per-(Country, DivCode, GroupCode).
@@ -141,7 +172,9 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                     : $"{weights.Count} periods, total = {(weightSum * 100m):0.##}% (must equal 100%)."),
             Planned = new(plannedOk,
                 "Planned Inputs",
-                $"{planned.Count} of {divCount} divisions configured."),
+                // 1.14.55 — Counts active divisions only (retired ones are
+                // excluded from both numerator and denominator).
+                $"{plannedActiveCount} of {divCount} divisions configured."),
             SalesTurns = new(salesOk,
                 "Sales & Turns",
                 weights.Count == 0
@@ -149,7 +182,7 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                     : $"{salesRows} rows present for the {weights.Count} weighted periods."),
             WHStock = new(whOk,
                 "WH Stock",
-                $"{whStockCount} of {divCount} divisions have stock for this period."),
+                $"{whActiveCount} of {divCount} divisions have stock for this period."),
             Grades = new(gradesOk,
                 "Store Grades",
                 activeGrades.Count == 0
@@ -204,7 +237,12 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         async Task<Dictionary<int, string>> LoadDivNames()
         {
             await using var db = await dbFactory.CreateDbContextAsync(ct);
+            // 1.14.55 — Active-only. Inactive divisions never produce new EOM
+            // Output rows so we don't need names for them; saved batches that
+            // already contain inactive-division rows fall back to the DivCode
+            // string via GetSavedAsync's TryGetValue branch.
             return await db.Divisions.AsNoTracking()
+                .Where(d => d.IsActive)
                 .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? "", ct);
         }
         async Task<List<LpmEomOutput>> LoadSaved()
@@ -336,6 +374,7 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                   FROM Datareporting.dbo.upc_subclass    u
                   INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
                   INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                              AND d.IsActive = 1  -- 1.14.55: skip retired divisions
                  GROUP BY u.itemcode
             ),
             ItemSeason AS (
@@ -490,7 +529,11 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
             .Distinct()
             .ToListAsync(ct);
 
+        // 1.14.55 — Active-only. The (Store × Division) grid only iterates
+        // divisions that haven't been retired (e.g. 420). Inactive divisions
+        // never produce new EOM Output rows.
         var divisions = await db.Divisions.AsNoTracking()
+            .Where(d => d.IsActive)
             .OrderBy(d => d.DivCode)
             .ToListAsync(ct);
 
@@ -557,6 +600,7 @@ WITH ItemDiv AS (
       FROM Datareporting.dbo.upc_subclass    u
       INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
       INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                              AND d.IsActive = 1  -- 1.14.55: skip retired divisions
      GROUP BY u.itemcode
 )
 SELECT id.DivCode,
@@ -613,6 +657,7 @@ WITH ItemDiv AS (
       FROM Datareporting.dbo.upc_subclass    u
       INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
       INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                              AND d.IsActive = 1  -- 1.14.55: skip retired divisions
      GROUP BY u.itemcode
 )
 SELECT id.DivCode,

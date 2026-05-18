@@ -186,7 +186,9 @@
             .ToListAsync();
         if (_countries.Count > 0 && !_countries.Contains(_country))
             _country = _countries[0];
+        // 1.14.55 — Active divisions only in the Add/Edit dialog dropdown.
         _divisionNames = await db.Divisions.AsNoTracking()
+            .Where(d => d.IsActive)
             .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? d.DivCode.ToString());
         await ReloadAsync();
     }

@@ -161,7 +161,8 @@
             await db.DataSettings.AsNoTracking().Where(s => s.Country != null && s.Country != "")
                 .Select(s => s.Country!).Distinct().ToListAsync(),
             StringComparer.OrdinalIgnoreCase);
-        var divByCode = await db.Divisions.AsNoTracking().ToDictionaryAsync(d => d.DivCode);
+        // 1.14.55 — Active divisions only. Groups for retired divisions are rejected.
+        var divByCode = await db.Divisions.AsNoTracking().Where(d => d.IsActive).ToDictionaryAsync(d => d.DivCode);
         var divByName = divByCode.Values.Where(d => !string.IsNullOrEmpty(d.Name))
             .GroupBy(d => d.Name!, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);

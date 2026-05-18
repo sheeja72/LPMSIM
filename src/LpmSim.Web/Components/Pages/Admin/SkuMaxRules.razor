@@ -220,7 +220,8 @@ else
     private async Task<List<Division>> LoadDivisionsAsync()
     {
         await using var db = await DbFactory.CreateDbContextAsync();
-        return await db.Divisions.AsNoTracking().OrderBy(d => d.DivCode).ToListAsync();
+        // 1.14.55 — Active divisions only.
+        return await db.Divisions.AsNoTracking().Where(d => d.IsActive).OrderBy(d => d.DivCode).ToListAsync();
     }
 
     private async Task<List<LpmVolumeGroup>> LoadGroupsAsync()

@@ -149,7 +149,9 @@
     private async Task ParseAsync(Stream xlsx)
     {
         await using var db = await DbFactory.CreateDbContextAsync();
+        // 1.14.55 — Active divisions only. WH Stock for retired divisions is rejected.
         var divByCode = await db.Divisions.AsNoTracking()
+            .Where(d => d.IsActive)
             .ToDictionaryAsync(d => d.DivCode, d => d);
         var divByName = divByCode.Values
             .Where(d => !string.IsNullOrEmpty(d.Name))

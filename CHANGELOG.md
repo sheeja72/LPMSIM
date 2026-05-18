@@ -23,6 +23,68 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.55 — dbo.Division.IsActive flag — retire DivCode 420 globally (2026-05-18)
+
+### What changed
+
+Adds an `IsActive bit` to `dbo.Division` and uses it as a global on/off switch. Inactive divisions disappear from every forward-looking surface:
+
+| Surface | After 1.14.55 |
+|---|---|
+| EOM Generate readiness (Planned / WH Stock / Volume Groups / SKU Max Rules) | Inactive divisions excluded from numerator AND denominator — the "X of Y divisions" counts and the missing-rule lists ignore retired divisions. |
+| EOM Generate (Store × Division) grid | No rows for inactive divisions. |
+| EOM Generate Division Summary tab | Inactive divisions filtered at the SQL JOIN. |
+| SIM Generate filter dropdown | Inactive divisions hidden. |
+| Admin pages (Planned Inputs, SKU Max Rules, Volume Groups, Store/Div Access, Store/Dept Access, Weekly Sales Target Split, DivMax) | Inactive divisions hidden in every division dropdown. |
+| Uploads (Planned, SKU Max Rules, Volume Groups, WH Stock, Sales/Turns) | Uploaded rows referencing inactive divisions fail validation. The Sales/Turns export-time decoration dict stays unfiltered so historical exports still label inactive-division rows with their human name. |
+
+Migration **055** also marks `DivCode = 420` inactive — fixing the blocked EOM readiness reported earlier ("691 active rules but 1 (Division, Group) pair(s) have no matching rule: Div420/E"). To revive 420 later: `UPDATE dbo.Division SET IsActive = 1 WHERE DivCode = 420`.
+
+### Historical data is preserved
+
+Rows already in `LPM_SalesTurns`, `LPM_EOM_Output`, `LPM_SimItemSkuMax`, etc. for inactive divisions are left as-is. They simply stop being iterated by new EOM Generate / SIM Generate runs.
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/055_division_isactive.sql` | **NEW** — `ALTER TABLE dbo.Division ADD IsActive bit NOT NULL DEFAULT 1` + `UPDATE … SET IsActive = 0 WHERE DivCode = 420`. Idempotent guards on both. |
+| `src/LpmSim.Core/Entities/Division.cs` | New `IsActive` property (default `true`). |
+| `src/LpmSim.Data/LpmDbContext.cs` | `Division` entity gains `HasDefaultValue(true)` mapping for `IsActive`. |
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | `LoadDivCount` → `LoadActiveDivCodes` (returns `HashSet<int>` of active codes). `LoadWhStockCount` → `LoadWhStockDivCodes` (returns DivCode set). `plannedOk` / `whOk` now compare set-coverage (`IsSubsetOf`) against the active div set instead of raw row counts. `activeGroups` / `activeRules` filtered post-load against the active div set so the SKU Max Rules coverage check ignores retired divisions. `CalculateAsync` divisions list filters by IsActive. SQL JOINs to `dbo.Division` in 3 internal CTEs gain `AND d.IsActive = 1`. |
+| `src/LpmSim.Data/Eom/WeeklySalesTargetSplitService.cs` | Division dropdown filtered to active. |
+| `src/LpmSim.Web/Components/Pages/DivMax.razor` | Division dropdown filtered to active. |
+| `src/LpmSim.Web/Components/Pages/LPM/PlannedInputs.razor` | Division dropdown filtered to active. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | `_allDivisions` filter list narrowed to active. |
+| `src/LpmSim.Web/Components/Pages/Admin/SkuMaxRules.razor` | Division dropdown filtered to active. |
+| `src/LpmSim.Web/Components/Pages/Admin/StoreDeptAccess.razor` | Division-name dict filtered to active. |
+| `src/LpmSim.Web/Components/Pages/Admin/StoreDivAccess.razor` | Division-name dict filtered to active. |
+| `src/LpmSim.Web/Components/Pages/Admin/VolumeGroups.razor` | Division dropdown filtered to active. |
+| `src/LpmSim.Web/Components/Pages/Uploads/PlannedInputsUpload.razor` | `divByCode` validation dict filtered to active. |
+| `src/LpmSim.Web/Components/Pages/Uploads/SkuMaxRulesUpload.razor` | Same. |
+| `src/LpmSim.Web/Components/Pages/Uploads/VolumeGroupsUpload.razor` | Same. |
+| `src/LpmSim.Web/Components/Pages/Uploads/WHStockUpload.razor` | Same. |
+| `src/LpmSim.Web/Components/Pages/Uploads/SalesTurnsUpload.razor` | Validation `divByCode` filtered to active; export-time `divNameByCode` dict left unfiltered so historical exports still label retired-division rows with their human name. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.54 → 1.14.55. |
+
+### What was NOT touched
+- Read-side SQL JOINs in `LpmSimGenerator.cs` / `LpmSimReports.cs` / `LpmAdmService.cs` / `ProductionScheduler.cs` / `LpmSimInvestigator.cs`. These are downstream decorators (join to `dbo.Division` to get the human name for already-existing data). Since EOM Generate no longer produces rows for inactive divisions, downstream consumers never see them on new batches. Old batches with 420 rows continue to display normally — including the human name — which is the right behaviour for historical reports.
+- The single-row name lookup in `LpmSimGenerate.razor:2590` — its input list (`_allDivisions`) is already filtered upstream, so 420 can never be the lookup key.
+
+### Migration required
+Run `db/055_division_isactive.sql`. Idempotent; safe to re-run. Without it, the app fails at startup with EF complaining about a missing `IsActive` column on `dbo.Division`.
+
+### Risk
+**Low–medium.** The EF model now reads `IsActive` from `dbo.Division`; before migration 055, that column doesn't exist and EF will throw. After the migration, behaviour is additive — every existing division stays active (default 1), only 420 flips to inactive.
+
+### Verification after deploy + migration 055
+1. **Open EOM Generate** → SKU Max Rules readiness should flip from "Blocked" (Div420/E missing) → green.
+2. **Run EOM Generate** → no 420 rows in the Store × Div preview.
+3. **Open Planning Config → Volume Groups / SKU Max Rules / Planned Inputs** → 420 no longer in the Division dropdown.
+4. **Open SIM Generate** → 420 no longer in the Division filter chip list.
+5. If you ever want 420 back: `UPDATE dbo.Division SET IsActive = 1 WHERE DivCode = 420` in SSMS — no app restart needed (the queries are re-issued every page-load).
+
+---
+
 ## 1.14.54 — Rename Reports → "WH Items" to "WH SKU Investigation" (2026-05-18)
 
 ### What changed

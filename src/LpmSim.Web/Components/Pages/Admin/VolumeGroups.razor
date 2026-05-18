@@ -127,7 +127,8 @@
             .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
             .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
         // Divisions: order by DivCode so the filter dropdown matches the rest of the app.
-        _divisions = await db.Divisions.AsNoTracking().OrderBy(d => d.DivCode).ToListAsync();
+        // 1.14.55 — Active divisions only.
+        _divisions = await db.Divisions.AsNoTracking().Where(d => d.IsActive).OrderBy(d => d.DivCode).ToListAsync();
         if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
             _country = _countries.FirstOrDefault() ?? "";
         await ReloadAsync();

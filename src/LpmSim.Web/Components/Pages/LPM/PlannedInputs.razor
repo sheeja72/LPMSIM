@@ -151,7 +151,8 @@ else if (!string.IsNullOrEmpty(_country))
         _countries = await db.DataSettings
             .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
             .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
-        _divisions = await db.Divisions.OrderBy(d => d.DivCode).ToListAsync();
+        // 1.14.55 — Active divisions only (retired ones like 420 disappear).
+        _divisions = await db.Divisions.Where(d => d.IsActive).OrderBy(d => d.DivCode).ToListAsync();
 
         if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
             _country = _countries.FirstOrDefault() ?? "";

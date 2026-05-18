@@ -164,7 +164,8 @@
     private async Task ParseAsync(Stream xlsx)
     {
         await using var db = await DbFactory.CreateDbContextAsync();
-        var divByCode = await db.Divisions.AsNoTracking().ToDictionaryAsync(d => d.DivCode);
+        // 1.14.55 — Active divisions only. Rules for retired divisions are rejected.
+        var divByCode = await db.Divisions.AsNoTracking().Where(d => d.IsActive).ToDictionaryAsync(d => d.DivCode);
         var divByName = divByCode.Values.Where(d => !string.IsNullOrEmpty(d.Name))
             .GroupBy(d => d.Name!, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
