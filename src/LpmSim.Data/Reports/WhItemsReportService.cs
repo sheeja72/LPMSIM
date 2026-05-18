@@ -54,8 +54,13 @@ public sealed class WhItemsReportService
 
     public WhItemsReportService(IConfiguration cfg)
     {
-        _connStr = cfg.GetConnectionString("Default")
-            ?? throw new InvalidOperationException("Connection string 'Default' is missing.");
+        // 1.14.48 — Use the "Warehouse" connection-string name to match
+        // WhHoStockService / VarianceReportService. The original 1.14.47
+        // service mistakenly looked for "Default" which doesn't exist in
+        // the Azure App Service config → constructor threw on first
+        // request to /lpm/reports/wh-items.
+        _connStr = cfg.GetConnectionString("Warehouse")
+            ?? throw new InvalidOperationException("Connection string 'Warehouse' is missing.");
     }
 
     /// <summary>

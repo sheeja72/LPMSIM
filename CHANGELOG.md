@@ -23,6 +23,27 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.48 — HOTFIX: WH Items service connection-string name (2026-05-18)
+
+### Bug
+1.14.47's `WhItemsReportService` constructor looked up `cfg.GetConnectionString("Default")`. Azure App Service has the `Warehouse` connection string configured (used by `WhHoStockService` and `VarianceReportService`), not `Default`. The service threw `InvalidOperationException` on its first DI activation → any request to `/lpm/reports/wh-items` returned HTTP 500 with the generic error page.
+
+The build succeeded for 1.14.47 because `GetConnectionString` returns null at runtime, not compile time — so the wrong key name slipped past `dotnet build`.
+
+### Fix
+Change `"Default"` → `"Warehouse"` to match the other Reports services. One-line edit.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Reports/WhItemsReportService.cs` | `cfg.GetConnectionString("Default")` → `cfg.GetConnectionString("Warehouse")` |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.47 → 1.14.48 |
+
+### Risk
+**Zero.** Single string change to match existing service conventions. Build clean.
+
+---
+
 ## 1.14.47 — New Reports → WH Items page (2026-05-18)
 
 ### Feature
