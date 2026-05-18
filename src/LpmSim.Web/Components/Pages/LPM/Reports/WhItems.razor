@@ -1,7 +1,8 @@
 @page "/lpm/reports/wh-items"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AnyRole)]
-@* 1.14.47 — Reports → WH Items. Per-item view of warehouse + stores + SkuMax. *@
+@* 1.14.47 — Reports → WH SKU Investigation (renamed from "WH Items" in 1.14.54).
+   Per-item view of warehouse + stores + SkuMax. *@
 @using LpmSim.Data.Reports
 @using LpmSim.Data.Warehouse
 @using LpmSim.Data.Auditing
@@ -15,9 +16,9 @@
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 
-<PageTitle>WH Items</PageTitle>
+<PageTitle>WH SKU Investigation</PageTitle>
 
-<div class="lpm-page-title">WH Items</div>
+<div class="lpm-page-title">WH SKU Investigation</div>
 <div class="lpm-page-subtitle">
     Per-item view of every warehouse-resident itemcode, with the item's master metadata
     (Division / Department / Brand) and the quantity columns that drive planning:
@@ -355,7 +356,7 @@ else
         try
         {
             using var wb = new XLWorkbook();
-            var ws = wb.Worksheets.Add("WH Items");
+            var ws = wb.Worksheets.Add("WH SKU Investigation");
             string[] headers = { "Itemcode", "Item Name", "Division", "Department", "Brand",
                                  "WH Qty", "Stores SOH", "Total SKU Max", "Avg SKU Max", "To Fill Qty" };
             for (int i = 0; i < headers.Length; i++)

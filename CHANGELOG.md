@@ -23,6 +23,43 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.54 — Rename Reports → "WH Items" to "WH SKU Investigation" (2026-05-18)
+
+### What changed
+
+Display-name rename only. The Reports → **WH Items** page is now called **WH SKU Investigation**.
+
+| Surface | Old | New |
+|---|---|---|
+| Sidebar nav link | WH Items | WH SKU Investigation |
+| Page H1 | WH Items | WH SKU Investigation |
+| Browser tab title | WH Items | WH SKU Investigation |
+| Excel sheet tab name (inside the export) | WH Items | WH SKU Investigation |
+| Service / row / filter doc-comments | "the WH Items report" | "the WH SKU Investigation report" |
+
+### What did NOT change (intentional)
+
+| | Why |
+|---|---|
+| Route URL (`/lpm/reports/wh-items`) | Existing bookmarks keep working. |
+| File names (`WhItems.razor`, `WhItemsReportService.cs`) | Internal; renaming would churn the diff for no user-visible gain. |
+| Class names (`WhItemsReportService`, `WhItemsReportRow`, `WhItemsReportFilter`, `WhItemsBoxSource`) | Internal; touched by other services. |
+| Excel download filename prefix (`WhItems_<country>_<ts>.xlsx`) | Stable for any scripts / pivot refreshes the planner has wired against the old filename. Flag if you want this updated too. |
+| Audit log action key (`Reports.WhItems.Load`) | Stable analytics key — renaming would split historical usage trends. |
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` | `<PageTitle>`, H1, top-of-file comment, Excel sheet tab name. |
+| `src/LpmSim.Web/Components/Layout/NavMenu.razor` | Sidebar link label. |
+| `src/LpmSim.Data/Reports/WhItemsReportService.cs` | Class / record / method XML doc-comments. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.53 → 1.14.54 |
+
+### Risk
+**Zero.** Pure display-string change. No behaviour, no schema, no API surface affected.
+
+---
+
 ## 1.14.53 — EOM Generate: Ini.EOM + Pre-Store CAP EOM cols; Tgt EOM honours store cap (2026-05-18)
 
 ### What changed

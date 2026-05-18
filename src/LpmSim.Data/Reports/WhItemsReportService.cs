@@ -6,7 +6,8 @@ using LpmSim.Data.Warehouse;
 namespace LpmSim.Data.Reports;
 
 /// <summary>
-/// Box-source filter for the WH Items report. 1.14.50 — separates LPM-tagged
+/// Box-source filter for the WH SKU Investigation report (renamed from
+/// "WH Items" in 1.14.54). 1.14.50 — separates LPM-tagged
 /// boxes (whboxitems.LPMDt IS NOT NULL) from Non-LPM boxes (LPMDt IS NULL).
 /// </summary>
 public enum WhItemsBoxSource
@@ -17,7 +18,7 @@ public enum WhItemsBoxSource
 }
 
 /// <summary>
-/// Page filters for the WH Items report (Reports → WH Items).
+/// Page filters for the WH SKU Investigation report (Reports → WH SKU Investigation).
 /// </summary>
 /// <param name="Country">SIMCountry — drives the whboxitems source table (UAE
 ///   → racks.dbo.whboxitems; other countries → [&lt;DataName&gt;].dbo.WHBoxItemsExport)
@@ -47,7 +48,7 @@ public record WhItemsReportFilter(
     IReadOnlyList<string>? Divisions);
 
 /// <summary>
-/// One row of the WH Items report. One row per ItemCode that has at least
+/// One row of the WH SKU Investigation report. One row per ItemCode that has at least
 /// one whboxitems entry matching the page filters.
 /// </summary>
 /// <param name="SkuMax">Total SKU Max — SUM(SKUMax) across all stores with a
@@ -69,7 +70,8 @@ public record WhItemsReportRow(
     long    ToFillQty);
 
 /// <summary>
-/// Data access for Reports → WH Items. Lists every (warehouse-resident) item
+/// Data access for Reports → WH SKU Investigation (renamed from "WH Items" in
+/// 1.14.54). Lists every (warehouse-resident) item
 /// with its descriptive metadata and the four quantity columns that drive a
 /// planner's "do we have this and can we ship it" question.
 ///
@@ -100,7 +102,7 @@ public sealed class WhItemsReportService
     }
 
     /// <summary>
-    /// Run the WH Items report for the given filters. Returns one row per
+    /// Run the WH SKU Investigation report for the given filters. Returns one row per
     /// itemcode present in the country's whboxitems source.
     /// </summary>
     public async Task<List<WhItemsReportRow>> GetAsync(WhItemsReportFilter filter, CancellationToken ct = default)
