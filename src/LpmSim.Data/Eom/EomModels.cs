@@ -36,6 +36,18 @@ public class EomRow
     public string Grade { get; set; } = "";
     public decimal TargetTurn { get; set; }
     public decimal TargetSales { get; set; }
+
+    /// <summary>1.14.53 — Ini.EOM = <c>TargetSales × TargetTurn</c>.</summary>
+    public decimal IniEom { get; set; }
+
+    /// <summary>1.14.53 — Pre-Store-Cap EOM: apportionment of PlannedEOM by
+    /// Ini.EOM share within the division. Cap-agnostic.</summary>
+    public decimal PreStoreCapEom { get; set; }
+
+    /// <summary>1.14.53 — TargetEOM formula CHANGED: derives from
+    /// PreStoreCapEom with optional per-store cap applied via
+    /// LPM_StoreCapacity.EomCapacity (proportional scale-down when
+    /// Σ PreStoreCapEom across divisions exceeds the cap, else passthrough).</summary>
     public decimal TargetEOM { get; set; }
     public string VolumeGroup { get; set; } = "";
     public int WHStock { get; set; }

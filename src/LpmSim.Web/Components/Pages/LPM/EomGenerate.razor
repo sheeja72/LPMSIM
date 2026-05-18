@@ -162,22 +162,57 @@
                             </span>
                         </td></tr>
 
-                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Tgt EOM</strong></td>
+                    @* 1.14.53 — Tgt EOM is now a 3-stage waterfall: Ini.EOM →
+                       Pre-Store CAP EOM → Tgt EOM. Each stage is its own column
+                       on the grid so the planner can read the calc. *@
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Ini. EOM</strong></td>
                         <td style="padding:6px 10px;border:1px solid #e2e8f0;">
-                            <strong>Per-store end-of-month target stock</strong>, apportioned across the stores
-                            in the Division by their share of weighted-average sales:
+                            <strong>Initial EOM — naive per-store demand:</strong>
                             <br/>
-                            <code>Tgt EOM[store] = (Wt Avg Sold[store] ÷ Σ Wt Avg Sold in Division) × LPM_Planned.PlannedEOM</code>
+                            <code>Ini.EOM[store, div] = TargetSales × TargetTurn</code>
                             <br/>
                             <span style="color:#64748b;font-size:.8rem;">
-                                Same shape as Tgt Sales — just apportions <code>PlannedEOM</code> instead of
-                                <code>PlannedSalesQty</code>. So a store's Tgt EOM <em>share</em> equals its
-                                Tgt Sales <em>share</em> within the Division.
+                                Reads as "if the store sold its TgtSales at its TgtTurn, this is the stock it would
+                                carry." Unranked stores (TgtTurn = 0 because no Grade) → Ini.EOM = 0. Feeds the
+                                next column's apportionment as a per-store weight.
+                            </span>
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Pre-Store CAP EOM</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Apportionment of PlannedEOM by Ini.EOM share within the Division:</strong>
+                            <br/>
+                            <code>PreStoreCapEom[store, div] = (Ini.EOM[store, div] ÷ Σ Ini.EOM in Division) × LPM_Planned.PlannedEOM</code>
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                Same shape as Tgt Sales — apportions <code>PlannedEOM</code> across stores in
+                                the division by their Ini.EOM weight. <strong>Cap-agnostic</strong> — the per-store
+                                cap is applied in the next column.
                                 <br/>
-                                <strong>Reconciliation:</strong> <code>Σ Tgt EOM(Division) = PlannedEOM(Division)</code>.
+                                <strong>Reconciliation:</strong> <code>Σ Pre-Store CAP EOM(Division) = PlannedEOM(Division)</code>
+                                (so long as the division has at least one ranked store; otherwise it's 0).
+                            </span>
+                        </td></tr>
+
+                    <tr><td style="padding:6px 10px;border:1px solid #e2e8f0;"><strong>Tgt EOM</strong></td>
+                        <td style="padding:6px 10px;border:1px solid #e2e8f0;">
+                            <strong>Per-store end-of-month target stock</strong>, with the per-store cap from
+                            <code>LPM_StoreCapacity.EomCapacity</code> applied on top of Pre-Store CAP EOM:
+                            <br/>
+                            <code>Σ PreStoreCapEom[store, all divs] = totalPre</code><br/>
+                            <code>if cap exists AND totalPre &gt; cap:&nbsp;&nbsp;TgtEOM[div] = PreStoreCapEom[div] × (cap ÷ totalPre)</code><br/>
+                            <code>else:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;TgtEOM[div] = PreStoreCapEom[div]   (passthrough)</code>
+                            <br/>
+                            <span style="color:#64748b;font-size:.8rem;">
+                                Cap source: <strong>Planning Config → Stores Capacity EOM</strong> (and the matching Excel upload).
+                                A missing row = no cap = passthrough. An explicit cap of 0 means the store gets 0
+                                Tgt EOM across all divisions. When the cap binds, the division's <code>Σ Tgt EOM</code>
+                                falls short of <code>PlannedEOM</code> by the capped delta — that's the cap's whole point.
                                 <br/>
                                 <strong>Note on Grade markup:</strong> markup affects Tgt Turn (premium grades
-                                turn slower) but is no longer fed into Tgt EOM. The EOM share is purely sales-driven.
+                                turn slower) → which now also affects Tgt EOM via Ini.EOM. (Pre-1.14.53 the
+                                EOM share was purely sales-driven; with the new waterfall, both Tgt Sales and
+                                Tgt Turn feed in.)
                             </span>
                             <br/>
                             <strong>SIM use:</strong> this is the hard cap SIM Generate honours when filling boxes —
@@ -466,6 +501,9 @@
             // ceiling difference vs. Excel.
             var totalSold    = (long)Math.Round(fp.Sum(r => r.WtAvgSoldQty), MidpointRounding.AwayFromZero);
             var totalTgtSales= (long)Math.Round(fp.Sum(r => r.TargetSales),  MidpointRounding.AwayFromZero);
+            // 1.14.53 — Ini.EOM + Pre-Store-Cap EOM totals (new cols).
+            var totalIniEom    = (long)Math.Round(fp.Sum(r => r.IniEom),         MidpointRounding.AwayFromZero);
+            var totalPreCapEom = (long)Math.Round(fp.Sum(r => r.PreStoreCapEom), MidpointRounding.AwayFromZero);
             var totalTgtEom  = (long)Math.Round(fp.Sum(r => r.TargetEOM),    MidpointRounding.AwayFromZero);
             var totalSoh     = fp.Sum(r => (long)r.SOH);                      // SOH is int — no precision loss
             var totalMerchM  = fp.Sum(r => (long)r.MerchNeedMonth);           // MerchNeed* are int
@@ -531,7 +569,18 @@
                 <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtSales.ToString("N0")</div><span title="TargetSales = Apportion Planned Sales Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetSales">Tgt<br />Sales</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM = Apportion Planned EOM Qty to all stores based on % of WtAvgSoldQty over Total WtAvgSoldQty for that Division">
+                @* 1.14.53 — Ini.EOM column inserted before Tgt EOM.
+                   Ini.EOM = TargetSales × TargetTurn. *@
+                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalIniEom.ToString("N0")</div><span title="Ini.EOM = TargetSales × TargetTurn. Naive per-store demand: how much stock the store would carry if you held its sales × its target turn target. Feeds the Pre-Store CAP EOM apportionment.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.IniEom">Ini.<br />EOM</MudTableSortLabel></span></MudTh>
+
+                @* 1.14.53 — Pre-Store CAP EOM column inserted before Tgt EOM.
+                   Apportionment of PlannedEOM by Ini.EOM share within division.
+                   Cap-agnostic. *@
+                <MudTh Style="width:110px;min-width:110px;"><div class="th-total">@totalPreCapEom.ToString("N0")</div><span title="PreStoreCapEOM = Apportion Planned EOM Qty to all stores based on % of Ini.EOM over Total Ini.EOM for that Division. Cap-agnostic — store cap is applied in the next column (Tgt EOM). Σ within a Division reconciles to PlannedEOM.">
+                    <MudTableSortLabel T="EomRow" SortBy="r => r.PreStoreCapEom">Pre-Store<br />CAP EOM</MudTableSortLabel></span></MudTh>
+
+                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM (1.14.53 — formula changed): if LPM_StoreCapacity.EomCapacity exists for this store AND Σ Pre-Store CAP EOM across divisions > EomCapacity, each division is scaled by EomCapacity / Σ Pre-Store CAP EOM. Otherwise TargetEOM = Pre-Store CAP EOM (passthrough). SIM Generate uses this as the per-(Store × Div) ceiling.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetEOM">Tgt<br />EOM</MudTableSortLabel></span></MudTh>
 
                 <MudTh Style="width:80px;min-width:80px;"><div class="th-total">@totalSoh.ToString("N0")</div><span title="SOH = Sum of LPM_LocStock.SOH across all items for this (Store, Division). Source: racks.dbo.LPM_LocStock joined to active stores in DataSettings.">
@@ -568,6 +617,9 @@
                 <MudTd><MudChip T="string" Size="Size.Small" Color="Color.Primary">@context.Grade</MudChip></MudTd>
                 <MudTd>@context.TargetTurn.ToString("N1")</MudTd>
                 <MudTd>@context.TargetSales.ToString("N0")</MudTd>
+                @* 1.14.53 — Ini.EOM + Pre-Store CAP EOM cells (new). *@
+                <MudTd>@context.IniEom.ToString("N0")</MudTd>
+                <MudTd>@context.PreStoreCapEom.ToString("N0")</MudTd>
                 <MudTd>@context.TargetEOM.ToString("N0")</MudTd>
                 <MudTd>@context.SOH.ToString("N0")</MudTd>
                 <MudTd>@context.MerchNeedMonth.ToString("N0")</MudTd>
@@ -1374,7 +1426,10 @@
                 "Wt Avg Sold", "Wt Avg Turn",
                 "Sold Qty Rank", "Turns Rank", "Pri Rank",
                 "Grade", "Tgt Turn",
-                "Tgt Sales", "Tgt EOM",
+                "Tgt Sales",
+                // 1.14.53 — Ini.EOM + Pre-Store CAP EOM inserted before Tgt EOM.
+                "Ini. EOM", "Pre-Store CAP EOM",
+                "Tgt EOM",
                 "SOH", "Merch Need (Month)", "Merch Need (Week)", "Merch Need (Day)",
                 "Vol Grp", "WH Summer", "WH Winter"
             };
@@ -1397,19 +1452,24 @@
                 ws.Cell(row, 9).Value  = r.Grade ?? "";
                 ws.Cell(row, 10).Value = (double)r.TargetTurn;
                 ws.Cell(row, 11).Value = (double)r.TargetSales;
-                ws.Cell(row, 12).Value = (double)r.TargetEOM;
-                ws.Cell(row, 13).Value = r.SOH;
-                ws.Cell(row, 14).Value = r.MerchNeedMonth;
-                ws.Cell(row, 15).Value = r.MerchNeedWeek;
-                ws.Cell(row, 16).Value = r.MerchNeedDay;
-                ws.Cell(row, 17).Value = r.VolumeGroup ?? "";
-                ws.Cell(row, 18).Value = r.WHStockSummer;
-                ws.Cell(row, 19).Value = r.WHStockWinter;
+                // 1.14.53 — Ini.EOM + Pre-Store CAP EOM inserted before Tgt EOM.
+                ws.Cell(row, 12).Value = (double)r.IniEom;
+                ws.Cell(row, 13).Value = (double)r.PreStoreCapEom;
+                ws.Cell(row, 14).Value = (double)r.TargetEOM;
+                ws.Cell(row, 15).Value = r.SOH;
+                ws.Cell(row, 16).Value = r.MerchNeedMonth;
+                ws.Cell(row, 17).Value = r.MerchNeedWeek;
+                ws.Cell(row, 18).Value = r.MerchNeedDay;
+                ws.Cell(row, 19).Value = r.VolumeGroup ?? "";
+                ws.Cell(row, 20).Value = r.WHStockSummer;
+                ws.Cell(row, 21).Value = r.WHStockWinter;
                 row++;
             }
 
             int last = row - 1;
-            foreach (var col in new[] { 4, 5, 8, 10, 11, 12, 13, 14, 15, 16, 18, 19 })
+            // 1.14.53 — numeric format range shifted (was {4,5,8,10..16,18,19};
+            // now {4,5,8,10..18,20,21} to cover the two new EOM cols 12,13).
+            foreach (var col in new[] { 4, 5, 8, 10, 11, 12, 13, 14, 15, 16, 17, 18, 20, 21 })
                 ws.Range(2, col, last, col).Style.NumberFormat.Format = "#,##0.##";
             ws.Columns().AdjustToContents();
 

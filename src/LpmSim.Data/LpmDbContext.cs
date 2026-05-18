@@ -135,6 +135,9 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.TargetTurn).HasPrecision(18, 4);
             e.Property(x => x.TargetSales).HasPrecision(18, 2);
             e.Property(x => x.TargetEOM).HasPrecision(18, 2);
+            // 1.14.53 — Ini.EOM + Pre-Store-Cap EOM (new EOM decomposition cols).
+            e.Property(x => x.IniEom).HasPrecision(18, 2);
+            e.Property(x => x.PreStoreCapEom).HasPrecision(18, 2);
             e.Property(x => x.VolumeGroup).HasMaxLength(10);
             e.Property(x => x.Grade).HasMaxLength(20);
             e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");

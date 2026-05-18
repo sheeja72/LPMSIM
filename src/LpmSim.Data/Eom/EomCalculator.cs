@@ -241,6 +241,8 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
             PriorityRank = e.PriorityRank ?? 0m,
             TargetTurn   = e.TargetTurn ?? 0m,
             TargetSales  = e.TargetSales ?? 0m,
+            IniEom         = e.IniEom         ?? 0m,
+            PreStoreCapEom = e.PreStoreCapEom ?? 0m,
             TargetEOM    = e.TargetEOM ?? 0m,
             VolumeGroup  = e.VolumeGroup ?? "",
             WHStock      = e.WHStock ?? 0,
@@ -447,6 +449,8 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 PriorityRank  = r.PriorityRank,
                 TargetTurn    = r.TargetTurn,
                 TargetSales   = r.TargetSales,
+                IniEom         = r.IniEom,
+                PreStoreCapEom = r.PreStoreCapEom,
                 TargetEOM     = r.TargetEOM,
                 VolumeGroup    = r.VolumeGroup,
                 WHStock        = r.WHStock,
@@ -505,6 +509,16 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         var planned = await db.LpmPlanneds.AsNoTracking()
             .Where(p => p.Country == country && p.Year1 == year && p.Month1 == month)
             .ToDictionaryAsync(p => p.DivCode, ct);
+
+        // 1.14.53 — Per-store EOM ceiling from LPM_StoreCapacity (Planning Config
+        // → Stores Capacity EOM page, or the matching Excel upload). Only IsActive
+        // rows participate. Missing entries mean "no cap" — the new Tgt EOM logic
+        // then just passes Pre-Store-Cap EOM through unchanged.
+        // Case-insensitive key (matches the SQL Server default collation).
+        var storeCapByStore = (await db.LpmStoreCapacities.AsNoTracking()
+            .Where(c => c.Country == country && c.IsActive)
+            .ToListAsync(ct))
+            .ToDictionary(c => c.StoreID, c => c.EomCapacity, StringComparer.OrdinalIgnoreCase);
 
         // Weekly Sales Target Splits — keyed by (DivCode, WeekNo). Empty when
         // no rows have been configured for the period; the per-row loop below
@@ -803,22 +817,85 @@ SELECT id.DivCode,
                 r.TargetSales = (r.WtAvgSoldQty / totalWt) * p.PlannedSalesQty;
         }
 
-        // Step 4: TargetEOM apportioned to stores by their share of the
-        // division's total WtAvgSoldQty — same shape as Step 3 (TargetSales),
-        // just using PlannedEOM instead of PlannedSalesQty:
+        // Step 4 — 1.14.53 rewrite. The single old apportionment is replaced
+        // with three sequential stages so the planner can read the calc as a
+        // waterfall on the EOM grid:
         //
-        //     TargetEOM[store] = (WtAvgSold[store] / Σ WtAvgSold in Division) × PlannedEOM
+        //   4a. Ini.EOM[store, div]        = TargetSales × TargetTurn
+        //       (a "naive demand" figure: how much stock the store would
+        //        carry if you held its sales × its target turn target).
         //
-        // Σ TargetEOM(Division) reconciles to LPM_Planned.PlannedEOM. Tgt Turn
-        // / grade markup no longer feed back into Tgt EOM — that influence
-        // exists only on the turn target itself.
+        //   4b. PreStoreCapEom[store, div] = (Ini.EOM[store, div] / Σ Ini.EOM in Div)
+        //                                    × PlannedEOM[div]
+        //       (apportions the division's PlannedEOM by each store's Ini.EOM
+        //        share within the division. Σ within a division reconciles
+        //        to PlannedEOM, same shape Step 3 uses for TargetSales.
+        //        Cap-agnostic — store cap is NOT considered here.)
+        //
+        //   4c. TargetEOM[store, div]      = if LPM_StoreCapacity.EomCapacity
+        //                                      EXISTS for the store AND
+        //                                      Σ PreStoreCapEom across divisions
+        //                                      > EomCapacity:
+        //                                        PreStoreCapEom[div]
+        //                                        × (EomCapacity / Σ PreStoreCapEom)
+        //                                    else:
+        //                                        PreStoreCapEom[div]   (passthrough)
+        //
+        // Σ TargetEOM(Division) only reconciles to PlannedEOM(Division) when
+        // no store's cap binds in that division. When a cap binds, the division
+        // falls short by the capped delta — that's intentional (the cap is a
+        // ceiling, accepting less stock is the whole point).
+        //
+        // Stage 4a — Ini.EOM per row.
+        foreach (var r in rows)
+            r.IniEom = r.TargetSales * r.TargetTurn;
+
+        // Stage 4b — PreStoreCapEom per division by Ini.EOM share.
+        // Divisions with Σ IniEom <= 0 (e.g. nothing planned, or every store
+        // unranked so TgtTurn = 0 everywhere) leave PreStoreCapEom = 0 — the
+        // division has no apportionment basis.
         foreach (var grp in rows.GroupBy(r => r.DivCode))
         {
             if (!planned.TryGetValue(grp.Key, out var p)) continue;
-            var totalWt = grp.Sum(r => r.WtAvgSoldQty);
-            if (totalWt <= 0m) continue;
+            var totalIni = grp.Sum(r => r.IniEom);
+            if (totalIni <= 0m) continue;
             foreach (var r in grp)
-                r.TargetEOM = (r.WtAvgSoldQty / totalWt) * p.PlannedEOM;
+                r.PreStoreCapEom = (r.IniEom / totalIni) * p.PlannedEOM;
+        }
+
+        // Stage 4c — TargetEOM per store, applying store cap if available.
+        // Group by store (across divisions) so the cap is evaluated against
+        // the store's total PreStoreCapEom demand.
+        foreach (var grp in rows.GroupBy(r => r.StoreID))
+        {
+            var totalPre = grp.Sum(r => r.PreStoreCapEom);
+            // "Cap available" = a row exists in LPM_StoreCapacity (IsActive)
+            // for this store. EomCapacity = 0 is a valid explicit cap meaning
+            // "this store gets nothing" — that's why the dictionary lookup is
+            // the decisive check, not the value.
+            if (storeCapByStore.TryGetValue(grp.Key, out var cap))
+            {
+                if (totalPre > cap && totalPre > 0m)
+                {
+                    var ratio = (decimal)cap / totalPre;
+                    foreach (var r in grp)
+                        r.TargetEOM = r.PreStoreCapEom * ratio;
+                }
+                else
+                {
+                    // Cap not binding (totalPre <= cap, or totalPre == 0):
+                    // pass through. Cap = 0 with totalPre = 0 also lands here
+                    // with TargetEOM = 0 naturally.
+                    foreach (var r in grp)
+                        r.TargetEOM = r.PreStoreCapEom;
+                }
+            }
+            else
+            {
+                // No cap configured for this store — passthrough.
+                foreach (var r in grp)
+                    r.TargetEOM = r.PreStoreCapEom;
+            }
         }
 
         // Step 5: Volume Group by TargetEOM desc, per division.

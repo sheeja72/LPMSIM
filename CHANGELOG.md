@@ -23,6 +23,49 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.53 — EOM Generate: Ini.EOM + Pre-Store CAP EOM cols; Tgt EOM honours store cap (2026-05-18)
+
+### What changed
+
+The single old `Tgt EOM` apportionment is now a **3-stage waterfall** with two new columns inserted before Tgt EOM on the EOM Generate grid:
+
+| Stage | New column | Formula | Notes |
+|---|---|---|---|
+| 4a | **Ini. EOM** | `TargetSales × TargetTurn` | Naive per-store demand. Unranked stores (TgtTurn = 0) → 0. |
+| 4b | **Pre-Store CAP EOM** | `(Ini.EOM[store, div] / Σ Ini.EOM in Div) × PlannedEOM[div]` | Apportions PlannedEOM by Ini.EOM share. Cap-agnostic. Σ within a Division reconciles to PlannedEOM. |
+| 4c | **Tgt EOM** *(formula CHANGED)* | If `LPM_StoreCapacity.EomCapacity` exists for the store AND `Σ Pre-Store CAP EOM across divisions > EomCapacity`: `Pre-Store CAP EOM[div] × (EomCapacity / Σ Pre-Store CAP EOM)`. Otherwise passthrough. | Was `(WtAvgSold / Σ WtAvgSold) × PlannedEOM`. The new formula ties EOM allocation to the cap captured in 1.14.51. |
+
+### Behavioural notes
+
+- **Tgt EOM values shift on the next EOM Generate run.** Pre-1.14.53 the EOM share was purely sales-driven; now both TargetSales and TargetTurn feed in (via Ini.EOM), so even with no caps set, the apportionment differs slightly from the old WtAvgSold-based formula.
+- **Reconciliation:** `Σ Tgt EOM (Division) = PlannedEOM (Division)` only holds when no store's cap binds in that division. When a cap binds, the division falls short by the capped delta — that's the cap's whole point.
+- **SIM Generate impact:** SIM uses TargetEOM as the per-(Store × Div) hard ceiling. Smaller TargetEOM (when a cap binds) → fewer items allocated to that store. Intended.
+- **Existing saved batches stay valid.** Migration 054 adds `IniEom` + `PreStoreCapEom` as NULL on `LPM_EOM_Output`. Old batches show blank for the new columns and keep their original `TargetEOM`. New EOM Generate runs populate everything with the new formula.
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/054_eomoutput_ini_prestorecap.sql` | NEW — adds `IniEom`, `PreStoreCapEom` (both `decimal(18,2) NULL`) to `dbo.LPM_EOM_Output`. Idempotent guards. |
+| `src/LpmSim.Core/Entities/LpmEomOutput.cs` | Two new nullable decimal properties; doc-comments on `IniEom`, `PreStoreCapEom`, and the revised `TargetEOM`. |
+| `src/LpmSim.Data/Eom/EomModels.cs` | `EomRow` gains non-nullable `IniEom` + `PreStoreCapEom`; doc-comments on the revised `TargetEOM`. |
+| `src/LpmSim.Data/LpmDbContext.cs` | `LpmEomOutput` entity config: `IniEom` / `PreStoreCapEom` mapped as `decimal(18,2)`. |
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | Loads `LPM_StoreCapacity` (IsActive, country-scoped) into a case-insensitive `Dict<StoreID, EomCapacity>`; Step 4 rewritten as 4a (Ini.EOM) + 4b (PreStoreCapEom apportionment) + 4c (TargetEOM with cap-aware scaling); `GenerateAsync` persists the new columns; `GetSavedAsync` reads them. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | Full preview grid: two new sortable columns (`Ini. EOM`, `Pre-Store CAP EOM`) inserted before Tgt EOM, with totals + tooltips; Tgt EOM tooltip rewritten to describe the new cap-aware formula; help/docs section gains Ini.EOM + Pre-Store CAP EOM rows and the Tgt EOM row rewritten with the new 3-stage explanation. Excel export Sheet 1 (Store-Div EOM): two new columns inserted before Tgt EOM; all downstream cell indices shifted by 2; numeric-format range updated to cover the new cols. Store Summary and Division Summary roll-up sheets unchanged (they show actionable per-store / per-div totals; Ini.EOM and Pre-Store CAP EOM stay on the detail grid). |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.52 → 1.14.53 |
+
+### Migration required
+Run `db/054_eomoutput_ini_prestorecap.sql` on the target DB before launching 1.14.53. The web app will run without it (the new columns are read as NULL via the `??` fallbacks), but `GenerateAsync` will throw on commit until the columns exist.
+
+### Risk
+**Medium.** Tgt EOM values shift even when no caps are set (Ini.EOM-share vs WtAvgSold-share apportionment is mathematically different). Variance is typically small (TargetTurn varies slowly across stores, so Ini.EOM and WtAvgSold shares are highly correlated) — but it's not zero, and downstream consumers (SIM, ADM, Reports) will see the new numbers on the next regen. No data loss; old saved batches preserve their old values.
+
+### Follow-up
+- Apply migration 054 in prod.
+- Populate `LPM_StoreCapacity` for the country (Planning Config → Stores Capacity EOM, or the Excel upload). Without caps, the new Tgt EOM = Pre-Store CAP EOM passthrough.
+- Regenerate EOM for the current period and review the Ini.EOM / Pre-Store CAP EOM / Tgt EOM columns side-by-side to confirm the waterfall looks right.
+
+---
+
 ## 1.14.52 — WH Items: exclude NON-PURCHASED pallets; add Avg SKU Max + Division filter (2026-05-18)
 
 ### Four changes (Reports → WH Items)

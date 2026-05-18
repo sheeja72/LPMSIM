@@ -14,6 +14,33 @@ public class LpmEomOutput
     public decimal? PriorityRank { get; set; }
     public decimal? TargetTurn { get; set; }
     public decimal? TargetSales { get; set; }
+
+    /// <summary>
+    /// Initial EOM (1.14.53) — <c>TargetSales × TargetTurn</c>. Per
+    /// (Store × Division). Unranked stores (TargetTurn = 0) → Ini.EOM = 0.
+    /// Used as the per-store weight when apportioning PlannedEOM into
+    /// <see cref="PreStoreCapEom"/>. NULL on rows generated before 1.14.53.
+    /// </summary>
+    public decimal? IniEom { get; set; }
+
+    /// <summary>
+    /// Pre-Store-Cap EOM (1.14.53) — apportionment of
+    /// <c>LPM_Planned.PlannedEOM</c> across stores in a Division by each
+    /// store's share of Ini.EOM within that Division. Cap-agnostic; the
+    /// downstream <see cref="TargetEOM"/> applies
+    /// <c>LPM_StoreCapacity.EomCapacity</c> on top of this. Σ within a
+    /// Division reconciles to PlannedEOM. NULL on rows generated before 1.14.53.
+    /// </summary>
+    public decimal? PreStoreCapEom { get; set; }
+
+    /// <summary>
+    /// 1.14.53 — Formula CHANGED. Was <c>(WtAvgSold[store] / Σ WtAvgSold in Div) × PlannedEOM</c>.
+    /// Now: if <c>LPM_StoreCapacity.EomCapacity</c> exists for the store AND
+    /// the store's <c>Σ PreStoreCapEom across divisions &gt; EomCapacity</c>,
+    /// each division's slice is scaled by <c>EomCapacity / Σ PreStoreCapEom</c>.
+    /// Otherwise TargetEOM = PreStoreCapEom (passthrough). SIM Generate
+    /// continues to consume this as the per-(Store × Div) ceiling.
+    /// </summary>
     public decimal? TargetEOM { get; set; }
     public string? VolumeGroup { get; set; }
 
