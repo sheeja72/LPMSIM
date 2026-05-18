@@ -23,6 +23,31 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.49 — HOTFIX: WH Items cross-DB table qualifications (2026-05-18)
+
+### Bug
+After 1.14.48 fixed the connection-string name, opening Reports → WH Items now produced "Load failed: Invalid object name 'dbo.DataSettings'". Root cause: the `Warehouse` connection's default database is `racks`, so unqualified `dbo.X` references resolve to `racks.dbo.X`. The DataSettings synonym only lives in the LPMSIM database, and `LPM_SimItemSkuMax` is a LPMSIM table — neither exists under `racks.dbo`.
+
+The other working Reports services (`WhHoStockService`, `VarianceReportService`) all use the cross-DB-qualified form for cross-database references — I missed two:
+- `dbo.DataSettings` → not visible from racks DB (synonym only in LPMSIM)
+- `dbo.LPM_SimItemSkuMax` → physical table in LPMSIM DB
+
+### Fix
+Qualified both references with their actual databases:
+- `dbo.DataSettings` → `bfldata.dbo.DataSettings` (the master table the synonym points to)
+- `dbo.LPM_SimItemSkuMax` → `LPMSIM.dbo.LPM_SimItemSkuMax`
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Reports/WhItemsReportService.cs` | Cross-DB table qualifications |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.48 → 1.14.49 |
+
+### Risk
+**Zero.** Pure SQL text changes pointing at the correct cross-DB paths. Build clean.
+
+---
+
 ## 1.14.48 — HOTFIX: WH Items service connection-string name (2026-05-18)
 
 ### Bug

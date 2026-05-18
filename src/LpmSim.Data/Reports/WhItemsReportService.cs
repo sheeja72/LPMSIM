@@ -133,7 +133,7 @@ public sealed class WhItemsReportService
                    StoresSoh = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
               INTO #WhItemsSoh
               FROM racks.dbo.LPM_LocStock ls
-              INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+              INNER JOIN bfldata.dbo.DataSettings ds ON ds.StoreID = ls.StoreID
               INNER JOIN #WhItemsCodes wc    ON wc.itemcode = ls.Itemcode
              WHERE ds.SIMCountry = @country
                AND ds.ActiveStore = 'Y'
@@ -146,7 +146,7 @@ public sealed class WhItemsReportService
             --    Month1). If no rows for the country, both totals are 0.
             DECLARE @y int, @m int;
             SELECT TOP 1 @y = Year1, @m = Month1
-              FROM dbo.LPM_SimItemSkuMax
+              FROM LPMSIM.dbo.LPM_SimItemSkuMax
              WHERE Country = @country
              ORDER BY Year1 DESC, Month1 DESC;
 
@@ -154,7 +154,7 @@ public sealed class WhItemsReportService
                    SkuMax    = SUM(CAST(ISNULL(sm.SKUMax,    0) AS bigint)),
                    ToFillQty = SUM(CAST(ISNULL(sm.ToFillQty, 0) AS bigint))
               INTO #WhItemsSkuMax
-              FROM dbo.LPM_SimItemSkuMax sm
+              FROM LPMSIM.dbo.LPM_SimItemSkuMax sm
               INNER JOIN #WhItemsCodes wc ON wc.itemcode = sm.ItemCode
              WHERE sm.Country = @country
                AND sm.Year1   = @y
