@@ -1,0 +1,297 @@
+@using ClosedXML.Excel
+@using System.IO
+@using LpmSim.Web.Components.Pages.Uploads
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IJSRuntime JS
+
+<MudGrid Spacing="3">
+    <MudItem xs="12" md="4">
+        <div class="lpm-section">
+            <div class="lpm-section-title">Template</div>
+            <div class="lpm-section-sub">
+                <strong>1.14.51 — Per-(Country, StoreID).</strong> EOM capacity ceiling per
+                active store. One row per store. Used as the upper bound on what an EOM
+                plan can stack into a store.
+            </div>
+            <MudChipSet T="string" ReadOnly="true" Class="mb-3">
+                @foreach (var h in Header) { <MudChip T="string" Size="Size.Small">@h</MudChip> }
+            </MudChipSet>
+            <MudButton OnClick="DownloadTemplate" StartIcon="@Icons.Material.Filled.Download"
+                       Variant="Variant.Outlined" Color="Color.Primary" DropShadow="false">Download template</MudButton>
+        </div>
+        <div class="lpm-section">
+            <div class="lpm-section-title">Rules</div>
+            <ul class="pl-4 mb-0" style="font-size:0.82rem; color:#64748b;">
+                <li><strong>Country</strong> must already exist in DataSettings.</li>
+                <li><strong>StoreID</strong> must be an <em>active</em> store for that Country
+                    (DataSettings.ActiveStore = 'Y').</li>
+                <li><strong>EomCapacity</strong> is a non-negative integer (0 allowed).</li>
+                <li>Existing rows on (Country, StoreID) are replaced; new rows are inserted.</li>
+                <li>Stores not in the file keep their current values — this is an upsert,
+                    not a wipe-and-reload.</li>
+            </ul>
+        </div>
+    </MudItem>
+    <MudItem xs="12" md="8">
+        <div class="lpm-section">
+            <div class="lpm-section-title">Upload file</div>
+            <MudFileUpload T="IBrowserFile" FilesChanged="OnFileSelected" Accept=".xlsx">
+                <ActivatorContent>
+                    <div class="lpm-dropzone">
+                        <MudIcon Icon="@Icons.Material.Filled.CloudUpload" Size="Size.Large" Color="Color.Primary" />
+                        <MudText Typo="Typo.body1" Class="mt-2">Drop an <strong>.xlsx</strong> file here, or click.</MudText>
+                        @if (_fileName is not null) { <MudText Typo="Typo.body2" Class="mt-2" Style="font-weight:600;">@_fileName</MudText> }
+                    </div>
+                </ActivatorContent>
+            </MudFileUpload>
+        </div>
+
+        @if (_parsing) { <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="my-2" /> }
+        @if (_fatalError is not null) { <MudAlert Severity="Severity.Error" Class="mb-3">@_fatalError</MudAlert> }
+
+        @if (_rows.Count > 0)
+        {
+            <MudGrid Spacing="2" Class="mb-3">
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue"><div class="lpm-metric-label">Total Rows</div><div class="lpm-metric-value">@_rows.Count</div></div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-green"><div class="lpm-metric-label">Valid</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-rose"><div class="lpm-metric-label">Errors</div><div class="lpm-metric-value">@_errorCount</div></div></MudItem>
+                <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-amber"><div class="lpm-metric-label">Will Upsert</div><div class="lpm-metric-value">@_validCount</div></div></MudItem>
+            </MudGrid>
+
+            @if (_errorCount > 0)
+            {
+                var errorGroups = _rows
+                    .Where(r => r.Error is not null)
+                    .GroupBy(r => r.Error!)
+                    .Select(g => new { Message = g.Key, Count = g.Count(), SampleRows = g.Take(5).Select(r => r.RowNum).ToList() })
+                    .OrderByDescending(x => x.Count)
+                    .ToList();
+                <div class="lpm-section mb-3" style="border-left:4px solid #dc2626;">
+                    <div class="lpm-section-title" style="color:#dc2626;">
+                        Error breakdown — @_errorCount row(s) across @errorGroups.Count distinct issue(s)
+                    </div>
+                    <MudTable Items="errorGroups" Hover Dense Striped Height="240px" FixedHeader>
+                        <HeaderContent>
+                            <MudTh Style="width:90px;">Count</MudTh>
+                            <MudTh>Issue</MudTh>
+                            <MudTh Style="width:220px;">Sample row #s</MudTh>
+                        </HeaderContent>
+                        <RowTemplate>
+                            <MudTd Style="text-align:right;font-weight:600;color:#dc2626;">@context.Count.ToString("N0")</MudTd>
+                            <MudTd><span style="font-family:monospace;font-size:0.85rem;">@context.Message</span></MudTd>
+                            <MudTd Style="color:#64748b;font-size:0.82rem;">@string.Join(", ", context.SampleRows)</MudTd>
+                        </RowTemplate>
+                    </MudTable>
+                </div>
+            }
+
+            var displayRows = _errorCount > 0
+                ? _rows.OrderBy(r => r.Error is null ? 1 : 0).Take(200)
+                : _rows.Take(200);
+            <MudTable Items="displayRows" Hover Dense Striped FixedHeader Height="50vh">
+                <HeaderContent>
+                    <MudTh>Row</MudTh><MudTh>Country</MudTh><MudTh>StoreID</MudTh>
+                    <MudTh Style="text-align:right;">EomCapacity</MudTh><MudTh>Status</MudTh>
+                </HeaderContent>
+                <RowTemplate>
+                    <MudTd>@context.RowNum</MudTd>
+                    <MudTd>@context.Country</MudTd>
+                    <MudTd><code>@context.StoreID</code></MudTd>
+                    <MudTd Style="text-align:right;">@(context.EomCapacity?.ToString("N0") ?? "")</MudTd>
+                    <MudTd>
+                        @if (context.Error is null) { <span class="lpm-status lpm-status-ok">OK</span> }
+                        else                         { <span class="lpm-status lpm-status-err">@context.Error</span> }
+                    </MudTd>
+                </RowTemplate>
+            </MudTable>
+
+            <div class="d-flex justify-end mt-3">
+                <MudButton Color="Color.Primary" Variant="Variant.Filled" DropShadow="false"
+                           StartIcon="@Icons.Material.Filled.Save"
+                           Disabled="_committing || _validCount == 0" OnClick="CommitAsync">
+                    Commit @_validCount row(s)
+                </MudButton>
+            </div>
+        }
+    </MudItem>
+</MudGrid>
+
+@code {
+    private static readonly string[] Header =
+        { "Country", "StoreID", "EomCapacity" };
+
+    private string? _fileName;
+    private bool _parsing, _committing;
+    private string? _fatalError;
+    private List<Row> _rows = new();
+    private int _validCount, _errorCount;
+
+    private async Task OnFileSelected(IBrowserFile file)
+    {
+        _fileName = file.Name; _rows.Clear(); _fatalError = null;
+        _validCount = _errorCount = 0;
+        _parsing = true; StateHasChanged();
+        try
+        {
+            using var ms = await UploadHelpers.ReadUploadAsync(file);
+            await ParseAsync(ms);
+        }
+        catch (Exception ex) { _fatalError = $"Failed to read file: {ex.Message}"; }
+        finally { _parsing = false; StateHasChanged(); }
+    }
+
+    private async Task ParseAsync(Stream xlsx)
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+
+        // Pre-load valid (Country, StoreID) pairs from DataSettings — only
+        // active stores qualify (matches the admin page filter). Case-insensitive
+        // set so 'UAE'/'Uae' and 'S001'/'s001' both match the stored value.
+        var pairs = await db.DataSettings.AsNoTracking()
+            .Where(s => s.Country != null && s.Country != ""
+                     && s.StoreID != null && s.StoreID != ""
+                     && s.ActiveStore == "Y")
+            .Select(s => new { s.Country, s.StoreID })
+            .ToListAsync();
+        var countrySet = new HashSet<string>(
+            pairs.Select(p => p.Country!).Distinct(),
+            StringComparer.OrdinalIgnoreCase);
+        var pairSet = new HashSet<(string Country, string StoreID)>(
+            pairs.Select(p => (p.Country!, p.StoreID!)),
+            new CountryStorePairComparerCI());
+
+        try
+        {
+            using var wb = new XLWorkbook(xlsx);
+            var sheet = wb.Worksheets.First();
+            for (int i = 0; i < Header.Length; i++)
+            {
+                var got = UploadHelpers.TryString(sheet.Row(1).Cell(i + 1));
+                if (!string.Equals(got, Header[i], StringComparison.OrdinalIgnoreCase))
+                {
+                    _fatalError = $"Header mismatch col {i + 1}: expected '{Header[i]}', got '{got}'.";
+                    return;
+                }
+            }
+
+            int lastRow;
+            try { lastRow = sheet.LastRowUsed()?.RowNumber() ?? 1; } catch { lastRow = 10000; }
+
+            for (int r = 2; r <= lastRow; r++)
+            {
+                var xlRow = sheet.Row(r);
+                if (!UploadHelpers.RowIsUsed(xlRow)) continue;
+                var (ctry,  e1) = UploadHelpers.CellText(xlRow, 1, "Country");
+                var (store, e2) = UploadHelpers.CellText(xlRow, 2, "StoreID");
+                var (cap,   e3) = UploadHelpers.CellInt(xlRow, 3, "EomCapacity");
+
+                var row = new Row
+                {
+                    RowNum = r, Country = ctry, StoreID = store, EomCapacity = cap,
+                };
+                var problems = new List<string>(new[] { e1, e2, e3 }.Where(e => !string.IsNullOrEmpty(e)));
+                if (string.IsNullOrWhiteSpace(ctry))                problems.Add("Country blank");
+                else if (!countrySet.Contains(ctry))                problems.Add($"Country '{ctry}' not in DataSettings");
+                if (string.IsNullOrWhiteSpace(store))               problems.Add("StoreID blank");
+                else if (!string.IsNullOrWhiteSpace(ctry)
+                         && countrySet.Contains(ctry)
+                         && !pairSet.Contains((ctry, store)))
+                                                                    problems.Add($"StoreID '{store}' not an active store for {ctry}");
+                if (cap is null)                                    problems.Add("EomCapacity blank");
+                else if (cap < 0)                                   problems.Add($"EomCapacity = {cap} is negative");
+                if (problems.Count > 0) row.Error = string.Join("; ", problems);
+                _rows.Add(row);
+            }
+        }
+        catch (Exception ex) { _fatalError = $"Failed to open workbook: {ex.Message}"; return; }
+        _validCount = _rows.Count(r => r.Error is null);
+        _errorCount = _rows.Count - _validCount;
+    }
+
+    private async Task CommitAsync()
+    {
+        _committing = true; StateHasChanged();
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now  = DateTime.Now;
+            var user = CurrentUser?.Name ?? "system";
+            var valid = _rows.Where(r => r.Error is null).ToList();
+            var countries = valid.Select(r => r.Country!).Distinct().ToList();
+            var existing = await db.LpmStoreCapacities
+                .Where(c => countries.Contains(c.Country))
+                .ToListAsync();
+            // Case-insensitive index so 'UAE/S001' matches an existing 'uae/s001'
+            // row instead of attempting a duplicate INSERT (same pattern as
+            // VolumeGroupsUpload 1.14.41 fix).
+            var idx = new Dictionary<(string Country, string StoreID), LpmStoreCapacity>(
+                new CountryStorePairComparerCI());
+            foreach (var c in existing) idx[(c.Country, c.StoreID)] = c;
+            foreach (var r in valid)
+            {
+                var k = (r.Country!, r.StoreID!);
+                if (idx.TryGetValue(k, out var row))
+                {
+                    row.EomCapacity = r.EomCapacity!.Value;
+                    row.UpdatedTS   = now;
+                    row.UpdatedBy   = user;
+                }
+                else
+                {
+                    db.LpmStoreCapacities.Add(new LpmStoreCapacity
+                    {
+                        Country     = r.Country!,
+                        StoreID     = r.StoreID!,
+                        EomCapacity = r.EomCapacity!.Value,
+                        IsActive    = true,
+                        CreateTS    = now,
+                        CreatedBy   = user,
+                    });
+                }
+            }
+            await db.SaveChangesAsync();
+            Snackbar.Add($"Committed {valid.Count} Stores Capacity row(s).", Severity.Success);
+            _rows.Clear(); _fileName = null; _validCount = _errorCount = 0;
+        }
+        catch (Exception ex) { Snackbar.Add($"Commit failed: {ex.Message}", Severity.Error); }
+        finally { _committing = false; StateHasChanged(); }
+    }
+
+    private async Task DownloadTemplate()
+    {
+        using var wb = new XLWorkbook();
+        var sheet = wb.Worksheets.Add("Stores_Capacity");
+        UploadHelpers.WriteHeader(sheet, Header);
+        sheet.Cell(2, 1).Value = "UAE";
+        sheet.Cell(2, 2).Value = "S001";
+        sheet.Cell(2, 3).Value = 1500;
+        await UploadHelpers.DownloadAsync(JS, wb, "StoresCapacity_Template.xlsx");
+    }
+
+    private sealed class Row
+    {
+        public int RowNum { get; init; }
+        public string? Country { get; init; }
+        public string? StoreID { get; init; }
+        public int? EomCapacity { get; init; }
+        public string? Error { get; set; }
+    }
+
+    /// <summary>
+    /// Case-insensitive equality for the (Country, StoreID) composite key.
+    /// Local to this upload because the other CI comparer in UploadHelpers
+    /// is for the 3-column (Country, DivCode, GroupCode) key.
+    /// </summary>
+    private sealed class CountryStorePairComparerCI : IEqualityComparer<(string Country, string StoreID)>
+    {
+        public bool Equals((string Country, string StoreID) x, (string Country, string StoreID) y)
+            => StringComparer.OrdinalIgnoreCase.Equals(x.Country, y.Country)
+            && StringComparer.OrdinalIgnoreCase.Equals(x.StoreID, y.StoreID);
+        public int GetHashCode((string Country, string StoreID) obj)
+            => HashCode.Combine(
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.Country ?? ""),
+                StringComparer.OrdinalIgnoreCase.GetHashCode(obj.StoreID ?? ""));
+    }
+}

@@ -23,6 +23,65 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.51 — Planning Config → Stores Capacity EOM + Excel upload (2026-05-18)
+
+### What's new
+
+Per-store **EOM capacity ceiling** captured as a first-class master-data table:
+
+| Surface | Where |
+|---|---|
+| Admin page | **Planning Config → Stores Capacity EOM** (new sidebar entry between Planned Inputs and Data Uploads) |
+| Bulk upload | **Data Uploads → Stores Capacity** (new tab at the end of the existing tab strip) |
+| Storage | New `dbo.LPM_StoreCapacity` table — PK `(Country, StoreID)` |
+
+### Admin page (`/lpm/stores-capacity`)
+
+- Country dropdown sourced from active-store countries (`DataSettings.ActiveStore = 'Y'`).
+- For the selected country, lists **every active store** as a row (LEFT-merged with existing `LPM_StoreCapacity` rows so stores without a saved value show `0`).
+- Inline-editable `EomCapacity` (non-negative int, no spin buttons, right-aligned).
+- Dirty tracking: **Save** button shows the count of changed rows; disabled until something changes.
+- **Set all 0** convenience button to wipe the column in one click.
+- Total footer (Σ EomCapacity across all rows).
+- Save audit-logged via `IActionLogger.LogAsync("StoresCapacity.Save", country, ..., action: 'X')` so changes appear in Admin → Audit Log.
+
+### Excel upload (`/lpm/uploads` → Stores Capacity tab)
+
+Header: `Country | StoreID | EomCapacity` (3 columns).
+
+Validation:
+- Country must exist in DataSettings.
+- StoreID must be an **active** store for that Country (`ActiveStore = 'Y'`) — same gate as the admin page.
+- EomCapacity must be a non-negative integer (0 allowed).
+- Case-insensitive matching on Country + StoreID (same pattern as the 1.14.41 Volume Groups fix).
+
+Upserts by `(Country, StoreID)`; stores not in the file keep their existing values (this is an upsert, not a wipe-and-reload — matches the planner's expectation for "edit some, leave the rest alone").
+
+Standard error-breakdown panel (count + sample row #s grouped by issue, same UX as SKU Max Rules / Volume Groups uploads).
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/053_lpm_store_capacity.sql` | NEW — creates `dbo.LPM_StoreCapacity` (PK Country, StoreID; EomCapacity int; IsActive bit; audit columns). Idempotent guard. |
+| `src/LpmSim.Core/Entities/LpmStoreCapacity.cs` | NEW — entity class |
+| `src/LpmSim.Data/LpmDbContext.cs` | Added `DbSet<LpmStoreCapacity> LpmStoreCapacities` + entity config (`ToTable("LPM_StoreCapacity")`, composite PK, column lengths/types) |
+| `src/LpmSim.Web/Components/Pages/LPM/StoresCapacity.razor` | NEW — admin page at `/lpm/stores-capacity` |
+| `src/LpmSim.Web/Components/Pages/Uploads/StoresCapacityUpload.razor` | NEW — Excel upload component |
+| `src/LpmSim.Web/Components/Pages/Uploads/Uploads.razor` | Registered new tab `Stores Capacity` |
+| `src/LpmSim.Web/Components/Layout/NavMenu.razor` | New nav link under Planning Config |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.50 → 1.14.51 |
+
+### Migration required
+Run `db/053_lpm_store_capacity.sql` on the target DB before launching 1.14.51 — both the admin page and the upload tab call `LpmStoreCapacities` and will fail until the table exists.
+
+### Risk
+**Low.** Pure additive: new table, new page, new tab, new nav link. No existing surface touched, no existing query / entity / migration modified. The allocator does **not** yet consume `EomCapacity` — that's a follow-up once data is captured.
+
+### Follow-up
+The EOM allocator can be wired to honour `LPM_StoreCapacity.EomCapacity` as a hard ceiling on per-store stack height. Held until planners have populated values for at least one country.
+
+---
+
 ## 1.14.50 — WH Items: Season + LPM/Non-LPM + LPM Months filters; ToFillQty cap; SOH clamp (2026-05-18)
 
 ### Three filter additions

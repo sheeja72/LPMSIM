@@ -1,0 +1,220 @@
+@page "/lpm/stores-capacity"
+@rendermode InteractiveServer
+@attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@using LpmSim.Data.Auditing
+@inject IDbContextFactory<LpmDbContext> DbFactory
+@inject ICurrentUser CurrentUser
+@inject ISnackbar Snackbar
+@inject IActionLogger ActionLog
+
+<PageTitle>Stores Capacity EOM</PageTitle>
+
+<div class="lpm-page-title">Stores Capacity EOM</div>
+<div class="lpm-page-subtitle">
+    Per-store EOM capacity ceiling. One row per active store for the selected country.
+    Edit inline and click <strong>Save</strong> to commit. Bulk Excel upload is available
+    under Data Uploads → Stores Capacity.
+</div>
+
+<div class="lpm-section lpm-filter-bar" style="max-width:900px;">
+    <MudGrid Spacing="2" Class="align-center">
+        <MudItem xs="12" sm="4" md="3">
+            <MudSelect T="string" Label="Country" Value="_country"
+                       ValueChanged="OnCountryChangedAsync"
+                       Variant="Variant.Outlined" Margin="Margin.Dense">
+                @foreach (var c in _countries)
+                {
+                    <MudSelectItem Value="@c">@c</MudSelectItem>
+                }
+            </MudSelect>
+        </MudItem>
+        <MudItem xs="12" sm="8" md="9" Class="d-flex align-center justify-end gap-2">
+            <MudButton Variant="Variant.Outlined" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Clear"
+                       Disabled="@(_rows.Count == 0)" OnClick="ResetAllToZero">
+                Set all 0
+            </MudButton>
+            <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Save"
+                       Disabled="!_dirty" OnClick="SaveAsync">
+                Save @(_dirty ? $"({_dirtyCount})" : "")
+            </MudButton>
+        </MudItem>
+    </MudGrid>
+</div>
+
+@if (_rows.Count == 0 && !_loading)
+{
+    <MudAlert Severity="Severity.Info" Variant="Variant.Outlined" Style="max-width:900px;">
+        No active stores found for <strong>@_country</strong>.
+    </MudAlert>
+}
+else if (_rows.Count > 0)
+{
+    <MudTable Items="_rows" Hover="true" Dense="true" Striped="true"
+              Class="lpm-narrow-table" Style="max-width:900px;">
+        <HeaderContent>
+            <MudTh Style="width:160px;">Store ID</MudTh>
+            <MudTh>Store Name</MudTh>
+            <MudTh Style="width:200px;text-align:right;">EOM Capacity</MudTh>
+        </HeaderContent>
+        <RowTemplate>
+            <MudTd><code>@context.StoreID</code></MudTd>
+            <MudTd>@context.StoreName</MudTd>
+            <MudTd Style="text-align:right;">
+                <MudNumericField T="int" Value="context.EomCapacity"
+                                 ValueChanged="(int v) => { context.EomCapacity = v; context.IsDirty = true; }"
+                                 Min="0" Variant="Variant.Outlined" Margin="Margin.Dense"
+                                 HideSpinButtons="true" Class="lpm-num-right" />
+            </MudTd>
+        </RowTemplate>
+        <FooterContent>
+            <MudTd colspan="2" Style="font-weight:600;">Total — @_rows.Count rows</MudTd>
+            <MudTd Style="text-align:right;font-weight:600;">@_rows.Sum(r => r.EomCapacity).ToString("N0")</MudTd>
+        </FooterContent>
+    </MudTable>
+}
+
+@code {
+    private List<string> _countries = new();
+    private string _country = "UAE";
+    private List<Row> _rows = new();
+    private bool _loading;
+
+    private bool _dirty       => _rows.Any(r => r.IsDirty);
+    private int  _dirtyCount  => _rows.Count(r => r.IsDirty);
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using var db = await DbFactory.CreateDbContextAsync();
+        _countries = await db.DataSettings
+            .Where(s => s.ActiveStore == "Y" && s.Country != null && s.Country != "")
+            .Select(s => s.Country!).Distinct().OrderBy(c => c).ToListAsync();
+        if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
+            _country = _countries.FirstOrDefault() ?? "";
+        await LoadAsync();
+    }
+
+    private async Task OnCountryChangedAsync(string? v)
+    {
+        _country = v ?? "";
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// For the selected country, load every active store as a row.
+    /// LEFT-merge the existing LPM_StoreCapacity values so the page shows
+    /// a complete list (stores without a saved capacity yet show 0).
+    /// </summary>
+    private async Task LoadAsync()
+    {
+        _loading = true; StateHasChanged();
+        _rows.Clear();
+        try
+        {
+            if (string.IsNullOrEmpty(_country)) return;
+            await using var db = await DbFactory.CreateDbContextAsync();
+
+            var stores = await db.DataSettings.AsNoTracking()
+                .Where(s => s.Country == _country && s.ActiveStore == "Y"
+                         && s.StoreID != null && s.StoreID != "")
+                .Select(s => new { s.StoreID, s.PBFullname })
+                .OrderBy(s => s.StoreID)
+                .ToListAsync();
+
+            var existing = await db.LpmStoreCapacities.AsNoTracking()
+                .Where(c => c.Country == _country)
+                .ToListAsync();
+            var byStore = existing.ToDictionary(c => c.StoreID!, c => c, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var s in stores)
+            {
+                byStore.TryGetValue(s.StoreID!, out var ex);
+                _rows.Add(new Row
+                {
+                    StoreID     = s.StoreID!,
+                    StoreName   = s.PBFullname ?? "",
+                    EomCapacity = ex?.EomCapacity ?? 0,
+                    IsActive    = ex?.IsActive ?? true,
+                    IsExisting  = ex is not null,
+                });
+            }
+        }
+        finally
+        {
+            _loading = false; StateHasChanged();
+        }
+    }
+
+    private void ResetAllToZero()
+    {
+        foreach (var r in _rows)
+        {
+            if (r.EomCapacity != 0) r.IsDirty = true;
+            r.EomCapacity = 0;
+        }
+        StateHasChanged();
+    }
+
+    private async Task SaveAsync()
+    {
+        var dirty = _rows.Where(r => r.IsDirty).ToList();
+        if (dirty.Count == 0) return;
+        try
+        {
+            await using var db = await DbFactory.CreateDbContextAsync();
+            var now  = DateTime.Now;
+            var user = CurrentUser?.Name ?? "system";
+
+            var existing = await db.LpmStoreCapacities
+                .Where(c => c.Country == _country
+                         && dirty.Select(d => d.StoreID).Contains(c.StoreID))
+                .ToListAsync();
+            var byKey = existing.ToDictionary(c => c.StoreID!, c => c, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var r in dirty)
+            {
+                if (byKey.TryGetValue(r.StoreID, out var row))
+                {
+                    row.EomCapacity = r.EomCapacity;
+                    row.UpdatedTS   = now;
+                    row.UpdatedBy   = user;
+                }
+                else
+                {
+                    db.LpmStoreCapacities.Add(new LpmStoreCapacity
+                    {
+                        Country     = _country,
+                        StoreID     = r.StoreID,
+                        EomCapacity = r.EomCapacity,
+                        IsActive    = true,
+                        CreateTS    = now,
+                        CreatedBy   = user,
+                    });
+                }
+            }
+            await db.SaveChangesAsync();
+
+            await ActionLog.LogAsync("StoresCapacity.Save", _country,
+                new { country = _country, updated = dirty.Count }, action: 'X');
+
+            Snackbar.Add($"Saved {dirty.Count} store(s).", Severity.Success);
+            foreach (var r in dirty) r.IsDirty = false;
+            StateHasChanged();
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Save failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    private sealed class Row
+    {
+        public string StoreID     { get; set; } = "";
+        public string StoreName   { get; set; } = "";
+        public int    EomCapacity { get; set; }
+        public bool   IsActive    { get; set; } = true;
+        public bool   IsExisting  { get; set; }
+        public bool   IsDirty     { get; set; }
+    }
+}
