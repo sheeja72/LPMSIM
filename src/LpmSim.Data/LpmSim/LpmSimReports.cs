@@ -1,4 +1,5 @@
 using LpmSim.Core.Entities;
+using LpmSim.Data.Warehouse;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -265,6 +266,22 @@ public record AllocTraceCounts(
 public class LpmSimReportService(IDbContextFactory<LpmDbContext> dbFactory)
 {
     /// <summary>
+    /// 1.14.61 — Helper used by every report method that needs to resolve the
+    /// country-aware whboxitems source. Returns the table name to embed in
+    /// SQL: <c>racks.dbo.whboxitems</c> for UAE; <c>[&lt;DataName&gt;].dbo.WHBoxItemsExport</c>
+    /// for other countries. Opens the EF Core connection if it isn't already
+    /// open (the resolver needs an open SqlConnection).
+    /// </summary>
+    private static async Task<string> ResolveWhSrcAsync(
+        LpmDbContext db, string country, CancellationToken ct)
+    {
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
+        return await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+    }
+
+    /// <summary>
     /// SKU Max Detail report — reads <c>LPM_SimItemSkuMax</c> for the run period.
     /// At least one of <paramref name="divCode"/>, <paramref name="storeId"/>,
     /// or <paramref name="itemCode"/> must be supplied (mandatory filter).
@@ -370,6 +387,8 @@ SELECT TOP (@top)
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var b = await db.LpmSimBatches.AsNoTracking().FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
         if (b is null) return new();
+        // 1.14.61 — Country-aware whboxitems source.
+        var whSrc = await ResolveWhSrcAsync(db, b.Country, ct);
 
         // Drives the report off LPM_EOM_Output so EVERY (Store, Div) row in the
         // plan appears — even those with zero SIM Qty / zero SOH. SIM and SOH
@@ -377,7 +396,7 @@ SELECT TOP (@top)
         // Box-usability filter (optional): when @minPct/@maxPct are non-NULL,
         // only allocations from boxes whose total SIM/Box-Qty % falls in range
         // contribute to LpmSimQty / RoundRobinQty.
-        const string sql = @"
+        var sql = $@"
 WITH BatchItems AS (
     -- Distinct items in this batch's allocations.
     SELECT DISTINCT Itemcode FROM dbo.LPMSIM_Output WHERE LPMBatchNo = @batchNo
@@ -407,7 +426,7 @@ ItemDiv AS (
 ),
 BoxUsability AS (
     SELECT s.BoxNo,
-           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM racks.dbo.whboxitems w WHERE w.BoxNo = s.BoxNo), 0),
+           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = s.BoxNo), 0),
            SimQty = SUM(CAST(s.Qty AS bigint))
       FROM dbo.LPMSIM_Output s
      WHERE s.LPMBatchNo = @batchNo
@@ -508,14 +527,16 @@ SELECT @batchNo                  AS LPMBatchNo,
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var b = await db.LpmSimBatches.AsNoTracking().FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
         if (b is null) return new();
+        // 1.14.61 — Country-aware whboxitems source.
+        var whSrc = await ResolveWhSrcAsync(db, b.Country, ct);
 
-        const string sql = @"
+        var sql = $@"
 WITH BoxUsability AS (
     -- Per-box usability % = total SIM Qty allocated / total Qty in the box × 100.
-    -- BoxQty comes from the source (racks.whboxitems); SIM is summed across
-    -- every (Store, Item) target.
+    -- BoxQty comes from the source (country-aware whboxitems); SIM is summed
+    -- across every (Store, Item) target.
     SELECT s.BoxNo,
-           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM racks.dbo.whboxitems w WHERE w.BoxNo = s.BoxNo), 0),
+           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = s.BoxNo), 0),
            SimQty = SUM(CAST(s.Qty AS bigint))
       FROM dbo.LPMSIM_Output s
      WHERE s.LPMBatchNo = @batchNo
@@ -619,10 +640,12 @@ SELECT @batchNo                  AS LPMBatchNo,
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var b = await db.LpmSimBatches.AsNoTracking().FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
         if (b is null) return new();
+        // 1.14.61 — Country-aware whboxitems source.
+        var whSrc = await ResolveWhSrcAsync(db, b.Country, ct);
 
         // 1.14.36 — Perf refactor. Previously this method used 8 nested
         // CTEs that the optimizer kept inlining as views, causing
-        // racks.dbo.whboxitems to be scanned 2–3× per query (once via the
+        // whboxitems to be scanned 2–3× per query (once via the
         // BoxUsability correlated subquery, once via BoxItems, once via
         // BoxQtyAgg). After adding the Box Qty column in 1.14.34, the
         // Division Summary tab was slow to load.
@@ -636,7 +659,7 @@ SELECT @batchNo                  AS LPMBatchNo,
         // the duration of this SqlCommand and get dropped at the end. SET
         // NOCOUNT ON suppresses row-count messages so the only result set
         // the SqlDataReader sees is the final SELECT.
-        const string sql = @"
+        var sql = $@"
 SET NOCOUNT ON;
 
 IF OBJECT_ID('tempdb..#BoxUsability') IS NOT NULL DROP TABLE #BoxUsability;
@@ -652,7 +675,7 @@ IF OBJECT_ID('tempdb..#ItemDiv')      IS NOT NULL DROP TABLE #ItemDiv;
 -- repeatedly when this was a CTE).
 SELECT s.BoxNo,
        BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint))
-                          FROM racks.dbo.whboxitems w
+                          FROM {whSrc} w
                          WHERE w.BoxNo = s.BoxNo), 0),
        SimQty = SUM(CAST(s.Qty AS bigint))
   INTO #BoxUsability
@@ -684,7 +707,7 @@ CREATE CLUSTERED INDEX IX_QB ON #QB (BoxNo);
 -- seek-based aggregation, not a hash.
 SELECT w.BoxNo, w.itemcode, Qty = CAST(ISNULL(w.Qty, 0) AS bigint)
   INTO #BoxRows
-  FROM racks.dbo.whboxitems w
+  FROM {whSrc} w
   INNER JOIN #QB qb ON qb.BoxNo = w.BoxNo;
 
 CREATE CLUSTERED INDEX IX_BR ON #BoxRows (itemcode);
@@ -835,9 +858,16 @@ DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
     public async Task<List<BoxDetailRow>> GetBoxDetailsAsync(long batchNo, bool rollupToBoxOnly, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source. Look up the batch's
+        // country once (defensive default UAE if the batch row is missing).
+        var batchCountry = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
+        var whSrc = await ResolveWhSrcAsync(db, batchCountry, ct);
 
         var sql = rollupToBoxOnly
-            ? @"
+            ? $@"
 WITH BoxAgg AS (
     SELECT s.LPMBatchNo, s.BoxNo,
            SUM(CAST(s.Qty AS bigint)) AS LpmSimQty,
@@ -856,7 +886,7 @@ BoxMeta AS (
            MAX(Warehouse)  AS Warehouse,
            MAX(Rack)       AS Rack,
            CASE WHEN MAX(CASE WHEN LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1 THEN 'LPM' ELSE 'Non-LPM' END AS BoxKind
-      FROM racks.dbo.whboxitems
+      FROM {whSrc}
      WHERE BoxNo IN (SELECT BoxNo FROM BoxAgg)
      GROUP BY BoxNo
 )
@@ -879,7 +909,7 @@ SELECT b.LPMBatchNo,
   LEFT JOIN BoxMeta bm ON bm.BoxNo = b.BoxNo
   LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bm.PalletType
  ORDER BY b.BoxNo;"
-            : @"
+            : $@"
 WITH ItemDiv AS (
     -- subclassmaster.DivID (401..) does not match LPMSIM Division.DivCode (1..).
     -- Map by the human-readable Division name to get the LPMSIM DivCode.
@@ -911,14 +941,14 @@ SELECT sa.LPMBatchNo,
        MAX(div.Division)  AS DivisionName,
        sa.BoxNo,
        -- 1.14.12: PalletNo via the same TOP 1 lookup pattern used for PalletType.
-       (SELECT TOP 1 PalletNo FROM racks.dbo.whboxitems w WHERE w.BoxNo = sa.BoxNo) AS PalletNo,
-       (SELECT SUM(CAST(Qty AS bigint)) FROM racks.dbo.whboxitems w WHERE w.BoxNo = sa.BoxNo) AS BoxQty,
+       (SELECT TOP 1 PalletNo FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS PalletNo,
+       (SELECT SUM(CAST(Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS BoxQty,
        sa.LpmSimQty,
-       (SELECT TOP 1 PalletType FROM racks.dbo.whboxitems w WHERE w.BoxNo = sa.BoxNo) AS PalletType,
-       (SELECT TOP 1 pt.TypeName       FROM racks.dbo.whboxitems w
+       (SELECT TOP 1 PalletType FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS PalletType,
+       (SELECT TOP 1 pt.TypeName       FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
          WHERE w.BoxNo = sa.BoxNo) AS TypeName,
-       (SELECT TOP 1 pt.PalletCategory FROM racks.dbo.whboxitems w
+       (SELECT TOP 1 pt.PalletCategory FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
          WHERE w.BoxNo = sa.BoxNo) AS PalletCategory
   FROM SimAgg sa
@@ -945,17 +975,24 @@ SELECT sa.LPMBatchNo,
         CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source for the BoxQty subquery.
+        var batchCountry = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
+        var whSrc = await ResolveWhSrcAsync(db, batchCountry, ct);
         var conn = db.Database.GetDbConnection();
-        await db.Database.OpenConnectionAsync(ct);
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
         using var cmd = (SqlCommand)conn.CreateCommand();
         // Box-usability filter (same CTE rule used by Summary / Item Details /
         // Store Summary / Trace) — keeps the source-split matrix aligned with
         // every other tab so SIM Qty totals reconcile byte-for-byte.
-        cmd.CommandText = @"
+        cmd.CommandText = $@"
 WITH BoxUsability AS (
     SELECT s.BoxNo,
            BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint))
-                              FROM racks.dbo.whboxitems w
+                              FROM {whSrc} w
                              WHERE w.BoxNo = s.BoxNo), 0),
            SimQty = SUM(CAST(s.Qty AS bigint))
       FROM dbo.LPMSIM_Output s
@@ -1032,10 +1069,17 @@ SELECT
         long batchNo, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source.
+        var batchCountry = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
+        var whSrc = await ResolveWhSrcAsync(db, batchCountry, ct);
         var conn = db.Database.GetDbConnection();
-        await db.Database.OpenConnectionAsync(ct);
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
 
-        const string sql = @"
+        var sql = $@"
 ;WITH BatchBoxes AS (
     SELECT DISTINCT BoxNo
       FROM dbo.LPMSIM_Output
@@ -1049,7 +1093,7 @@ BoxMeta AS (
            Kind = CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
                        THEN 'LPM' ELSE 'Non-LPM' END,
            BoxQty = SUM(CAST(w.Qty AS bigint))
-      FROM racks.dbo.whboxitems w
+      FROM {whSrc} w
      WHERE w.BoxNo IN (SELECT BoxNo FROM BatchBoxes)
      GROUP BY w.BoxNo
 ),
@@ -1111,14 +1155,17 @@ SELECT  sg.Kind,
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var b = await db.LpmSimBatches.AsNoTracking().FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
         if (b is null) return new();
+        // 1.14.61 — Country-aware whboxitems source.
+        var whSrc = await ResolveWhSrcAsync(db, b.Country, ct);
 
-        const string sql = @"
+        var sql = $@"
 -- ── Item Details — perf rewrite ─────────────────────────────────────────
--- Pre-aggregate everything from racks.dbo.whboxitems into CTEs ONCE rather
--- than the previous per-row subqueries that hit whboxitems for each of the
--- 116K LPMSIM_Output rows. On the UAE batch this dropped the query from
--- multi-second to sub-second territory. Restricting the CTEs to
--- BatchBoxes (= boxes that participated in this batch) keeps them small.
+-- Pre-aggregate everything from the country-aware whboxitems source into
+-- CTEs ONCE rather than the previous per-row subqueries that hit whboxitems
+-- for each of the 116K LPMSIM_Output rows. On the UAE batch this dropped
+-- the query from multi-second to sub-second territory. Restricting the
+-- CTEs to BatchBoxes (= boxes that participated in this batch) keeps them
+-- small.
 ;WITH BatchBoxes AS (
     SELECT DISTINCT BoxNo
       FROM dbo.LPMSIM_Output
@@ -1136,7 +1183,7 @@ BoxAttrs AS (
     SELECT w.BoxNo, w.ItemCode,
            BoxItemQty = SUM(CAST(w.Qty AS bigint)),
            PalletNo   = MAX(w.PalletNo)                       -- 1.14.12
-      FROM racks.dbo.whboxitems w
+      FROM {whSrc} w
      WHERE w.BoxNo IN (SELECT BoxNo FROM BatchBoxes)
      GROUP BY w.BoxNo, w.ItemCode
 ),
@@ -1147,7 +1194,7 @@ BoxTotals AS (
     SELECT w.BoxNo,
            BoxQty   = SUM(CAST(w.Qty AS bigint)),
            AnyLpmDt = MAX(w.LPMDt)
-      FROM racks.dbo.whboxitems w
+      FROM {whSrc} w
      WHERE w.BoxNo IN (SELECT BoxNo FROM BatchBoxes)
      GROUP BY w.BoxNo
 ),
@@ -1262,19 +1309,25 @@ SELECT s.LPMBatchNo,
     }
 
     /// <summary>
-    /// Distinct warehouse codes from <c>racks.dbo.whboxitems</c>. Used to populate
-    /// the multi-select on the SIM Generate page so the planner can scope a run
-    /// to one or more warehouses.
+    /// Distinct warehouse codes from the country-aware whboxitems source.
+    /// Used to populate the multi-select on the SIM Generate page so the
+    /// planner can scope a run to one or more warehouses.
+    /// 1.14.61 — Optional <paramref name="country"/> parameter routes the
+    /// query to the right source (UAE → <c>racks.dbo.whboxitems</c>; others
+    /// → <c>[&lt;DataName&gt;].dbo.WHBoxItemsExport</c>). Defaults to "UAE"
+    /// so existing callers that don't pass a country keep the legacy behaviour.
     /// </summary>
-    public async Task<List<string>> GetDistinctWarehousesAsync(CancellationToken ct = default)
+    public async Task<List<string>> GetDistinctWarehousesAsync(string country = "UAE", CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var whSrc = await ResolveWhSrcAsync(db, country, ct);
         var conn = db.Database.GetDbConnection();
-        await db.Database.OpenConnectionAsync(ct);
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
         using var cmd = (SqlCommand)conn.CreateCommand();
-        cmd.CommandText = @"
+        cmd.CommandText = $@"
             SELECT DISTINCT Warehouse
-              FROM racks.dbo.whboxitems
+              FROM {whSrc}
              WHERE Warehouse IS NOT NULL AND Warehouse <> ''
              ORDER BY Warehouse;";
         cmd.CommandTimeout = 60;
@@ -1314,22 +1367,27 @@ SELECT s.LPMBatchNo,
     }
 
     /// <summary>
-    /// Distinct LPM months from <c>racks.dbo.whboxitems.LPMDt</c> as a list of
-    /// month-start <see cref="DateTime"/> values (1st of each month).
-    /// Feeds the SIM Generate "LPM Months" multi-select so the planner can
-    /// scope an LPM run to specific months instead of the default "all
-    /// months up to the run period". Empty selection on the page = legacy
-    /// behaviour.
+    /// Distinct LPM months from the country-aware whboxitems source's
+    /// <c>LPMDt</c> column, returned as month-start
+    /// <see cref="DateTime"/> values (1st of each month). Feeds the SIM
+    /// Generate "LPM Months" multi-select so the planner can scope an LPM
+    /// run to specific months instead of the default "all months up to the
+    /// run period". Empty selection on the page = legacy behaviour.
+    /// 1.14.61 — Optional <paramref name="country"/> parameter routes the
+    /// query to the right source (UAE → <c>racks.dbo.whboxitems</c>; others
+    /// → <c>[&lt;DataName&gt;].dbo.WHBoxItemsExport</c>). Defaults to "UAE".
     /// </summary>
-    public async Task<List<DateTime>> GetDistinctLpmMonthsAsync(CancellationToken ct = default)
+    public async Task<List<DateTime>> GetDistinctLpmMonthsAsync(string country = "UAE", CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var whSrc = await ResolveWhSrcAsync(db, country, ct);
         var conn = db.Database.GetDbConnection();
-        await db.Database.OpenConnectionAsync(ct);
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
         using var cmd = (SqlCommand)conn.CreateCommand();
-        cmd.CommandText = @"
+        cmd.CommandText = $@"
             SELECT DISTINCT DATEFROMPARTS(YEAR(LPMDt), MONTH(LPMDt), 1) AS MonthStart
-              FROM racks.dbo.whboxitems
+              FROM {whSrc}
              WHERE LPMDt IS NOT NULL
              ORDER BY MonthStart;";
         cmd.CommandTimeout = 60;
@@ -1432,10 +1490,16 @@ SELECT s.LPMBatchNo,
         CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source.
+        var batchCountry = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
+        var whSrc = await ResolveWhSrcAsync(db, batchCountry, ct);
         var sql = $@"
 WITH BoxUsability AS (
     SELECT s.BoxNo,
-           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM racks.dbo.whboxitems w WHERE w.BoxNo = s.BoxNo), 0),
+           BoxQty = ISNULL((SELECT SUM(CAST(w.Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = s.BoxNo), 0),
            SimQty = SUM(CAST(s.Qty AS bigint))
       FROM dbo.LPMSIM_Output s
      WHERE s.LPMBatchNo = @batchNo
@@ -1663,6 +1727,8 @@ SELECT TOP (@top)
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var b = await db.LpmSimBatches.AsNoTracking().FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
         if (b is null) return new CustomReportResult(new(), new());
+        // 1.14.61 — Country-aware whboxitems source for the BoxAttrs / BoxTotals CTEs.
+        var whSrc = await ResolveWhSrcAsync(db, b.Country, ct);
 
         // Normalise spec — dedupe + auto-include dimensions from Columns
         // into GroupBy. Empty Columns = nothing to show; bail early.
@@ -1704,7 +1770,7 @@ SELECT TOP (@top)
 
         // Base CTEs — always built; any combination of column picks reads from
         // these. Mirrors the existing reports' join shape so totals agree.
-        const string baseCtes = @"
+        var baseCtes = $@"
 ;WITH BatchItems AS (
     SELECT DISTINCT Itemcode FROM dbo.LPMSIM_Output WHERE LPMBatchNo = @batchNo
 ),
@@ -1741,7 +1807,7 @@ BoxAttrs AS (
            Brand      = MAX(Brand),
            TrnDate    = MAX(TrnDate),
            LPMDt      = MAX(LPMDt)
-      FROM racks.dbo.whboxitems
+      FROM {whSrc}
      WHERE BoxNo IN (SELECT BoxNo FROM BatchBoxes)
      GROUP BY BoxNo, ItemCode
 ),
@@ -1750,7 +1816,7 @@ BoxTotals AS (
     SELECT BoxNo,
            BoxQty   = SUM(CAST(Qty AS bigint)),
            AnyLpmDt = MAX(LPMDt)
-      FROM racks.dbo.whboxitems
+      FROM {whSrc}
      WHERE BoxNo IN (SELECT BoxNo FROM BatchBoxes)
      GROUP BY BoxNo
 ),

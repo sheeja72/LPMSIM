@@ -1,3 +1,4 @@
+using LpmSim.Data.Warehouse;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -202,11 +203,19 @@ public class LpmSimInvestigator(IDbContextFactory<LpmDbContext> dbFactory)
         var (conn, db) = await OpenAsync(ct);
         await using var _ = db;
 
+        // 1.14.61 — Country-aware whboxitems source. Look up the batch's
+        // country first so the BoxQty subquery hits the right table.
+        var country = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
+        var whSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, country, ct);
+
         long boxQty = 0, simQty = 0, rrQty = 0; int distinctStores = 0;
         using (var cmd = conn.CreateCommand())
         {
-            cmd.CommandText = @"
-                SELECT BoxQty   = (SELECT SUM(CAST(Qty AS bigint)) FROM racks.dbo.whboxitems WHERE BoxNo = @b),
+            cmd.CommandText = $@"
+                SELECT BoxQty   = (SELECT SUM(CAST(Qty AS bigint)) FROM {whSrc} WHERE BoxNo = @b),
                        SimQty   = ISNULL(SUM(CAST(o.Qty AS bigint)), 0),
                        RrQty    = ISNULL(SUM(CASE WHEN o.IsRoundRobin=1 THEN CAST(o.Qty AS bigint) ELSE 0 END), 0),
                        Stores   = COUNT(DISTINCT o.StoreID)

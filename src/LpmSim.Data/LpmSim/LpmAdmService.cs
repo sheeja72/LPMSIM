@@ -1,5 +1,6 @@
 using LpmSim.Core;
 using LpmSim.Core.Entities;
+using LpmSim.Data.Warehouse;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 
@@ -97,6 +98,11 @@ public class LpmAdmService(IDbContextFactory<LpmDbContext> dbFactory, ICurrentUs
         var runMonth = req.RunDate.Month;
         var endExclusive = new DateTime(runYear, runMonth, 1).AddMonths(1);
 
+        // 1.14.61 — Country-aware whboxitems source: UAE → racks.dbo.whboxitems;
+        // other countries → [<DataName>].dbo.WHBoxItemsExport. Resolved once
+        // here; reused by both queries below.
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, req.Country, ct);
+
         // ── 1) Pull eligible LPM boxes for the run month ───────────────────
         // Each row is (BoxNo, Warehouse, LPM, ItemCode, Qty, LPMDt). We
         // aggregate to (Box, Brand, MaxLPMDt) below — division comes from
@@ -104,13 +110,13 @@ public class LpmAdmService(IDbContextFactory<LpmDbContext> dbFactory, ICurrentUs
         var boxes = new List<BoxRow>();
         using (var cmd = (SqlCommand)conn.CreateCommand())
         {
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
                 SELECT  w.BoxNo,
                         MAX(w.Warehouse) AS Warehouse,
                         MAX(w.LPM)       AS LPMBrand,
                         SUM(CAST(ISNULL(w.Qty, 0) AS bigint)) AS BoxQty,
                         MAX(w.LPMDt)     AS LPMDt
-                  FROM racks.dbo.whboxitems w
+                  FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE pt.PalletCategory = 'ELIGIBLE'
                    AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')
@@ -146,11 +152,11 @@ public class LpmAdmService(IDbContextFactory<LpmDbContext> dbFactory, ICurrentUs
         var boxDiv = new Dictionary<string, (int DivCode, string Division)>(StringComparer.OrdinalIgnoreCase);
         using (var cmd = (SqlCommand)conn.CreateCommand())
         {
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
                 SELECT w.BoxNo,
                        MIN(d.DivCode) AS DivCode,
                        MAX(d.Division) AS Division
-                  FROM racks.dbo.whboxitems w
+                  FROM {whSrc} w
                   INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = w.ItemCode
                   INNER JOIN Datareporting.dbo.subclassmaster sm  ON sm.MH4ID   = u.MH4ID
                   INNER JOIN dbo.Division                      d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))

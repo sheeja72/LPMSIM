@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.60</Version>
-    <AssemblyVersion>1.14.60.0</AssemblyVersion>
-    <FileVersion>1.14.60.0</FileVersion>
-    <InformationalVersion>1.14.60 (SIM Reports: totals footers on all tabs + Excel itemcode upload filters SIM Boxes &amp; Item Details)</InformationalVersion>
+    <Version>1.14.61</Version>
+    <AssemblyVersion>1.14.61.0</AssemblyVersion>
+    <FileVersion>1.14.61.0</FileVersion>
+    <InformationalVersion>1.14.61 (whboxitems reads country-aware everywhere — EOM/SIM/ADM/Reports/ProductionScheduler/Investigator)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

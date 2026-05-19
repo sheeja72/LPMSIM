@@ -52,15 +52,52 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 .ToListAsync(ct);
         }
         // 1.14.55 — Returns the SET of DivCodes that have a WH stock row for the
-        // period (was just a Count). Lets the wh check filter to active divisions
-        // only without re-querying the active set.
+        // period.
+        //
+        // 1.14.61 — Re-sourced from LIVE whboxitems (country-aware via
+        // WhBoxItemsSource.ResolveAsync). The legacy LPM_WHStock manual upload
+        // table is no longer consulted — the actual EOM calculation has been
+        // reading whboxitems live since the SKU Max pipeline moved to
+        // LPM_SimItemSkuMax. The readiness check now matches that reality:
+        // it verifies the warehouse has eligible boxes mapping to each active
+        // division, instead of requiring a one-off LpmWHStocks upload that
+        // wasn't actually used. UAE reads racks.dbo.whboxitems; other
+        // countries read [<DataName>].dbo.WHBoxItemsExport — same per-country
+        // resolution every other live-whboxitems query in the codebase uses.
         async Task<HashSet<int>> LoadWhStockDivCodes()
         {
             await using var db = await dbFactory.CreateDbContextAsync(ct);
-            var codes = await db.LpmWHStocks.AsNoTracking()
-                .Where(w => w.Country == country && w.Year1 == year && w.Month1 == month)
-                .Select(w => w.DivCode).ToListAsync(ct);
-            return new HashSet<int>(codes);
+            var conn = db.Database.GetDbConnection();
+            if (conn.State != System.Data.ConnectionState.Open)
+                await db.Database.OpenConnectionAsync(ct);
+            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            var codes = new HashSet<int>();
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = $@"
+                SELECT DISTINCT id.DivCode
+                  FROM {whSrc} w
+                  INNER JOIN (
+                      SELECT u.itemcode, MIN(d.DivCode) AS DivCode
+                        FROM Datareporting.dbo.upc_subclass    u
+                        INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                        INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                                                  AND d.IsActive = 1
+                       GROUP BY u.itemcode
+                  ) id ON id.itemcode = w.ItemCode
+                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
+                 WHERE pt.PalletCategory = 'ELIGIBLE'
+                   AND ISNULL(w.ShopEligible, '') <> 'E'
+                   AND ( w.LPMDt IS NULL
+                      OR (YEAR(w.LPMDt) < @y OR (YEAR(w.LPMDt) = @y AND MONTH(w.LPMDt) <= @m)) );";
+            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@y", year));
+            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@m", month));
+            cmd.CommandTimeout = 300;
+            using var rdr = await cmd.ExecuteReaderAsync(ct);
+            while (await rdr.ReadAsync(ct))
+            {
+                if (!rdr.IsDBNull(0)) codes.Add(rdr.GetInt32(0));
+            }
+            return codes;
         }
         async Task<List<LpmStoreGrade>> LoadActiveGrades()
         {
@@ -573,8 +610,9 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
             .ToListAsync(ct))
             .ToDictionary(s => (s.DivCode, (int)s.WeekNo), s => s.SplitPct);
 
-        // WH stock per Division comes LIVE from racks.dbo.whboxitems (the same
-        // table SIM Generate consumes), split by pallettype.Season:
+        // WH stock per Division comes LIVE from the country-aware whboxitems
+        // source (the same table SIM Generate consumes), split by
+        // pallettype.Season:
         //
         //   Filters (mirror SIM eligibility):
         //     pt.PalletCategory = 'ELIGIBLE'
@@ -589,12 +627,18 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         // box quantities. Shown on the EOM grid as a Division-level summary;
         // the per-item SKU Max calculation has moved to LPM_SimItemSkuMax,
         // built fresh at SIM Generate time.
+        //
+        // 1.14.61 — Source switched from hardcoded racks.dbo.whboxitems to the
+        // country-aware whSrc (UAE → racks.dbo.whboxitems; others →
+        // [<DataName>].dbo.WHBoxItemsExport) so EOM Generate produces real
+        // numbers for non-UAE countries.
         var whStockBySeason = new Dictionary<int, (long Summer, long Winter)>();
         {
             var conn = db.Database.GetDbConnection();
             await db.Database.OpenConnectionAsync(ct);
+            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 WITH ItemDiv AS (
     SELECT u.itemcode, MIN(d.DivCode) AS DivCode
       FROM Datareporting.dbo.upc_subclass    u
@@ -606,7 +650,7 @@ WITH ItemDiv AS (
 SELECT id.DivCode,
        Season = CASE WHEN ISNULL(pt.Season, '') = 'W' THEN 'W' ELSE 'S' END,
        Qty    = SUM(CAST(ISNULL(w.Qty,0) AS bigint))
-  FROM racks.dbo.whboxitems w
+  FROM {whSrc} w
   INNER JOIN bfldata.dbo.pallettype  pt ON pt.PalletType = w.PalletType
   INNER JOIN ItemDiv id                 ON id.itemcode = w.ItemCode
  WHERE pt.PalletCategory = 'ELIGIBLE'
@@ -638,20 +682,26 @@ SELECT id.DivCode,
             kv => (int)Math.Min(int.MaxValue, kv.Value.Summer + kv.Value.Winter));
 
         // ── LPM Box Qty per Division ────────────────────────────────────
-        // Total qty of LPM-tagged eligible boxes from racks.dbo.whboxitems.
+        // Total qty of LPM-tagged eligible boxes from the country-aware
+        // whboxitems source.
         // Filter:
         //   pt.PalletCategory = 'ELIGIBLE'
         //   w.LPMDt IS NOT NULL          (any date — the box is LPM-flagged)
         //   (NO ShopEligible filter — intentionally broader than WHStock)
         // Surfaces on the EOM Division Summary tab; stored on LPM_EOM_Output
         // alongside the WHStock columns.
+        //
+        // 1.14.61 — Source switched from hardcoded racks.dbo.whboxitems to
+        // country-aware whSrc (UAE → racks.dbo.whboxitems; others →
+        // [<DataName>].dbo.WHBoxItemsExport).
         var lpmBoxQtyByDiv = new Dictionary<int, long>();
         {
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await db.Database.OpenConnectionAsync(ct);
+            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
             using var cmd = conn.CreateCommand();
-            cmd.CommandText = @"
+            cmd.CommandText = $@"
 WITH ItemDiv AS (
     SELECT u.itemcode, MIN(d.DivCode) AS DivCode
       FROM Datareporting.dbo.upc_subclass    u
@@ -662,7 +712,7 @@ WITH ItemDiv AS (
 )
 SELECT id.DivCode,
        Qty = SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
-  FROM racks.dbo.whboxitems w
+  FROM {whSrc} w
   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
   INNER JOIN ItemDiv id               ON id.itemcode    = w.ItemCode
  WHERE pt.PalletCategory = 'ELIGIBLE'

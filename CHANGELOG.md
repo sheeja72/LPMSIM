@@ -23,6 +23,45 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.61 — whboxitems reads country-aware everywhere (and WH Stock readiness no longer requires the legacy LPM_WHStock upload) (2026-05-19)
+
+### What changed
+
+Every `racks.dbo.whboxitems` reference in code that drove SQL queries has been replaced with the country-aware `WhBoxItemsSource.ResolveAsync` helper (UAE → `racks.dbo.whboxitems`; other countries → `[<DataName>].dbo.WHBoxItemsExport`). Doc-comments and the `WhBoxItemsSource.UaeSource` constant kept as-is.
+
+Before: every code path that scanned whboxitems implicitly read from UAE's `racks.dbo.whboxitems`, so non-UAE batches got silently-zero or wrong results from BoxQty / BoxCapacity / WH Stock lookups.
+
+After: every such query routes to the right country's source.
+
+### Files changed (7 service files, ~28 SQL sites)
+| File | What |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | **Readiness check rewritten** — `LoadWhStockDivCodes` no longer queries the legacy `LPM_WHStock` upload table; instead it queries the country-aware whboxitems source for "divisions with eligible stock for the run period". The actual `whStockBySeason` and `lpmBoxQtyByDiv` queries in `CalculateAsync` likewise switched to `{whSrc}`. |
+| `src/LpmSim.Data/LpmSim/LpmAdmService.cs` | Both ADM-generate queries (eligible-box scan + per-box division lookup) use `{whSrc}`. |
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | Post-SIM SOH-refresh union (`BatchItems` CTE) + diagnostic `boxesWithViableLines` lookup country-aware. |
+| `src/LpmSim.Data/LpmSim/LpmSimInvestigator.cs` | `BoxUtilisationAsync` looks up the batch's country first, then resolves `whSrc` for the BoxQty subquery. |
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | New `ResolveWhSrcAsync` helper. Every report method (`GetEomSummaryAsync`, `GetStoreSummaryAsync`, `GetDivisionSummaryAsync`, `GetBoxDetailsAsync`, `GetBatchAggregatesAsync`, `GetSourceWarehouseBreakdownAsync`, `GetItemDetailsAsync`, `GetAllocTraceAsync`, `RunCustomReportAsync`) resolves whSrc from the batch's country. `GetDistinctWarehousesAsync` + `GetDistinctLpmMonthsAsync` gained an optional `country` parameter (defaults to `"UAE"` so existing callers stay byte-for-byte identical until they pass a country). |
+| `src/LpmSim.Data/LpmSim/ProductionScheduler.cs` | All four hardcoded sites (eligible-box scan in `GenerateAsync`, `GetDaySummaryAsync`'s `BoxCap` CTE, `GetBoxDetailAsync`'s `BoxCap` CTE, `GetDivisionSummaryAsync`'s `BoxUsab` CTE) now use country-aware `{whSrc}`. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.60 → 1.14.61. |
+
+### Why the WH Stock readiness card change matters
+
+Before 1.14.61, the readiness check on EOM Generate gated on rows in `dbo.LPM_WHStock` for the (Country, Year, Month) period. But the actual EOM calculation hasn't read from that table since the SKU Max pipeline moved to `LPM_SimItemSkuMax` — the table was a no-op gate that required a useless upload to make the card go green. The planner saw "0 of 20 divisions have stock" and was blocked from running EOM despite the warehouse actually having stock.
+
+The new check queries the country-aware whboxitems source directly: "how many active divisions have at least one eligible box (PalletCategory = 'ELIGIBLE', ShopEligible <> 'E', LPMDt matches the run period filter) mapping to them?" That's a true reflection of whether EOM Generate can produce meaningful results.
+
+### Risk
+**Medium.** Bulk refactor across 7 files, ~28 SQL sites. The pattern is mechanical and the helper functions (`WhBoxItemsSource.ResolveAsync`, `BuildPalletCategoryClause`, `BuildWarehouseClause`) are the same ones the already-country-aware paths use. Spot-check after deploy: pick one report tab per UAE batch and one tab per a non-UAE batch (if any exist), confirm numbers look sane. UAE batches should produce identical numbers to before (resolver returns the same `racks.dbo.whboxitems` for UAE).
+
+### No DB schema change. No migration.
+
+### Verification after deploy
+1. Open **EOM Generate** for UAE — the WH Stock readiness card should flip to green: "N of N divisions have stock for this period" (counted from live whboxitems via the country-aware path).
+2. Open EOM Generate / SIM Reports / Production Schedule for a non-UAE country — every WH-stock-derived column should produce real numbers instead of silent zeros.
+3. **Outstanding migration 055** unrelated to this — still pending; apply when convenient so retired Div 420 stops appearing in division lists.
+
+---
+
 ## 1.14.60 — LPM SIM Reports: totals footers + "Filter by Itemcode list" Excel upload (2026-05-19)
 
 ### Two changes

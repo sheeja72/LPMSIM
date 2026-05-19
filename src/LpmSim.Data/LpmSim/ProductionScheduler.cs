@@ -1,5 +1,6 @@
 using LpmSim.Core;
 using LpmSim.Core.Entities;
+using LpmSim.Data.Warehouse;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;   // GetDbTransaction extension
@@ -189,6 +190,10 @@ public class ProductionScheduler(
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             await db.Database.OpenConnectionAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source. UAE → racks.dbo.whboxitems;
+        // other countries → [<DataName>].dbo.WHBoxItemsExport. Used by the
+        // BoxCapacity query below.
+        var whSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, batch.Country, ct);
 
         // ── 1. Read all output rows for the batch — one query, in-memory math ──
         // LPMDt is included so we can prioritise LPM-tagged boxes ahead of
@@ -280,12 +285,12 @@ SELECT s.Id, s.BoxNo, s.LPMDt, s.Itemcode, s.Qty, s.StoreID, ISNULL(id.DivCode, 
             {
                 // MAX(Warehouse) is safe because all whboxitems rows for a
                 // given BoxNo share the same warehouse value.
-                cmd.CommandText = @"
+                cmd.CommandText = $@"
                     SELECT t.BoxNo,
                            ISNULL(SUM(CAST(w.Qty AS bigint)), 0) AS Capacity,
                            MAX(w.Warehouse)                       AS Warehouse
                       FROM #ps_boxes t
-                      LEFT JOIN racks.dbo.whboxitems w ON w.BoxNo = t.BoxNo
+                      LEFT JOIN {whSrc} w ON w.BoxNo = t.BoxNo
                      GROUP BY t.BoxNo;";
                 cmd.CommandTimeout = 300;
                 using var rdr = await cmd.ExecuteReaderAsync(ct);
@@ -623,9 +628,15 @@ SELECT s.Id, s.BoxNo, s.LPMDt, s.Itemcode, s.Qty, s.StoreID, ISNULL(id.DivCode, 
     public async Task<List<ProductionDayRow>> GetDaySummaryAsync(long batchNo, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source.
+        var batchCountry = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             await db.Database.OpenConnectionAsync(ct);
+        var whSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, batchCountry, ct);
 
         var rows = new List<ProductionDayRow>();
         using var cmd = conn.CreateCommand();
@@ -634,7 +645,7 @@ SELECT s.Id, s.BoxNo, s.LPMDt, s.Itemcode, s.Qty, s.StoreID, ISNULL(id.DivCode, 
         //   directly from raw rows (NOT summed from per-box counts — that was
         //   a bug that returned the per-box sum, e.g. 22,825 for Day 1
         //   instead of the actual ~150 stores).
-        cmd.CommandText = @"
+        cmd.CommandText = $@"
 -- Reporting query — uses READ UNCOMMITTED so a concurrent SIM Generate /
 -- Production Schedule run that holds locks on LPMSIM_Output doesn't
 -- deadlock the dashboard load. Reports may show in-flight uncommitted
@@ -652,7 +663,7 @@ WITH BoxAgg AS (
 BoxCap AS (
     SELECT b.BoxNo, ISNULL(SUM(CAST(w.Qty AS bigint)), 0) AS Capacity
       FROM (SELECT DISTINCT BoxNo FROM BoxAgg) b
-      LEFT JOIN racks.dbo.whboxitems w ON w.BoxNo = b.BoxNo
+      LEFT JOIN {whSrc} w ON w.BoxNo = b.BoxNo
      GROUP BY b.BoxNo
 ),
 DayStores AS (
@@ -702,9 +713,15 @@ SELECT main.[Day],
     public async Task<List<ProductionBoxRow>> GetBoxDetailAsync(long batchNo, CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source.
+        var batchCountry = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.LPMBatchNo == batchNo)
+            .Select(b => b.Country)
+            .FirstOrDefaultAsync(ct) ?? "UAE";
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             await db.Database.OpenConnectionAsync(ct);
+        var whSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, batchCountry, ct);
 
         var schedule = await db.LpmSimProductionSchedules.AsNoTracking()
             .FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
@@ -712,7 +729,7 @@ SELECT main.[Day],
 
         var rows = new List<ProductionBoxRow>();
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
+        cmd.CommandText = $@"
 -- Reporting query — READ UNCOMMITTED to avoid deadlocking with concurrent
 -- SIM Generate / Production Schedule runs (see GetDaySummaryAsync note).
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -731,7 +748,7 @@ WITH BoxAgg AS (
 BoxCap AS (
     SELECT b.BoxNo, ISNULL(SUM(CAST(w.Qty AS bigint)), 0) AS Capacity
       FROM (SELECT DISTINCT BoxNo FROM BoxAgg) b
-      LEFT JOIN racks.dbo.whboxitems w ON w.BoxNo = b.BoxNo
+      LEFT JOIN {whSrc} w ON w.BoxNo = b.BoxNo
      GROUP BY b.BoxNo
 )
 SELECT ba.BoxNo,
@@ -808,6 +825,8 @@ SELECT ba.BoxNo,
         var conn = db.Database.GetDbConnection();
         if (conn.State != System.Data.ConnectionState.Open)
             await db.Database.OpenConnectionAsync(ct);
+        // 1.14.61 — Country-aware whboxitems source.
+        var whSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, batch.Country, ct);
 
         var rows = new List<ProductionDivisionRow>();
         using var cmd = conn.CreateCommand();
@@ -822,7 +841,7 @@ SELECT ba.BoxNo,
         // EomDiv  = Σ Merch Need (Week) and (Day) from LPM_EOM_Output for the
         //   batch's (Country, Year, Month). EOM totals are independent of
         //   the Day/Status filters — they always show the period plan.
-        cmd.CommandText = @"
+        cmd.CommandText = $@"
 -- Reporting query — READ UNCOMMITTED to avoid deadlocking with concurrent
 -- SIM Generate / Production Schedule runs (see GetDaySummaryAsync note).
 SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
@@ -855,7 +874,7 @@ BoxUsab AS (
     SELECT s.BoxNo,
            BoxQty   = SUM(CAST(s.Qty AS bigint)),
            Capacity = ISNULL((SELECT SUM(CAST(w.Qty AS bigint))
-                                FROM racks.dbo.whboxitems w
+                                FROM {whSrc} w
                                WHERE w.BoxNo = s.BoxNo), 0)
       FROM dbo.LPMSIM_Output s
      WHERE s.LPMBatchNo = @batchNo

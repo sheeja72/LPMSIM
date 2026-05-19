@@ -1362,8 +1362,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // SKU Max or the next SIM run.
         try
         {
+            // 1.14.61 — Country-aware whboxitems source for the unallocated-box
+            // half of the BatchItems union. The allocated half (LPMSIM_Output)
+            // is country-agnostic since it's just rows for this batch.
+            var refreshWhSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, req.Country, ct);
             using var refresh = conn.CreateCommand();
-            refresh.CommandText = @"
+            refresh.CommandText = $@"
                 WITH BatchItems AS (
                     -- Items the allocator successfully placed
                     SELECT DISTINCT Itemcode
@@ -1374,7 +1378,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     -- investigating an UNKNOWN/CAP diagnostic also gets fresh
                     -- ToFillQty for those items, not just allocated ones).
                     SELECT DISTINCT w.itemcode
-                      FROM racks.dbo.whboxitems w
+                      FROM {refreshWhSrc} w
                       INNER JOIN dbo.LPMSIM_UnallocatedDiagnostic ud
                               ON ud.BoxNo = w.BoxNo
                      WHERE ud.LPMBatchNo = @batchNo
@@ -4603,11 +4607,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 await diagBulk.WriteToServerAsync(dtBoxes, ct);
             }
 
+            // 1.14.61 — Country-aware whboxitems source.
+            var diagWhSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
             using (var q = conn.CreateCommand())
             {
-                q.CommandText = @"
+                q.CommandText = $@"
                     SELECT DISTINCT w.BoxNo
-                      FROM racks.dbo.whboxitems w
+                      FROM {diagWhSrc} w
                       INNER JOIN #DiagBoxes b ON b.BoxNo = w.BoxNo
                      WHERE EXISTS (
                           SELECT 1 FROM dbo.LPM_SimItemSkuMax sm
