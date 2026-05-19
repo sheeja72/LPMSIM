@@ -4205,12 +4205,33 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     private static async Task<Dictionary<(string Store, string Item), int>> LoadItemSkuMaxAsync(
         SqlConnection conn, string country, int year, int month, CancellationToken ct)
     {
+        // 1.14.58 — Filter SKUMax > 0 at the SQL level. The full LPM_SimItemSkuMax
+        // snapshot is ~13.8M rows for UAE (~150 stores × ~90K items), and the
+        // typical row distribution is dominated by SKUMax = 0 (items with no
+        // matching rule for the store's volume group / WH stock range). Loading
+        // all 13.8M into a Dictionary<(string, string), int> needed roughly
+        // 2 GB steady-state and up to 4 GB peak during Resize() — which OOM'd
+        // the Azure App Service process (~1.75 GB available) on the first run
+        // after BuildSkuMax stopped silently truncating the staging table.
+        //
+        // The filter is semantically a no-op: every allocator read path
+        // (Phase 1a/1b/2a/2b inside this file) does
+        //     skuMaxByStoreItem.GetValueOrDefault((store, item), 0)
+        // and gates allocation on `> 0`, so a missing key and a key mapping
+        // to 0 are treated identically. The downstream balance snapshot
+        // (LPMSIM_StoreItemBalance) only iterates (Store, Item) pairs that
+        // actually received allocation in some phase — those by definition
+        // had SKUMax > 0 — so the snapshot's "row missing → write NULL" path
+        // is never reached for filtered-out rows.
+        //
+        // Expected post-filter cardinality for UAE: ~2-3M entries, ~500 MB.
         var dict = new Dictionary<(string, string), int>(StoreItemComparer.Instance);
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
             SELECT StoreID, ItemCode, SKUMax
               FROM dbo.LPM_SimItemSkuMax
-             WHERE Country = @c AND Year1 = @y AND Month1 = @m;";
+             WHERE Country = @c AND Year1 = @y AND Month1 = @m
+               AND SKUMax > 0;";
         cmd.Parameters.Add(new SqlParameter("@c", country));
         cmd.Parameters.Add(new SqlParameter("@y", year));
         cmd.Parameters.Add(new SqlParameter("@m", month));

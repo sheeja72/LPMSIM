@@ -23,6 +23,61 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.58 — HOTFIX: SIM Generate OOM — LoadItemSkuMaxAsync filters SKUMax > 0 (2026-05-19)
+
+### The bug
+
+First SIM Generate run after Build SKU Max was fully populated (post-mig 052) crashed with:
+
+```
+[0] OutOfMemoryException: Exception of type 'System.OutOfMemoryException' was thrown.
+   at System.Collections.Generic.Dictionary`2.Resize(Int32 newSize, Boolean forceNewHashCodes)
+   at LpmSim.Data.LpmSim.LpmSimGenerator.LoadItemSkuMaxAsync(...)
+```
+
+after ~1m 30s.
+
+### Root cause
+
+`LoadItemSkuMaxAsync` loads the **entire** per-(StoreID, ItemCode) SKU Max snapshot into an in-memory `Dictionary<(string, string), int>` at the start of every SIM run. For UAE that's ~13.8M rows (~150 active stores × ~90K items). At roughly **160 bytes per entry** (StoreID string + ItemCode string + ValueTuple + int + Dictionary header), the dict needs **~2.2 GB steady-state** and **~4.4 GB peak during `Resize()`** when the backing array doubles. Azure App Service `bfl-lpmsim` has ~1.75 GB of process memory — `Resize()` never completes, OOM thrown.
+
+The threshold was crossed because pre-1.14.43, `BuildSkuMax` silently truncated parts of the staging table when the `#NewSnap` temp table got dropped mid-session. After migration 052 (persistent staging table) the snapshot is now complete, so the row count finally reflects the true universe — and the in-memory cache strategy doesn't scale.
+
+### The fix
+
+Filter `SKUMax > 0` at the SQL level. The typical row distribution is dominated by `SKUMax = 0` (items with no matching rule for the store's volume group / WH stock range) — that's roughly 80% of the 13.8M rows. After the filter, the dictionary is expected to hold ~2–3M entries, ~500 MB, which fits comfortably in the App Service tier.
+
+```sql
+-- Before:
+WHERE Country = @c AND Year1 = @y AND Month1 = @m
+
+-- After:
+WHERE Country = @c AND Year1 = @y AND Month1 = @m
+  AND SKUMax > 0
+```
+
+### Why this is semantically a no-op
+
+All five read sites for the dictionary already treat missing keys and SKUMax=0 keys identically:
+- Lines 1268 / 1552 / 1840 / 1922 use `GetValueOrDefault((store, item), 0)` and gate allocation on `> 0`. Missing → returns 0 → fails the gate. Same outcome as a key mapping to 0.
+- Line 4737 (`BulkInsertStoreItemBalancesAsync` writing `LPMSIM_StoreItemBalance`) iterates only (Store, Item) pairs that received allocation in some phase — those by definition had `SKUMax > 0`, so the SKUMax=0 vs missing distinction never matters for the rows written.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | `LoadItemSkuMaxAsync`: added `AND SKUMax > 0` to the SELECT. Block comment explains the OOM root cause + the semantic-equivalence argument. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.57 → 1.14.58. |
+
+### Risk
+**Low.** Allocation behaviour identical (verified all 5 read sites). Memory and load time both drop. No schema change, no migration.
+
+### Verification after deploy
+1. Re-run SIM Generate for UAE.
+2. Should complete in ~30–60s (1.14.46 perf path) without OOM.
+3. Allocation totals should be identical to a successful pre-OOM run, modulo any data changes since.
+
+---
+
 ## 1.14.57 — EOM + SIM Generate: Generate / Approve / Delete restricted to Admin (2026-05-18)
 
 ### What changed

@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.57</Version>
-    <AssemblyVersion>1.14.57.0</AssemblyVersion>
-    <FileVersion>1.14.57.0</FileVersion>
-    <InformationalVersion>1.14.57 (EOM + SIM Generate: Generate / Approve / Delete restricted to Admin)</InformationalVersion>
+    <Version>1.14.58</Version>
+    <AssemblyVersion>1.14.58.0</AssemblyVersion>
+    <FileVersion>1.14.58.0</FileVersion>
+    <InformationalVersion>1.14.58 (SIM Generate OOM fix: LoadItemSkuMaxAsync filters SKUMax > 0)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
