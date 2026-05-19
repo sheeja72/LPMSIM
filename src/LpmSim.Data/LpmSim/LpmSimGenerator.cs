@@ -950,7 +950,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // for speed) — see GetLastSkuMaxBuildAsync / BuildSkuMaxAsync. The
         // staleness gate at the top of GenerateAsync ensures we never reach
         // here without a fresh snapshot.
-        var skuMaxByStoreItem = await LoadItemSkuMaxAsync((SqlConnection)conn, req.Country, req.RunYear, req.RunMonth, ct);
+        var skuMaxByStoreItem = await LoadItemSkuMaxAsync((SqlConnection)conn, req, ct);
 
         // ---------------- Allocation state ----------------
         var batch = new LpmSimBatch
@@ -4203,39 +4203,161 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     /// (Store, Item) is single-valued in the engine's bookkeeping).
     /// </summary>
     private static async Task<Dictionary<(string Store, string Item), int>> LoadItemSkuMaxAsync(
-        SqlConnection conn, string country, int year, int month, CancellationToken ct)
+        SqlConnection conn, LpmSimGenerateRequest req, CancellationToken ct)
     {
         // 1.14.58 — Filter SKUMax > 0 at the SQL level. The full LPM_SimItemSkuMax
         // snapshot is ~13.8M rows for UAE (~150 stores × ~90K items), and the
-        // typical row distribution is dominated by SKUMax = 0 (items with no
-        // matching rule for the store's volume group / WH stock range). Loading
-        // all 13.8M into a Dictionary<(string, string), int> needed roughly
-        // 2 GB steady-state and up to 4 GB peak during Resize() — which OOM'd
-        // the Azure App Service process (~1.75 GB available) on the first run
-        // after BuildSkuMax stopped silently truncating the staging table.
+        // typical row distribution is dominated by SKUMax = 0. Loading all 13.8M
+        // into a Dictionary needed roughly 2 GB steady / 4 GB peak during
+        // Resize() — which OOM'd the Azure App Service process (~1.75 GB
+        // available) on the first run after BuildSkuMax stopped silently
+        // truncating the staging table.
         //
-        // The filter is semantically a no-op: every allocator read path
-        // (Phase 1a/1b/2a/2b inside this file) does
-        //     skuMaxByStoreItem.GetValueOrDefault((store, item), 0)
-        // and gates allocation on `> 0`, so a missing key and a key mapping
-        // to 0 are treated identically. The downstream balance snapshot
-        // (LPMSIM_StoreItemBalance) only iterates (Store, Item) pairs that
-        // actually received allocation in some phase — those by definition
-        // had SKUMax > 0 — so the snapshot's "row missing → write NULL" path
-        // is never reached for filtered-out rows.
+        // 1.14.59 — Also restrict to items that appear in at least one
+        // eligible box. "Eligible" mirrors every filter the allocator's
+        // ReadBoxesAsync applies:
         //
-        // Expected post-filter cardinality for UAE: ~2-3M entries, ~500 MB.
+        //   • Box Source       (LPM / Non-LPM / Both)   ← req.Sources
+        //   • Season           (Summer / Winter / Both) ← req.Seasons (pt.Season)
+        //   • LPM Months       (specific months)        ← req.LpmMonths
+        //   • Pallet Categories (e.g. ELIGIBLE)         ← req.PalletCategories
+        //   • Warehouses       (e.g. JAFZA, TECHNO)     ← req.Warehouses
+        //   • Purchased / Non-Purchased (ShopEligible)  ← req.IncludePurchasedBoxes
+        //
+        // Any item the allocator could not possibly allocate (because every
+        // box containing it is filtered out at the box stage) is now also
+        // dropped from the SKUMax dictionary. The filter is built as a
+        // CTE-resolved DISTINCT itemcode set, INNER-JOINed to LPM_SimItemSkuMax.
+        //
+        // Filtering is semantically a no-op against the allocator's contract:
+        // every read path uses GetValueOrDefault((store, item), 0) and gates
+        // on `> 0`, so a missing key and a key mapping to 0 are treated
+        // identically. Items dropped by the EligibleItems CTE would have
+        // been skipped at the box-loop level anyway. The LPMSIM_StoreItemBalance
+        // write path only iterates (Store, Item) pairs that actually received
+        // allocation in some phase — those by definition came from an eligible
+        // box AND had SKUMax > 0 — so the snapshot is never affected.
+        //
+        // Expected post-filter cardinality for UAE:
+        //   • All sources, no filters (legacy):  ~13.8M entries, ~2.2 GB → OOM
+        //   • SKUMax > 0 alone (1.14.58):        ~2–3M entries, ~500 MB
+        //   • + Eligible box filter (1.14.59):
+        //       LPM-only / ELIGIBLE / Summer:    ~0.4–0.8M entries, ~100–200 MB
+        //       Non-LPM-only / ELIGIBLE / Summer:~0.8–1.2M entries, ~200–300 MB
+        //       Both / ELIGIBLE / Summer:        ~1.2–2.0M entries, ~250–450 MB
+
+        var country = req.Country;
+        var year    = req.RunYear;
+        var month   = req.RunMonth;
+
+        bool lpmIncluded    = req.Sources.HasFlag(LpmSimSourceFlags.LpmBoxes);
+        bool nonLpmIncluded = req.Sources.HasFlag(LpmSimSourceFlags.NonLpmBoxes);
+
         var dict = new Dictionary<(string, string), int>(StoreItemComparer.Instance);
+
+        // Defensive — no sources picked, nothing the allocator can do; return
+        // an empty dict rather than a stale "all items" cache.
+        if (!lpmIncluded && !nonLpmIncluded) return dict;
+
+        // Resolve country-aware whboxitems source — same helper the rest of
+        // the file uses (UAE → racks.dbo.whboxitems; others → [<DataName>].dbo.WHBoxItemsExport).
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+
+        // Build the same clauses ReadBoxesAsync builds. Param names are local
+        // to this command so no collision risk with other queries.
+        var seasonClause = req.Seasons switch
+        {
+            LpmSimSeasonFlags.Summer => "AND ISNULL(pt.Season, '') <> 'W'",
+            LpmSimSeasonFlags.Winter => "AND ISNULL(pt.Season, '') = 'W'",
+            _                        => "",     // Both / None → no season filter
+        };
+
+        var (palletClause, palletParams) = BuildPalletCategoryClause(req.PalletCategories);
+        var (whClause,     whParams)     = BuildWarehouseClause(req.Warehouses);
+        var shopEligibleClause = req.IncludePurchasedBoxes
+            ? ""
+            : "AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')";
+
+        var lpmMonthParams = new List<SqlParameter>();
+
+        // Build the LPM-source half of the date clause (used when LPM is in
+        // scope). Mirrors ReadBoxesAsync exactly.
+        string BuildLpmHalf()
+        {
+            if (req.LpmMonths is { Count: > 0 })
+            {
+                var ors = new List<string>();
+                for (int i = 0; i < req.LpmMonths.Count; i++)
+                {
+                    var ms = new DateTime(req.LpmMonths[i].Year, req.LpmMonths[i].Month, 1);
+                    var me = ms.AddMonths(1);
+                    ors.Add($"(w.LPMDt >= @lm{i}_s AND w.LPMDt < @lm{i}_e)");
+                    lpmMonthParams.Add(new SqlParameter($"@lm{i}_s", ms));
+                    lpmMonthParams.Add(new SqlParameter($"@lm{i}_e", me));
+                }
+                return "(w.LPMDt IS NOT NULL AND (" + string.Join(" OR ", ors) + "))";
+            }
+            return "(w.LPMDt IS NOT NULL AND w.LPMDt < @endExclusive)";
+        }
+
+        string lpmDtClause;
+        if (lpmIncluded && nonLpmIncluded)
+        {
+            // Both — LPM matches month filter OR Non-LPM (which has no
+            // month filter because LPMDt IS NULL by definition).
+            lpmDtClause = $"AND ({BuildLpmHalf()} OR w.LPMDt IS NULL)";
+        }
+        else if (lpmIncluded)
+        {
+            lpmDtClause = $"AND {BuildLpmHalf()}";
+        }
+        else // nonLpmIncluded only
+        {
+            lpmDtClause = "AND w.LPMDt IS NULL";
+        }
+
+        // Only JOIN to pallettype when the Season filter actually uses it.
+        // For Both seasons we save a multi-million-row JOIN entirely.
+        var palletTypeJoin = string.IsNullOrEmpty(seasonClause)
+            ? ""
+            : "INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType";
+
+        // The CTE narrows to DISTINCT eligible itemcodes; the outer SELECT
+        // then INNER-JOINs LPM_SimItemSkuMax for the country + period and
+        // returns only rows whose item passed eligibility AND has SKUMax > 0.
+        var sql = $@"
+            ;WITH EligibleItems AS (
+                SELECT DISTINCT w.ItemCode
+                  FROM {whSrc} w
+                  {palletTypeJoin}
+                 WHERE w.ItemCode IS NOT NULL AND w.ItemCode <> ''
+                   {palletClause}
+                   {shopEligibleClause}
+                   {seasonClause}
+                   {whClause}
+                   {lpmDtClause}
+            )
+            SELECT sm.StoreID, sm.ItemCode, sm.SKUMax
+              FROM dbo.LPM_SimItemSkuMax sm
+              INNER JOIN EligibleItems ei ON ei.ItemCode = sm.ItemCode
+             WHERE sm.Country = @c AND sm.Year1 = @y AND sm.Month1 = @m
+               AND sm.SKUMax > 0;";
+
         using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-            SELECT StoreID, ItemCode, SKUMax
-              FROM dbo.LPM_SimItemSkuMax
-             WHERE Country = @c AND Year1 = @y AND Month1 = @m
-               AND SKUMax > 0;";
+        cmd.CommandText = sql;
         cmd.Parameters.Add(new SqlParameter("@c", country));
         cmd.Parameters.Add(new SqlParameter("@y", year));
         cmd.Parameters.Add(new SqlParameter("@m", month));
+        // @endExclusive is referenced only when LpmMonths is empty AND LPM is
+        // in scope. Adding it unconditionally is fine — SQL Server ignores
+        // unused params. Same convention as ReadBoxesAsync.
+        cmd.Parameters.Add(new SqlParameter("@endExclusive",
+            new DateTime(year, month, 1).AddMonths(1)));
+        foreach (var p in palletParams)    cmd.Parameters.Add(p);
+        foreach (var p in whParams)        cmd.Parameters.Add(p);
+        foreach (var p in lpmMonthParams)  cmd.Parameters.Add(p);
         cmd.CommandTimeout = 600;
+
         using var rdr = await cmd.ExecuteReaderAsync(ct);
         while (await rdr.ReadAsync(ct))
         {

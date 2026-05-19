@@ -23,6 +23,59 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.59 — SIM Generate: LoadItemSkuMaxAsync mirrors the full box-eligibility filter (2026-05-19)
+
+### What changed
+
+`LoadItemSkuMaxAsync` now narrows the in-memory SKUMax dictionary to **only items that survive every box-eligibility filter the allocator's `ReadBoxesAsync` applies**, layered on top of the 1.14.58 `SKUMax > 0` filter:
+
+| Filter | Mirrored from `req.*` |
+|---|---|
+| **Box Source** (LPM / Non-LPM / Both) | `req.Sources` |
+| **Season** (Summer / Winter / Both, using `pt.Season`) | `req.Seasons` |
+| **LPM Months** (specific months) | `req.LpmMonths` |
+| **Pallet Categories** (e.g. ELIGIBLE) | `req.PalletCategories` |
+| **Warehouses** (e.g. JAFZA, TECHNO) | `req.Warehouses` |
+| **Purchased / Non-Purchased** (ShopEligible filter) | `req.IncludePurchasedBoxes` |
+
+Implementation: a CTE that does `SELECT DISTINCT w.ItemCode FROM <country's whboxitems source> w WHERE <all of the above>`, then `INNER JOIN`s `LPM_SimItemSkuMax` against it. The country-aware source table is resolved via the existing `WhBoxItemsSource.ResolveAsync` helper, and the same `BuildPalletCategoryClause` / `BuildWarehouseClause` helpers `ReadBoxesAsync` uses get reused.
+
+### Why this is safe
+
+The allocator's box loop applies all six filters when picking eligible boxes — an item that fails any of them can never enter the allocation phase, so its SKUMax row was never read. The dictionary contract holds:
+
+- The four `GetValueOrDefault((store, item), 0)` gate sites in Phase 1a/1b/2a/2b treat a missing key and a key mapping to 0 identically — `> 0` is false either way.
+- The `LPMSIM_StoreItemBalance` write path only iterates (Store, Item) pairs that actually received allocation in some phase — those by definition came from an eligible box AND had SKUMax > 0, so the snapshot's "row missing → write NULL" path is unreachable for filtered-out rows.
+
+### Memory footprint estimates (UAE, ~13.8M raw rows)
+
+| Stage | Dictionary entries | Approx RAM |
+|---|---|---|
+| Pre-1.14.58 (all rows) | ~13.8M | ~2.2 GB steady / ~4.4 GB peak → **OOM** |
+| 1.14.58 (SKUMax > 0) | ~2–3M | ~500 MB |
+| 1.14.59 + LPM-only / ELIGIBLE / Summer | ~0.4–0.8M | ~100–200 MB |
+| 1.14.59 + Non-LPM-only / ELIGIBLE / Summer | ~0.8–1.2M | ~200–300 MB |
+| 1.14.59 + Both / ELIGIBLE / Summer | ~1.2–2.0M | ~250–450 MB |
+
+Narrower filter selections (e.g. specific LPM months + specific warehouses) shrink further.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | `LoadItemSkuMaxAsync` signature simplified to `(SqlConnection conn, LpmSimGenerateRequest req, CancellationToken ct)` — now takes the whole request. SQL rewritten with an `EligibleItems` CTE that mirrors every filter `ReadBoxesAsync` applies (Season → `pt.Season`, Box Source + LPM Months → `w.LPMDt` clause, Pallet Categories → `w.PalletCategory` via `BuildPalletCategoryClause`, Warehouses → `w.Warehouse` via `BuildWarehouseClause`, Purchased / Non-Purchased → `w.ShopEligible`). The `pallettype` JOIN is only emitted when the Season filter actually uses it. Caller in `GenerateAsync` passes `req`. Block comment expanded to explain every filter + the safety argument. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.58 → 1.14.59. |
+
+### Risk
+**Low–medium.** The filter mirrors `ReadBoxesAsync` exactly — if there's a divergence bug, it would silently drop items that should be allocated (so allocation totals would shrink for those items). The semantic-equivalence argument relies on the box loop being the only consumer of the dictionary, which is true for the current allocator. No schema change, no migration. The Both case + no filter selections produces the same effective universe as 1.14.58, just routed through a CTE.
+
+### Verification after deploy
+1. Re-run SIM Generate for UAE with the failing-run filter set (LPM / Summer / ELIGIBLE / Wk 1 / All months / Box% override 40).
+2. Should finish without OOM in ~30–60 sec (the 1.14.46 perf target).
+3. Spot-check: pick an item that was allocated in the most recent successful pre-OOM run. Its allocation in the new run should be identical (within the data drift since the last successful run).
+4. If allocation drops unexpectedly across the batch, the `EligibleItems` CTE filter list is too narrow vs `ReadBoxesAsync` — open an issue.
+
+---
+
 ## 1.14.58 — HOTFIX: SIM Generate OOM — LoadItemSkuMaxAsync filters SKUMax > 0 (2026-05-19)
 
 ### The bug
