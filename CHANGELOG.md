@@ -23,6 +23,36 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.64 — SIM Generate: Warehouses + LPM Months dropdowns country-aware (2026-05-19)
+
+### The bug
+
+After 1.14.61 made the service-layer queries country-aware, the SIM Generate page's **Warehouses** and **LPM Months** multi-selects still showed UAE values regardless of which country the planner picked. Visible on the SIM Generate filter strip: switching to KSA still listed `3PLF&B / BLACKBOX / JAFZA` (UAE warehouses) instead of KSA's warehouses from `[<DataName>].dbo.WHBoxItemsExport`.
+
+Root cause: `LpmSimGenerate.razor` called `Reports.GetDistinctWarehousesAsync()` and `Reports.GetDistinctLpmMonthsAsync()` **once at page initialisation** without a country argument. The service methods got a `country` parameter in 1.14.61 but defaulted to `"UAE"` — so the calls silently kept returning UAE values.
+
+### The fix
+
+1. **`OnInitializedAsync`** now calls a new `ReloadCountryFiltersAsync()` helper for the initial load — passes `_country` to both dropdown sources.
+2. **Country `ValueChanged` handler** calls `ReloadCountryFiltersAsync()` whenever the planner switches country, so the dropdowns refresh immediately.
+3. **Prior selections cleared** when they no longer exist in the new country's source — a planner who had `JAFZA` selected on UAE doesn't carry that into a KSA run; the multi-selects re-filter to whatever's still valid.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | New `ReloadCountryFiltersAsync` helper. `OnInitializedAsync` uses it for the initial load. Country dropdown `ValueChanged` now calls it after `LoadStoresForCountryAsync` and before `CheckAsync`. Stale `_selectedWarehouses` / `_selectedLpmMonths` items are filtered out so the multi-selects only carry valid values into the new country's run. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.63 → 1.14.64. |
+
+### Risk
+**Very low.** Pure UI rewiring; uses the country-aware service methods 1.14.61 already shipped. UAE behaviour identical (resolver returns `racks.dbo.whboxitems` for UAE).
+
+### Verification after deploy
+1. Open SIM Generate → confirm Warehouses dropdown shows UAE warehouses by default.
+2. Switch country to **KSA** → Warehouses dropdown should refresh to show KSA's warehouses (from `[<DataName>].dbo.WHBoxItemsExport`). LPM Months dropdown should likewise show KSA's distinct LPM months.
+3. Pre-selected warehouses from the previous country drop automatically (no UAE warehouse name carried into a KSA run).
+
+---
+
 ## 1.14.63 — HOTFIX: EOM Generate empty-page on country-specific failures (2026-05-19)
 
 ### The bug

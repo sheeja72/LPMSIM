@@ -302,7 +302,7 @@
            the grid wraps the rest naturally. *@
         <MudItem xs="6" sm="4" md="2">
             <MudSelect T="string" Label="Country" Value="_country"
-                       ValueChanged="async v => { _country = v ?? string.Empty; _viewBatchNo = null; await LoadStoresForCountryAsync(); await CheckAsync(); }"
+                       ValueChanged="async v => { _country = v ?? string.Empty; _viewBatchNo = null; await LoadStoresForCountryAsync(); await ReloadCountryFiltersAsync(); await CheckAsync(); }"
                        Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
                 @foreach (var c in _countries)
                 {
@@ -3324,21 +3324,42 @@
             .ToListAsync();
         if (!_countries.Contains(_country, StringComparer.OrdinalIgnoreCase))
             _country = _countries.FirstOrDefault() ?? "";
-        // Distinct warehouses (from racks.dbo.whboxitems) for the multi-select.
-        try { _allWarehouses = await Reports.GetDistinctWarehousesAsync(); }
-        catch { _allWarehouses = new(); }
-        // Distinct pallet categories (from bfldata.dbo.pallettype) for the
-        // Pallet Categories multi-select. Default selection stays as
-        // {"ELIGIBLE"} unless the user picks something else.
+        // 1.14.64 — Distinct warehouses + LPM months are country-aware now
+        // (1.14.61 added the optional country parameter to the service
+        // methods; this loads them for the initially-selected country and
+        // ReloadCountryFiltersAsync below refreshes them whenever the user
+        // switches country).
+        await ReloadCountryFiltersAsync();
+        // Distinct pallet categories (from bfldata.dbo.pallettype) — this
+        // master is shared across countries, so no country parameter.
         try { _allPalletCategories = await Reports.GetDistinctPalletCategoriesAsync(); }
         catch { _allPalletCategories = new(); }
-        // Distinct LPM months (from racks.dbo.whboxitems.LPMDt) for the
-        // LPM Months multi-select. Default selection is empty (legacy
-        // "all months up to run period").
-        try { _allLpmMonths = await Reports.GetDistinctLpmMonthsAsync(); }
-        catch { _allLpmMonths = new(); }
         await LoadStoresForCountryAsync();
         if (!string.IsNullOrEmpty(_country)) await CheckAsync();
+    }
+
+    /// <summary>
+    /// 1.14.64 — Reloads the country-specific filter sources (warehouses,
+    /// LPM months) for the currently-selected country and clears any
+    /// previous selections that no longer apply. Called from OnInitializedAsync
+    /// for the initial load and from the Country dropdown's ValueChanged
+    /// handler whenever the planner switches country.
+    /// </summary>
+    private async Task ReloadCountryFiltersAsync()
+    {
+        var country = string.IsNullOrEmpty(_country) ? "UAE" : _country;
+        try { _allWarehouses = await Reports.GetDistinctWarehousesAsync(country); }
+        catch { _allWarehouses = new(); }
+        try { _allLpmMonths  = await Reports.GetDistinctLpmMonthsAsync(country); }
+        catch { _allLpmMonths = new(); }
+        // Drop selections that no longer exist in the new country's source —
+        // keeps the multi-selects consistent so the planner doesn't
+        // accidentally allocate a UAE-only warehouse to KSA.
+        if (_selectedWarehouses is not null)
+            _selectedWarehouses = _selectedWarehouses.Where(w => _allWarehouses.Contains(w, StringComparer.OrdinalIgnoreCase)).ToList();
+        if (_selectedLpmMonths is not null)
+            _selectedLpmMonths  = _selectedLpmMonths .Where(m => _allLpmMonths .Contains(m)).ToHashSet();
+        StateHasChanged();
     }
 
     private async Task LoadStoresForCountryAsync()
