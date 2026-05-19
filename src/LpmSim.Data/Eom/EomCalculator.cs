@@ -64,40 +64,59 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         // wasn't actually used. UAE reads racks.dbo.whboxitems; other
         // countries read [<DataName>].dbo.WHBoxItemsExport — same per-country
         // resolution every other live-whboxitems query in the codebase uses.
+        //
+        // 1.14.63 — Wrap the entire body in try/catch so a missing/misconfigured
+        // country (no DataName in bfldata.dbo.DataSettings, or the
+        // [<DataName>].dbo.WHBoxItemsExport table doesn't exist) doesn't
+        // explode the whole CheckAsync — instead the WH Stock readiness card
+        // shows the error inline. Previously KSA (DataName not yet populated)
+        // threw from this helper, propagated up through Task.WhenAll, and
+        // the page rendered with _readiness = null (no cards visible at all).
+        string? whStockErrorLocal = null;
         async Task<HashSet<int>> LoadWhStockDivCodes()
         {
-            await using var db = await dbFactory.CreateDbContextAsync(ct);
-            var conn = db.Database.GetDbConnection();
-            if (conn.State != System.Data.ConnectionState.Open)
-                await db.Database.OpenConnectionAsync(ct);
-            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
-            var codes = new HashSet<int>();
-            using var cmd = conn.CreateCommand();
-            cmd.CommandText = $@"
-                SELECT DISTINCT id.DivCode
-                  FROM {whSrc} w
-                  INNER JOIN (
-                      SELECT u.itemcode, MIN(d.DivCode) AS DivCode
-                        FROM Datareporting.dbo.upc_subclass    u
-                        INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
-                        INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
-                                                                  AND d.IsActive = 1
-                       GROUP BY u.itemcode
-                  ) id ON id.itemcode = w.ItemCode
-                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-                 WHERE pt.PalletCategory = 'ELIGIBLE'
-                   AND ISNULL(w.ShopEligible, '') <> 'E'
-                   AND ( w.LPMDt IS NULL
-                      OR (YEAR(w.LPMDt) < @y OR (YEAR(w.LPMDt) = @y AND MONTH(w.LPMDt) <= @m)) );";
-            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@y", year));
-            cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@m", month));
-            cmd.CommandTimeout = 300;
-            using var rdr = await cmd.ExecuteReaderAsync(ct);
-            while (await rdr.ReadAsync(ct))
+            try
             {
-                if (!rdr.IsDBNull(0)) codes.Add(rdr.GetInt32(0));
+                await using var db = await dbFactory.CreateDbContextAsync(ct);
+                var conn = db.Database.GetDbConnection();
+                if (conn.State != System.Data.ConnectionState.Open)
+                    await db.Database.OpenConnectionAsync(ct);
+                var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+                var codes = new HashSet<int>();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $@"
+                    SELECT DISTINCT id.DivCode
+                      FROM {whSrc} w
+                      INNER JOIN (
+                          SELECT u.itemcode, MIN(d.DivCode) AS DivCode
+                            FROM Datareporting.dbo.upc_subclass    u
+                            INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                            INNER JOIN dbo.Division                 d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                                                      AND d.IsActive = 1
+                           GROUP BY u.itemcode
+                      ) id ON id.itemcode = w.ItemCode
+                      INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
+                     WHERE pt.PalletCategory = 'ELIGIBLE'
+                       AND ISNULL(w.ShopEligible, '') <> 'E'
+                       AND ( w.LPMDt IS NULL
+                          OR (YEAR(w.LPMDt) < @y OR (YEAR(w.LPMDt) = @y AND MONTH(w.LPMDt) <= @m)) );";
+                cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@y", year));
+                cmd.Parameters.Add(new Microsoft.Data.SqlClient.SqlParameter("@m", month));
+                cmd.CommandTimeout = 300;
+                using var rdr = await cmd.ExecuteReaderAsync(ct);
+                while (await rdr.ReadAsync(ct))
+                {
+                    if (!rdr.IsDBNull(0)) codes.Add(rdr.GetInt32(0));
+                }
+                return codes;
             }
-            return codes;
+            catch (Exception ex)
+            {
+                // Capture the message for the readiness card. Caller treats
+                // an empty set + non-null error as "WH Stock blocked, here's why".
+                whStockErrorLocal = ex.Message;
+                return new HashSet<int>();
+            }
         }
         async Task<List<LpmStoreGrade>> LoadActiveGrades()
         {
@@ -219,7 +238,13 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                     : $"{salesRows} rows present for the {weights.Count} weighted periods."),
             WHStock = new(whOk,
                 "WH Stock",
-                $"{whActiveCount} of {divCount} divisions have stock for this period."),
+                // 1.14.63 — Prefer the captured resolver/SQL error message so
+                // the planner sees WHY this card is blocked (e.g. "No DataName
+                // configured … for SIMCountry 'KSA'") instead of a misleading
+                // "0 of N divisions" zero count.
+                whStockErrorLocal is null
+                    ? $"{whActiveCount} of {divCount} divisions have stock for this period."
+                    : $"WH Stock lookup failed: {whStockErrorLocal}"),
             Grades = new(gradesOk,
                 "Store Grades",
                 activeGrades.Count == 0

@@ -23,6 +23,45 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.63 — HOTFIX: EOM Generate empty-page on country-specific failures (2026-05-19)
+
+### The bug
+
+After 1.14.61 made the WH Stock readiness check country-aware, picking KSA (or any country whose `bfldata.dbo.DataSettings.DataName` isn't yet configured) caused the EOM Generate page to render **nothing below the filter bar** — no readiness cards, no error message, no clue why.
+
+Root cause: `LoadWhStockDivCodes` now calls `WhBoxItemsSource.ResolveAsync(conn, country, ct)`, which throws `InvalidOperationException` when `DataName` is missing or the `[<DataName>].dbo.WHBoxItemsExport` table is unreachable. That exception propagated through `Task.WhenAll` inside `EomCalculator.CheckAsync`, bubbled up to EomGenerate.razor's `CheckAsync` — which had `try { ... } finally { }` but **no `catch`** — so `_readiness` stayed `null` and the page silently rendered an empty body.
+
+### The fix
+
+Two layers of defence:
+
+1. **`LoadWhStockDivCodes` catches its own failures.** Wrapped in `try/catch`. On failure it captures the exception message into a closure-scoped local and returns an empty `HashSet<int>` so the rest of the readiness check can proceed normally. The captured error is then surfaced as the **WH Stock card's detail message**:
+   ```
+   WH Stock lookup failed: No DataName configured in bfldata.dbo.DataSettings
+   for SIMCountry 'KSA'. Country-specific warehouse data can't be loaded until
+   DataSettings.DataName is populated.
+   ```
+   The card is `Blocked` (red), but the planner now sees exactly what to fix.
+
+2. **`CheckAsync` in EomGenerate.razor gains a top-level `catch`.** Any other failure during readiness (e.g. a brand-new entity throws during EF load) goes to the Snackbar as `"Readiness check failed for KSA/2026-05: <message>"`. No more silent empty pages.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | `LoadWhStockDivCodes` wrapped in try/catch; new closure-scoped `whStockErrorLocal` captures the exception message. `WHStock` readiness item's detail message uses the captured error when present. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | `CheckAsync` gains a top-level `catch` that routes any exception to Snackbar with the country + period in the message. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.62 → 1.14.63. |
+
+### Risk
+**Very low.** Pure error handling — only affects the path where the previous code threw silently. UAE behaviour is identical (resolver never throws for UAE; capture remains `null`; same detail message as before).
+
+### Verification after deploy
+1. Pick **KSA** on EOM Generate. The readiness cards should now render. **WH Stock** is red with the exact error text. Other cards (Monthly Weights, Planned, Sales, Grades, Volume Groups, SKU Max Rules) show their real status.
+2. To make WH Stock green for KSA: populate `bfldata.dbo.DataSettings` with `SIMCountry='KSA'` + a valid `DataName` pointing at the KSA database (where `dbo.WHBoxItemsExport` lives).
+3. Refresh — WH Stock card flips to "X of N divisions have stock for this period."
+
+---
+
 ## 1.14.62 — LPM SIM Reports: per-tab Excel download + totals in column headers (2026-05-19)
 
 ### Two additions to LPM SIM Reports

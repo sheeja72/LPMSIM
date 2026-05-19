@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.62</Version>
-    <AssemblyVersion>1.14.62.0</AssemblyVersion>
-    <FileVersion>1.14.62.0</FileVersion>
-    <InformationalVersion>1.14.62 (LPM SIM Reports: per-tab Excel download + totals in column headers)</InformationalVersion>
+    <Version>1.14.63</Version>
+    <AssemblyVersion>1.14.63.0</AssemblyVersion>
+    <FileVersion>1.14.63.0</FileVersion>
+    <InformationalVersion>1.14.63 (HOTFIX: EOM Generate empty page when WH stock lookup fails for a country — graceful error surfacing)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

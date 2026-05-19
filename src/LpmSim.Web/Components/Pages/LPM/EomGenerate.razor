@@ -1237,6 +1237,10 @@
         if (string.IsNullOrEmpty(_country)) { StateHasChanged(); return; }
 
         _running = true; StateHasChanged();
+        // 1.14.63 — Top-level try/catch so any failure inside Eom.CheckAsync
+        // (e.g. a country-specific SQL query) surfaces via Snackbar instead
+        // of silently leaving the page with _readiness = null (which renders
+        // nothing below the filter bar).
         try
         {
             // 1.14.3 perf: readiness check and saved-output fetch share no
@@ -1258,6 +1262,13 @@
                 _divStock = new();
                 _divStockLoadedForScope = null;
             }
+        }
+        catch (Exception ex)
+        {
+            // 1.14.63 — Surface the error so the planner sees what went wrong
+            // instead of staring at an empty page. _readiness stays null (no
+            // partial cards) — the snackbar carries the message.
+            Snackbar.Add($"Readiness check failed for {_country}/{_year}-{_month:D2}: {ex.Message}", Severity.Error);
         }
         finally { _running = false; StateHasChanged(); }
     }
