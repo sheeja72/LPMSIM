@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.59</Version>
-    <AssemblyVersion>1.14.59.0</AssemblyVersion>
-    <FileVersion>1.14.59.0</FileVersion>
-    <InformationalVersion>1.14.59 (SIM Generate: LoadItemSkuMaxAsync mirrors full box-eligibility filter — Season/Source/LpmMonths/PalletCats/Warehouses/ShopEligible)</InformationalVersion>
+    <Version>1.14.60</Version>
+    <AssemblyVersion>1.14.60.0</AssemblyVersion>
+    <FileVersion>1.14.60.0</FileVersion>
+    <InformationalVersion>1.14.60 (SIM Reports: totals footers on all tabs + Excel itemcode upload filters SIM Boxes &amp; Item Details)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

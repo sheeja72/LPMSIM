@@ -23,6 +23,61 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.60 — LPM SIM Reports: totals footers + "Filter by Itemcode list" Excel upload (2026-05-19)
+
+### Two changes
+
+**1. Totals footer on every tab**
+
+Each MudTable now has a sticky `FooterContent` row summing the numeric columns:
+
+| Tab | What the footer shows |
+|---|---|
+| **EOM Summary** | Row count · Σ EOM · Σ SOH · Σ Merch Need (Week) · Σ LPM SIM Qty · Σ Override Qty |
+| **SIM Boxes** | Row count · distinct-box count · Σ Box Qty (deduped by BoxNo so non-roll-up doesn't multi-count) · Σ Allocated Qty · Avg SKU Usability % |
+| **Item Details** | Row count · distinct-item count · Σ Qty · Σ SKU Max · Σ SOH · Σ LPM Qty |
+
+Totals reflect the **filtered** view, so the existing Store/Division filters and the new item filter both flow into them.
+
+**2. "Filter by Itemcode list" Excel upload**
+
+A new upload row beneath the filter bar accepts a single-column `.xlsx`:
+
+| Cell | Value |
+|---|---|
+| A1 | header `Itemcode` (case-insensitive) |
+| A2, A3, … | itemcodes to filter on |
+
+Once uploaded, the itemcodes filter:
+- **SIM Boxes** — only boxes that contain at least one matched item appear. Computed by intersecting the loaded Item Details rows with the uploaded itemcode set, then keeping boxes whose `BoxNo` shows up in that intersection.
+- **Item Details** — only rows whose `Itemcode` is in the uploaded set appear.
+- **EOM Summary** — unaffected (store-level, no item column).
+
+The filter chip shows: `N itemcode(s) from <filename> · X matching row(s) across Y box(es) in batch #BATCH`. A **Clear** button restores the unfiltered view. A **Template** button downloads a 3-row example workbook (header + 2 sample itemcodes) the planner can fill in.
+
+When the planner uploads an item list while the Item Details tab hasn't been visited yet, the page lazy-loads it automatically (the SIM Boxes filter needs the BoxNo↔Itemcode mapping to resolve).
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimReports.razor` | `@inject IJSRuntime JS` added; `@using ClosedXML.Excel` + `LpmSim.Web.Components.Pages.Uploads` for the upload helpers. New upload row + filter chip + Template button under the existing filter bar. `FooterContent` added to all three MudTables with column-appropriate totals. New fields: `_itemFilter` (HashSet&lt;string&gt;, CI), `_itemFilterFileName`, `_itemFilterError`, `_boxesContainingFilteredItems` (CI HashSet derived from `_itemRows × _itemFilter`). `FilteredBoxes` and `FilteredItems` extended to apply the item filter (passthrough when set is empty). New handlers: `OnItemFilterUploaded` (parses the workbook + validates the `Itemcode` header), `ClearItemFilter`, `RebuildBoxFilter`, `DownloadItemFilterTemplate`. `LoadItemsAsync` calls `RebuildBoxFilter` so the SIM Boxes view stays in sync after batch swaps. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.59 → 1.14.60. |
+
+### Risk
+**Low.** Pure UI + client-side filter. No DB schema change, no migration, no service-layer change. The filter is layered on top of the existing Store/Division filters and is opt-in (default state = no filter, no UI change visible).
+
+### Verification after deploy
+1. Open LPM SIM Reports → pick a batch → confirm the **TOTAL** row appears at the bottom of each tab.
+2. Click **Template** → confirm a 3-row Excel downloads with `Itemcode` in A1.
+3. Edit the template (paste real itemcodes) → upload via **Filter by Itemcode list (Excel)** → confirm:
+   - Status chip shows the count + match stats.
+   - SIM Boxes tab narrows to boxes containing those items.
+   - Item Details narrows to those item rows.
+   - EOM Summary is unchanged.
+4. Click **Clear** → confirm all three tabs revert to the unfiltered view.
+
+---
+
 ## 1.14.59 — SIM Generate: LoadItemSkuMaxAsync mirrors the full box-eligibility filter (2026-05-19)
 
 ### What changed

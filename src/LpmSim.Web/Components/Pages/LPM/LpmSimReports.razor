@@ -1,11 +1,19 @@
 @page "/lpm/lpm-sim/reports"
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = Roles.AnyRole)]
-@* 1.14.25 — opened to AnyRole so the Reports (Viewer) role can access. *@
+@* 1.14.25 — opened to AnyRole so the Reports (Viewer) role can access.
+   1.14.60 — Totals footers on every tab; "Filter by Itemcode list" Excel
+   upload that narrows SIM Boxes (boxes containing at least one matched
+   item) and Item Details (matching item rows). EOM Summary is unaffected
+   by the item filter (no Itemcode column). *@
 @using LpmSim.Data.LpmSim
+@using LpmSim.Web.Components.Pages.Uploads
+@using ClosedXML.Excel
+@using System.IO
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject LpmSimReportService Reports
 @inject ISnackbar Snackbar
+@inject IJSRuntime JS
 
 <PageTitle>LPM SIM Reports</PageTitle>
 
@@ -56,6 +64,57 @@
     </MudGrid>
 </div>
 
+@* 1.14.60 — Item-list Excel upload + status chip. The uploaded itemcodes
+   filter the SIM Boxes tab (boxes containing at least one of the items)
+   and Item Details tab (matching item rows). EOM Summary is unaffected. *@
+<div class="lpm-section" style="max-width:1200px;display:flex;align-items:center;flex-wrap:wrap;gap:0.75rem;">
+    <MudFileUpload T="IBrowserFile" FilesChanged="OnItemFilterUploaded" Accept=".xlsx">
+        <ActivatorContent>
+            <MudButton Variant="Variant.Outlined" Color="Color.Primary" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Upload" Size="Size.Small">
+                Filter by Itemcode list (Excel)
+            </MudButton>
+        </ActivatorContent>
+    </MudFileUpload>
+    <MudButton Size="Size.Small" Variant="Variant.Text" Color="Color.Default" DropShadow="false"
+               StartIcon="@Icons.Material.Filled.Download"
+               OnClick="DownloadItemFilterTemplate">
+        Template
+    </MudButton>
+    @if (_itemFilter.Count > 0)
+    {
+        var matchedItems = _itemRows.Count(r => _itemFilter.Contains(r.Itemcode));
+        var matchedBoxes = _boxesContainingFilteredItems.Count;
+        <div style="font-size:0.85rem;color:#334155;display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap;">
+            <MudIcon Icon="@Icons.Material.Filled.FilterList" Size="Size.Small" Color="Color.Primary" />
+            <span><strong>@_itemFilter.Count itemcode(s)</strong>
+                @if (!string.IsNullOrEmpty(_itemFilterFileName))
+                {
+                    <text>from <code>@_itemFilterFileName</code></text>
+                }
+                @if (_itemRows.Count > 0)
+                {
+                    <text> · <strong>@matchedItems</strong> matching row(s) across <strong>@matchedBoxes</strong> box(es) in batch #@_batchNo</text>
+                }
+            </span>
+            <MudButton Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default" DropShadow="false"
+                       StartIcon="@Icons.Material.Filled.Clear" OnClick="ClearItemFilter">
+                Clear
+            </MudButton>
+        </div>
+    }
+    else
+    {
+        <span style="font-size:0.82rem;color:#64748b;">
+            Upload an <code>.xlsx</code> with header <code>Itemcode</code> in <code>A1</code> and itemcodes from <code>A2</code> down to filter SIM Boxes &amp; Item Details.
+        </span>
+    }
+</div>
+@if (_itemFilterError is not null)
+{
+    <MudAlert Severity="Severity.Error" Class="mb-2" Style="max-width:1200px;">@_itemFilterError</MudAlert>
+}
+
 @if (_busy)
 {
     <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
@@ -76,7 +135,8 @@ else
         <MudTabPanel Text="EOM Summary" Icon="@Icons.Material.Filled.Insights">
             @if (_eomRows.Count > 0)
             {
-                <MudTable T="EomSummaryRow" Items="FilteredEom" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
+                var fe = FilteredEom.ToList();
+                <MudTable T="EomSummaryRow" Items="fe" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
                     <HeaderContent>
                         <MudTh>Batch</MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreID">Store ID</MudTableSortLabel></MudTh>
@@ -99,6 +159,15 @@ else
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
                         <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
                     </RowTemplate>
+                    <FooterContent>
+                        @* 1.14.60 — Totals row across filtered rows. *@
+                        <MudTd Style="font-weight:600;" colspan="4">TOTAL (@fe.Count.ToString("N0") rows)</MudTd>
+                        <MudTd Style="font-weight:600;">@fe.Sum(r => r.EOM ?? 0m).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)r.SOH).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)(r.MerchNeedWeek ?? 0)).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)r.LpmSimQty).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)r.OverrideQty).ToString("N0")</MudTd>
+                    </FooterContent>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
                     </PagerContent>
@@ -117,7 +186,19 @@ else
 
             @if (_boxRows.Count > 0)
             {
-                <MudTable T="BoxDetailRow" Items="FilteredBoxes" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
+                var fb = FilteredBoxes.ToList();
+                // 1.14.60 — When not rolled-up, the same physical box appears
+                // once per (Store × Div) allocation, so SUMming BoxQty would
+                // multi-count. Group by BoxNo and take the first BoxQty per
+                // group for the true total Box Qty. Rolled-up view already
+                // collapses to one row per box, so the calc converges.
+                var distinctBoxes  = fb.GroupBy(r => r.BoxNo).ToList();
+                var totalBoxQty    = distinctBoxes.Sum(g => (long)(g.First().BoxQty ?? 0));
+                var totalAlloc     = fb.Sum(r => (long)r.LpmSimQty);
+                var avgUsability   = fb.Count > 0
+                    ? fb.Average(r => r.SkuUsabilityPct ?? 0m)
+                    : 0m;
+                <MudTable T="BoxDetailRow" Items="fb" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
                     <HeaderContent>
                         <MudTh>Batch</MudTh>
                         @if (!_rollupBoxOnly)
@@ -155,6 +236,28 @@ else
                         <MudTd>@context.TypeName</MudTd>
                         <MudTd>@context.PalletCategory</MudTd>
                     </RowTemplate>
+                    <FooterContent>
+                        @* 1.14.60 — Totals row. Box Qty is summed across DISTINCT
+                           BoxNos (so the same physical box that repeats across
+                           store/div rows in the non-roll-up view isn't counted
+                           multiple times). Allocated Qty sums per row (each row
+                           is a real (Box × Store × Div) allocation). Usability
+                           is averaged across rows. *@
+                        @if (!_rollupBoxOnly)
+                        {
+                            <MudTd Style="font-weight:600;" colspan="3">TOTAL (@fb.Count.ToString("N0") rows · @distinctBoxes.Count.ToString("N0") distinct boxes)</MudTd>
+                        }
+                        else
+                        {
+                            <MudTd Style="font-weight:600;" colspan="1">TOTAL (@fb.Count.ToString("N0") boxes)</MudTd>
+                        }
+                        <MudTd Style="font-weight:600;">@totalBoxQty.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@totalAlloc.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@avgUsability.ToString("0.0")% avg</MudTd>
+                        <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
+                    </FooterContent>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
                     </PagerContent>
@@ -169,7 +272,9 @@ else
         <MudTabPanel Text="Item Details" Icon="@Icons.Material.Filled.ListAlt">
             @if (_itemRows.Count > 0)
             {
-                <MudTable T="ItemDetailRow" Items="FilteredItems" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
+                var fi = FilteredItems.ToList();
+                var distinctItems = fi.Select(r => r.Itemcode).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+                <MudTable T="ItemDetailRow" Items="fi" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
                     <HeaderContent>
                         <MudTh>Batch</MudTh>
                         <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.StoreID">Store</MudTableSortLabel></MudTh>
@@ -196,6 +301,18 @@ else
                         <MudTd>@context.SOH.ToString("N0")</MudTd>
                         <MudTd>@context.LpmQty.ToString("N0")</MudTd>
                     </RowTemplate>
+                    <FooterContent>
+                        @* 1.14.60 — Totals row. All four numeric columns are
+                           per-row qty so straight SUM is correct. Row count +
+                           distinct item count are shown together so the user
+                           can read both "how many allocations" and "how many
+                           SKUs" at a glance. *@
+                        <MudTd Style="font-weight:600;" colspan="5">TOTAL (@fi.Count.ToString("N0") rows · @distinctItems.ToString("N0") distinct items)</MudTd>
+                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)(r.BoxItemQty ?? 0)).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)(r.SKUMax ?? 0)).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)r.SOH).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)r.LpmQty).ToString("N0")</MudTd>
+                    </FooterContent>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
                     </PagerContent>
@@ -225,12 +342,30 @@ else
     private List<BoxDetailRow> _boxRows = new();
     private List<ItemDetailRow> _itemRows = new();
 
+    // 1.14.60 — Item-list filter state. Uploaded itemcodes filter SIM Boxes
+    // (boxes containing any matched item) + Item Details (matching item rows).
+    // EOM Summary is store/div-level so the filter doesn't apply there.
+    private HashSet<string> _itemFilter = new(StringComparer.OrdinalIgnoreCase);
+    private string? _itemFilterFileName;
+    private string? _itemFilterError;
+    // Pre-computed BoxNo set derived from _itemRows × _itemFilter. Rebuilt by
+    // RebuildBoxFilter() every time either side changes (upload, clear, batch
+    // change, or item-rows refresh).
+    private HashSet<string> _boxesContainingFilteredItems = new(StringComparer.OrdinalIgnoreCase);
+
     private IEnumerable<EomSummaryRow> FilteredEom =>
         _eomRows.Where(r => MatchStore(r.StoreID, r.StoreName) && MatchDiv(r.DivisionName));
     private IEnumerable<BoxDetailRow> FilteredBoxes =>
-        _boxRows.Where(r => MatchStore(r.StoreID ?? "", r.StoreName ?? "") && MatchDiv(r.DivisionName ?? ""));
+        _boxRows
+            .Where(r => MatchStore(r.StoreID ?? "", r.StoreName ?? "") && MatchDiv(r.DivisionName ?? ""))
+            // 1.14.60 — When the item filter is set, only show boxes containing
+            // at least one matched item. Without the filter, no-op.
+            .Where(r => _itemFilter.Count == 0 || _boxesContainingFilteredItems.Contains(r.BoxNo));
     private IEnumerable<ItemDetailRow> FilteredItems =>
-        _itemRows.Where(r => MatchStore(r.StoreID, r.StoreName) && MatchDiv(r.DivisionName));
+        _itemRows
+            .Where(r => MatchStore(r.StoreID, r.StoreName) && MatchDiv(r.DivisionName))
+            // 1.14.60 — Direct itemcode filter on item rows.
+            .Where(r => _itemFilter.Count == 0 || _itemFilter.Contains(r.Itemcode));
 
     private bool MatchStore(string storeId, string storeName)
     {
@@ -315,8 +450,123 @@ else
     private async Task LoadItemsAsync()
     {
         _busy = true; StateHasChanged();
-        try { _itemRows = await Reports.GetItemDetailsAsync(_batchNo); }
+        try
+        {
+            _itemRows = await Reports.GetItemDetailsAsync(_batchNo);
+            // 1.14.60 — Refresh the BoxNo set derived from items so the
+            // SIM Boxes tab's item filter stays in sync after a batch swap
+            // or a manual reload of the items tab.
+            RebuildBoxFilter();
+        }
         catch (Exception ex) { Snackbar.Add($"Item report failed: {ex.Message}", Severity.Error); _itemRows = new(); }
         finally { _busy = false; StateHasChanged(); }
+    }
+
+    // ─── 1.14.60 — Item-list Excel upload ──────────────────────────────
+
+    /// <summary>
+    /// Reads the uploaded workbook, validates the "Itemcode" header in A1,
+    /// extracts itemcodes from A2 downward into _itemFilter, then ensures
+    /// item rows are loaded for the current batch so the SIM Boxes filter
+    /// (which needs BoxNo → Itemcode mapping) can resolve.
+    /// </summary>
+    private async Task OnItemFilterUploaded(IBrowserFile file)
+    {
+        _itemFilterError = null;
+        _itemFilterFileName = file.Name;
+        try
+        {
+            using var ms = await UploadHelpers.ReadUploadAsync(file);
+            using var wb = new XLWorkbook(ms);
+            var sheet = wb.Worksheets.First();
+            // Header validation — match the user's chosen Excel format
+            // (Itemcode in A1, data from A2 down).
+            var header = UploadHelpers.TryString(sheet.Row(1).Cell(1));
+            if (!string.Equals(header, "Itemcode", StringComparison.OrdinalIgnoreCase))
+            {
+                _itemFilterError = $"Header mismatch in A1: expected 'Itemcode', got '{header}'. " +
+                                   "Download the template above for the correct shape.";
+                _itemFilter.Clear();
+                _itemFilterFileName = null;
+                _boxesContainingFilteredItems.Clear();
+                return;
+            }
+            _itemFilter.Clear();
+            int lastRow;
+            try { lastRow = sheet.LastRowUsed()?.RowNumber() ?? 1; } catch { lastRow = 10000; }
+            for (int r = 2; r <= lastRow; r++)
+            {
+                var txt = UploadHelpers.TryString(sheet.Row(r).Cell(1));
+                if (!string.IsNullOrWhiteSpace(txt))
+                    _itemFilter.Add(txt.Trim());
+            }
+            if (_itemFilter.Count == 0)
+            {
+                _itemFilterError = "No itemcodes found in column A (rows 2+). File parsed OK but the column was empty.";
+                _itemFilterFileName = null;
+                return;
+            }
+            // The SIM Boxes filter needs item rows to resolve BoxNo membership.
+            // Lazy-load if the user hasn't visited Item Details yet.
+            if (_itemRows.Count == 0 && _batchNo > 0)
+            {
+                await LoadItemsAsync();
+            }
+            else
+            {
+                RebuildBoxFilter();
+            }
+            Snackbar.Add($"Loaded {_itemFilter.Count} itemcode(s) from {file.Name}.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            _itemFilterError = $"Failed to read file: {ex.Message}";
+            _itemFilter.Clear();
+            _itemFilterFileName = null;
+            _boxesContainingFilteredItems.Clear();
+        }
+    }
+
+    private void ClearItemFilter()
+    {
+        _itemFilter.Clear();
+        _itemFilterFileName = null;
+        _itemFilterError = null;
+        _boxesContainingFilteredItems.Clear();
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Derives the BoxNo set containing at least one filtered itemcode from
+    /// the currently loaded _itemRows. Called whenever either side changes:
+    /// after an upload, after item-rows are (re)loaded, after batch swap.
+    /// </summary>
+    private void RebuildBoxFilter()
+    {
+        if (_itemFilter.Count == 0)
+        {
+            _boxesContainingFilteredItems.Clear();
+            return;
+        }
+        _boxesContainingFilteredItems = new HashSet<string>(
+            _itemRows.Where(r => _itemFilter.Contains(r.Itemcode))
+                     .Select(r => r.BoxNo),
+            StringComparer.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Emits a tiny template workbook the user can fill in. Header in A1
+    /// only — no example rows, no extra columns. Matches the upload's
+    /// validation exactly.
+    /// </summary>
+    private async Task DownloadItemFilterTemplate()
+    {
+        using var wb = new XLWorkbook();
+        var sheet = wb.Worksheets.Add("Items");
+        UploadHelpers.WriteHeader(sheet, new[] { "Itemcode" });
+        // Two example itemcodes so the planner can see the expected shape.
+        sheet.Cell(2, 1).Value = "3700943269072";
+        sheet.Cell(3, 1).Value = "8904232736763";
+        await UploadHelpers.DownloadAsync(JS, wb, "SimReports_ItemFilter_Template.xlsx");
     }
 }
