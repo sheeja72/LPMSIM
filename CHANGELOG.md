@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.62 — LPM SIM Reports: per-tab Excel download + totals in column headers (2026-05-19)
+
+### Two additions to LPM SIM Reports
+
+**1. Excel download per tab**
+
+Each tab (EOM Summary / SIM Boxes / Item Details) gains an **Excel** button at the top of the panel. Clicking it downloads a single-sheet `.xlsx` mirroring the on-screen filtered view — Store/Division text filters AND the 1.14.60 Itemcode-list filter both flow through. A bold TOTAL row caps each sheet with the same totals shown on screen.
+
+| Tab | Sheet | Filename |
+|---|---|---|
+| EOM Summary | "EOM Summary" | `SimReports_EomSummary_Batch{N}_{yyyyMMdd_HHmm}.xlsx` |
+| SIM Boxes   | "SIM Boxes"   | `SimReports_SimBoxes_Batch{N}_{yyyyMMdd_HHmm}.xlsx` |
+| Item Details| "Item Details"| `SimReports_ItemDetails_Batch{N}_{yyyyMMdd_HHmm}.xlsx` |
+
+Implementation: pure client-side — uses the rows already loaded for the tab; no extra DB hit. ClosedXML builds the workbook in memory, `UploadHelpers.DownloadAsync` streams it to the browser. The button count chip (`Excel (1,234)`) shows row count so the planner knows what's about to land. Disabled when the tab has no rows or a download is already in flight.
+
+**2. Totals in column headers**
+
+Every numeric column on every tab now displays its **total above the column name** (using the same `.th-total` class the EOM Generate / SIM Generate grids already use). The existing footer total row is kept for tall tables where the header scrolls out of view — header is sticky via `FixedHeader`, footer pins to the bottom of the table.
+
+Columns getting header totals:
+
+| Tab | Columns |
+|---|---|
+| EOM Summary | EOM · SOH · Merch Need (Week) · LPM SIM Qty · Override Qty |
+| SIM Boxes   | Box Qty (deduped by BoxNo) · Allocated Qty · SKU Usability % (avg) |
+| Item Details| Qty · SKU Max · SOH · LPM Qty |
+
+Totals respect ALL active filters (Store / Division / Item-list).
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimReports.razor` | Per-tab `<MudButton>` with `OnClick="DownloadEomExcelAsync"` / `DownloadBoxesExcelAsync` / `DownloadItemsExcelAsync` above each table. Each numeric `<MudTh>` now wraps the sort label in `<div class="th-total">{total}</div>` + label. Totals computed once at the top of each tab (e.g. `eomTotEom`, `totalBoxQty`, `itTotQty`) and reused by header, footer, and the Excel total row. Three new handlers added at the end of `@code`, each guarded by `_downloadingExcel`. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.61 → 1.14.62. |
+
+### Risk
+**Very low.** Pure UI / client-side feature. No DB, no schema, no service-layer change. Existing behaviours preserved (footer totals + item filter still work). Excel exports use the already-loaded in-memory rows.
+
+### Verification after deploy
+1. Open LPM SIM Reports → pick a batch.
+2. Each tab now shows a row of bold totals **above** the numeric column names.
+3. **Excel** button top-right of each tab. Click → downloads with the filename pattern above.
+4. Open the downloaded file in Excel: header row + data rows + bold TOTAL row at the bottom.
+5. Apply Store/Division/Item filter → re-download → totals + rows reflect the filtered set.
+
+---
+
 ## 1.14.61 — whboxitems reads country-aware everywhere (and WH Stock readiness no longer requires the legacy LPM_WHStock upload) (2026-05-19)
 
 ### What changed

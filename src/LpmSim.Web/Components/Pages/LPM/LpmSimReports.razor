@@ -136,17 +136,35 @@ else
             @if (_eomRows.Count > 0)
             {
                 var fe = FilteredEom.ToList();
+                // 1.14.62 — Totals computed once per render so header + footer
+                // + Excel button all share the same numbers.
+                var eomTotEom    = fe.Sum(r => r.EOM ?? 0m);
+                var eomTotSoh    = fe.Sum(r => (long)r.SOH);
+                var eomTotMrn    = fe.Sum(r => (long)(r.MerchNeedWeek ?? 0));
+                var eomTotSim    = fe.Sum(r => (long)r.LpmSimQty);
+                var eomTotOvr    = fe.Sum(r => (long)r.OverrideQty);
+                <div class="d-flex justify-end mb-2">
+                    <MudButton Color="Color.Success" Variant="Variant.Outlined" Size="Size.Small"
+                               DropShadow="false" StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_downloadingExcel || fe.Count == 0)"
+                               OnClick="DownloadEomExcelAsync">
+                        Excel (@fe.Count.ToString("N0"))
+                    </MudButton>
+                </div>
                 <MudTable T="EomSummaryRow" Items="fe" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
                     <HeaderContent>
+                        @* 1.14.62 — Totals in header (above the column name) for
+                           every numeric column, so the planner sees them without
+                           scrolling to the footer. Footer still shown for tall tables. *@
                         <MudTh>Batch</MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreID">Store ID</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.StoreName">Store Name</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.EOM ?? 0m">EOM</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.MerchNeedWeek ?? 0">Merch Need (Week)</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.LpmSimQty">LPM SIM Qty</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.OverrideQty">Override Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@eomTotEom.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.EOM ?? 0m">EOM</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@eomTotSoh.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@eomTotMrn.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.MerchNeedWeek ?? 0">Merch Need (Week)</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@eomTotSim.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.LpmSimQty">LPM SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@eomTotOvr.ToString("N0")</div><MudTableSortLabel T="EomSummaryRow" SortBy="r => r.OverrideQty">Override Qty</MudTableSortLabel></MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>#@context.LPMBatchNo</MudTd>
@@ -160,13 +178,15 @@ else
                         <MudTd style="@(context.OverrideQty > 0 ? "color:#d97706;font-weight:600;" : "")">@(context.OverrideQty > 0 ? context.OverrideQty.ToString("N0") : "—")</MudTd>
                     </RowTemplate>
                     <FooterContent>
-                        @* 1.14.60 — Totals row across filtered rows. *@
+                        @* 1.14.60 — Totals row across filtered rows.
+                           1.14.62 — Same totals now also surface in the header (above each
+                           column name); the footer stays for tall tables. *@
                         <MudTd Style="font-weight:600;" colspan="4">TOTAL (@fe.Count.ToString("N0") rows)</MudTd>
-                        <MudTd Style="font-weight:600;">@fe.Sum(r => r.EOM ?? 0m).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)r.SOH).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)(r.MerchNeedWeek ?? 0)).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)r.LpmSimQty).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fe.Sum(r => (long)r.OverrideQty).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@eomTotEom.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@eomTotSoh.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@eomTotMrn.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@eomTotSim.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@eomTotOvr.ToString("N0")</MudTd>
                     </FooterContent>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -198,8 +218,18 @@ else
                 var avgUsability   = fb.Count > 0
                     ? fb.Average(r => r.SkuUsabilityPct ?? 0m)
                     : 0m;
+                <div class="d-flex justify-end mb-2">
+                    <MudButton Color="Color.Success" Variant="Variant.Outlined" Size="Size.Small"
+                               DropShadow="false" StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_downloadingExcel || fb.Count == 0)"
+                               OnClick="DownloadBoxesExcelAsync">
+                        Excel (@fb.Count.ToString("N0"))
+                    </MudButton>
+                </div>
                 <MudTable T="BoxDetailRow" Items="fb" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
                     <HeaderContent>
+                        @* 1.14.62 — Totals in header for the three numeric columns
+                           (Box Qty deduped, Allocated Qty summed, Usability averaged). *@
                         <MudTh>Batch</MudTh>
                         @if (!_rollupBoxOnly)
                         {
@@ -207,9 +237,9 @@ else
                             <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.DivisionName ?? string.Empty">Division</MudTableSortLabel></MudTh>
                         }
                         <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Box Qty</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">Allocated Qty</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.SkuUsabilityPct ?? 0m">SKU Usability %</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalBoxQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Box Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@totalAlloc.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">Allocated Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@avgUsability.ToString("0.0")% avg</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.SkuUsabilityPct ?? 0m">SKU Usability %</MudTableSortLabel></MudTh>
                         <MudTh>Pallet Type</MudTh>
                         <MudTh>Type Name</MudTh>
                         <MudTh>Pallet Category</MudTh>
@@ -274,17 +304,31 @@ else
             {
                 var fi = FilteredItems.ToList();
                 var distinctItems = fi.Select(r => r.Itemcode).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+                // 1.14.62 — Totals computed once.
+                var itTotQty    = fi.Sum(r => (long)(r.BoxItemQty ?? 0));
+                var itTotSku    = fi.Sum(r => (long)(r.SKUMax ?? 0));
+                var itTotSoh    = fi.Sum(r => (long)r.SOH);
+                var itTotLpm    = fi.Sum(r => (long)r.LpmQty);
+                <div class="d-flex justify-end mb-2">
+                    <MudButton Color="Color.Success" Variant="Variant.Outlined" Size="Size.Small"
+                               DropShadow="false" StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_downloadingExcel || fi.Count == 0)"
+                               OnClick="DownloadItemsExcelAsync">
+                        Excel (@fi.Count.ToString("N0"))
+                    </MudButton>
+                </div>
                 <MudTable T="ItemDetailRow" Items="fi" Hover Striped Dense FixedHeader Height="60vh" AllowUnsorted="false">
                     <HeaderContent>
+                        @* 1.14.62 — Totals in header for the four numeric columns. *@
                         <MudTh>Batch</MudTh>
                         <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.StoreID">Store</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.DivisionName">Division</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
                         <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.Itemcode">Item</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">Qty</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SKUMax ?? 0">SKU Max</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.LpmQty">LPM Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@itTotQty.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.BoxItemQty ?? 0">Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@itTotSku.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SKUMax ?? 0">SKU Max</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@itTotSoh.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">@itTotLpm.ToString("N0")</div><MudTableSortLabel T="ItemDetailRow" SortBy="r => r.LpmQty">LPM Qty</MudTableSortLabel></MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>#@context.LPMBatchNo</MudTd>
@@ -308,10 +352,10 @@ else
                            can read both "how many allocations" and "how many
                            SKUs" at a glance. *@
                         <MudTd Style="font-weight:600;" colspan="5">TOTAL (@fi.Count.ToString("N0") rows · @distinctItems.ToString("N0") distinct items)</MudTd>
-                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)(r.BoxItemQty ?? 0)).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)(r.SKUMax ?? 0)).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)r.SOH).ToString("N0")</MudTd>
-                        <MudTd Style="font-weight:600;">@fi.Sum(r => (long)r.LpmQty).ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@itTotQty.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@itTotSku.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@itTotSoh.ToString("N0")</MudTd>
+                        <MudTd Style="font-weight:600;">@itTotLpm.ToString("N0")</MudTd>
                     </FooterContent>
                     <PagerContent>
                         <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
@@ -337,6 +381,9 @@ else
     private int _activeTab;
     private bool _busy;
     private bool _rollupBoxOnly;
+    // 1.14.62 — Excel download busy flag so the three per-tab buttons can't
+    // be hammered before the previous workbook finishes streaming.
+    private bool _downloadingExcel;
 
     private List<EomSummaryRow> _eomRows = new();
     private List<BoxDetailRow> _boxRows = new();
@@ -568,5 +615,198 @@ else
         sheet.Cell(2, 1).Value = "3700943269072";
         sheet.Cell(3, 1).Value = "8904232736763";
         await UploadHelpers.DownloadAsync(JS, wb, "SimReports_ItemFilter_Template.xlsx");
+    }
+
+    // ─── 1.14.62 — Per-tab Excel downloads ─────────────────────────────
+    //
+    // Each handler mirrors the on-screen filtered view (Store/Division filter
+    // + item-list filter both flow through via FilteredEom / FilteredBoxes /
+    // FilteredItems). A TOTAL row appears at the bottom of each sheet with
+    // the same totals shown in the header / footer.
+    //
+    // ClosedXML in-memory workbook → base64 → browser download via the
+    // existing UploadHelpers.DownloadAsync. No DB hit; uses rows already
+    // loaded for the tab.
+
+    private async Task DownloadEomExcelAsync()
+    {
+        if (_downloadingExcel) return;
+        _downloadingExcel = true; StateHasChanged();
+        try
+        {
+            var rows = FilteredEom.ToList();
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("EOM Summary");
+            string[] headers = { "Batch", "StoreID", "StoreName", "Division",
+                                 "EOM", "SOH", "MerchNeed(Wk)", "LPM SIM Qty", "Override Qty" };
+            for (int c = 0; c < headers.Length; c++)
+            {
+                ws.Cell(1, c + 1).Value = headers[c];
+                ws.Cell(1, c + 1).Style.Font.Bold = true;
+                ws.Cell(1, c + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+            }
+            int r = 2;
+            foreach (var x in rows)
+            {
+                ws.Cell(r, 1).Value = x.LPMBatchNo;
+                ws.Cell(r, 2).Value = x.StoreID;
+                ws.Cell(r, 3).Value = x.StoreName;
+                ws.Cell(r, 4).Value = x.DivisionName;
+                if (x.EOM.HasValue)            ws.Cell(r, 5).Value = (double)x.EOM.Value;
+                ws.Cell(r, 6).Value = x.SOH;
+                if (x.MerchNeedWeek.HasValue)  ws.Cell(r, 7).Value = x.MerchNeedWeek.Value;
+                ws.Cell(r, 8).Value = x.LpmSimQty;
+                ws.Cell(r, 9).Value = x.OverrideQty;
+                r++;
+            }
+            var totalRow = rows.Count + 2;
+            ws.Cell(totalRow, 1).Value = $"TOTAL ({rows.Count:N0} rows)";
+            ws.Cell(totalRow, 1).Style.Font.Bold = true;
+            ws.Cell(totalRow, 5).Value = (double)rows.Sum(x => x.EOM ?? 0m);
+            ws.Cell(totalRow, 6).Value = rows.Sum(x => (long)x.SOH);
+            ws.Cell(totalRow, 7).Value = rows.Sum(x => (long)(x.MerchNeedWeek ?? 0));
+            ws.Cell(totalRow, 8).Value = rows.Sum(x => (long)x.LpmSimQty);
+            ws.Cell(totalRow, 9).Value = rows.Sum(x => (long)x.OverrideQty);
+            for (int c = 5; c <= 9; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
+            ws.Range(2, 5, totalRow, 9).Style.NumberFormat.Format = "#,##0";
+            ws.Columns().AdjustToContents();
+
+            var fileName = $"SimReports_EomSummary_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            await UploadHelpers.DownloadAsync(JS, wb, fileName);
+            Snackbar.Add($"Exported {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+        finally { _downloadingExcel = false; StateHasChanged(); }
+    }
+
+    private async Task DownloadBoxesExcelAsync()
+    {
+        if (_downloadingExcel) return;
+        _downloadingExcel = true; StateHasChanged();
+        try
+        {
+            var rows = FilteredBoxes.ToList();
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("SIM Boxes");
+            // Header set depends on roll-up mode (Store/Div columns appear
+            // only when NOT rolled up — matches what's shown on screen).
+            var headers = new List<string> { "Batch" };
+            if (!_rollupBoxOnly) { headers.Add("StoreID"); headers.Add("StoreName"); headers.Add("Division"); }
+            headers.AddRange(new[] { "BoxNo", "Box Qty", "Allocated Qty", "SKU Usability %",
+                                     "Pallet Type", "Type Name", "Pallet Category" });
+            for (int c = 0; c < headers.Count; c++)
+            {
+                ws.Cell(1, c + 1).Value = headers[c];
+                ws.Cell(1, c + 1).Style.Font.Bold = true;
+                ws.Cell(1, c + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+            }
+            int r = 2;
+            foreach (var x in rows)
+            {
+                int c = 1;
+                ws.Cell(r, c++).Value = x.LPMBatchNo;
+                if (!_rollupBoxOnly)
+                {
+                    ws.Cell(r, c++).Value = x.StoreID ?? "";
+                    ws.Cell(r, c++).Value = x.StoreName ?? "";
+                    ws.Cell(r, c++).Value = x.DivisionName ?? "";
+                }
+                ws.Cell(r, c++).Value = x.BoxNo;
+                if (x.BoxQty.HasValue)             ws.Cell(r, c).Value = x.BoxQty.Value;        c++;
+                ws.Cell(r, c++).Value = x.LpmSimQty;
+                if (x.SkuUsabilityPct.HasValue)    ws.Cell(r, c).Value = (double)x.SkuUsabilityPct.Value;  c++;
+                ws.Cell(r, c++).Value = x.PalletType ?? "";
+                ws.Cell(r, c++).Value = x.TypeName ?? "";
+                ws.Cell(r, c++).Value = x.PalletCategory ?? "";
+                r++;
+            }
+            // TOTAL row — Box Qty deduped by BoxNo, Allocated summed, Usability averaged.
+            var distinctBoxes = rows.GroupBy(x => x.BoxNo).ToList();
+            var totBoxQty  = distinctBoxes.Sum(g => (long)(g.First().BoxQty ?? 0));
+            var totAlloc   = rows.Sum(x => (long)x.LpmSimQty);
+            var avgUse     = rows.Count > 0 ? rows.Average(x => x.SkuUsabilityPct ?? 0m) : 0m;
+            int boxQtyCol  = _rollupBoxOnly ? 3 : 6;
+            int allocCol   = boxQtyCol + 1;
+            int usableCol  = boxQtyCol + 2;
+            var totalRow = rows.Count + 2;
+            ws.Cell(totalRow, 1).Value = $"TOTAL ({rows.Count:N0} rows · {distinctBoxes.Count:N0} distinct boxes)";
+            ws.Cell(totalRow, 1).Style.Font.Bold = true;
+            ws.Cell(totalRow, boxQtyCol).Value = totBoxQty;
+            ws.Cell(totalRow, allocCol).Value  = totAlloc;
+            ws.Cell(totalRow, usableCol).Value = (double)avgUse;
+            ws.Cell(totalRow, boxQtyCol).Style.Font.Bold = true;
+            ws.Cell(totalRow, allocCol).Style.Font.Bold  = true;
+            ws.Cell(totalRow, usableCol).Style.Font.Bold = true;
+            ws.Range(2, boxQtyCol, totalRow, allocCol).Style.NumberFormat.Format = "#,##0";
+            ws.Range(2, usableCol, totalRow, usableCol).Style.NumberFormat.Format = "0.0";
+            ws.Columns().AdjustToContents();
+
+            var fileName = $"SimReports_SimBoxes_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            await UploadHelpers.DownloadAsync(JS, wb, fileName);
+            Snackbar.Add($"Exported {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+        finally { _downloadingExcel = false; StateHasChanged(); }
+    }
+
+    private async Task DownloadItemsExcelAsync()
+    {
+        if (_downloadingExcel) return;
+        _downloadingExcel = true; StateHasChanged();
+        try
+        {
+            var rows = FilteredItems.ToList();
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("Item Details");
+            string[] headers = { "Batch", "StoreID", "StoreName", "Division", "BoxNo",
+                                 "Itemcode", "Qty", "SKU Max", "SOH", "LPM Qty" };
+            for (int c = 0; c < headers.Length; c++)
+            {
+                ws.Cell(1, c + 1).Value = headers[c];
+                ws.Cell(1, c + 1).Style.Font.Bold = true;
+                ws.Cell(1, c + 1).Style.Fill.BackgroundColor = XLColor.LightGray;
+            }
+            int r = 2;
+            foreach (var x in rows)
+            {
+                ws.Cell(r, 1).Value = x.LPMBatchNo;
+                ws.Cell(r, 2).Value = x.StoreID;
+                ws.Cell(r, 3).Value = x.StoreName;
+                ws.Cell(r, 4).Value = x.DivisionName;
+                ws.Cell(r, 5).Value = x.BoxNo;
+                ws.Cell(r, 6).Value = x.Itemcode;
+                if (x.BoxItemQty.HasValue) ws.Cell(r, 7).Value = x.BoxItemQty.Value;
+                if (x.SKUMax.HasValue)     ws.Cell(r, 8).Value = x.SKUMax.Value;
+                ws.Cell(r, 9).Value  = x.SOH;
+                ws.Cell(r, 10).Value = x.LpmQty;
+                r++;
+            }
+            var distinctItems = rows.Select(x => x.Itemcode).Distinct(StringComparer.OrdinalIgnoreCase).Count();
+            var totalRow = rows.Count + 2;
+            ws.Cell(totalRow, 1).Value = $"TOTAL ({rows.Count:N0} rows · {distinctItems:N0} distinct items)";
+            ws.Cell(totalRow, 1).Style.Font.Bold = true;
+            ws.Cell(totalRow, 7).Value  = rows.Sum(x => (long)(x.BoxItemQty ?? 0));
+            ws.Cell(totalRow, 8).Value  = rows.Sum(x => (long)(x.SKUMax ?? 0));
+            ws.Cell(totalRow, 9).Value  = rows.Sum(x => (long)x.SOH);
+            ws.Cell(totalRow, 10).Value = rows.Sum(x => (long)x.LpmQty);
+            for (int c = 7; c <= 10; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
+            ws.Range(2, 7, totalRow, 10).Style.NumberFormat.Format = "#,##0";
+            ws.Columns().AdjustToContents();
+
+            var fileName = $"SimReports_ItemDetails_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            await UploadHelpers.DownloadAsync(JS, wb, fileName);
+            Snackbar.Add($"Exported {fileName}", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+        finally { _downloadingExcel = false; StateHasChanged(); }
     }
 }
