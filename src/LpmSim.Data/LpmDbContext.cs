@@ -33,6 +33,8 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
     public DbSet<LpmWeeklySalesTargetSplit> LpmWeeklySalesTargetSplits => Set<LpmWeeklySalesTargetSplit>();
     public DbSet<LpmStoreDeptAccess> LpmStoreDeptAccesses => Set<LpmStoreDeptAccess>();
     public DbSet<LpmStoreCapacity> LpmStoreCapacities => Set<LpmStoreCapacity>();
+    // 1.14.77 — Parent/Child country linkage (UAE -> OMAN today). See LpmCountryLink.
+    public DbSet<LpmCountryLink>  LpmCountryLinks   => Set<LpmCountryLink>();
     public DbSet<LpmSimItemSkuMax> LpmSimItemSkuMaxes => Set<LpmSimItemSkuMax>();
     public DbSet<LpmSimProductionSchedule> LpmSimProductionSchedules => Set<LpmSimProductionSchedule>();
     public DbSet<LpmSimAdmRun>     LpmSimAdmRuns      => Set<LpmSimAdmRun>();
@@ -292,6 +294,19 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.UpdatedBy).HasMaxLength(100);
             e.Property(x => x.CreateTS).HasColumnType("datetime2(0)");
             e.Property(x => x.UpdatedTS).HasColumnType("datetime2(0)");
+        });
+
+        // 1.14.77 — Parent/Child country linkage. Used by EOM Calculator
+        // (Child uses Parent's WH source) and SIM Generate (Parent includes
+        // Child's stores). See LpmCountryLink + db/057_lpm_country_link.sql.
+        mb.Entity<LpmCountryLink>(e =>
+        {
+            e.ToTable("LPM_CountryLink");
+            e.HasKey(x => new { x.ParentCountry, x.ChildCountry });
+            e.Property(x => x.ParentCountry).HasMaxLength(20);
+            e.Property(x => x.ChildCountry ).HasMaxLength(20);
+            e.Property(x => x.CreatedBy    ).HasMaxLength(100);
+            e.Property(x => x.CreateTS     ).HasColumnType("datetime2(0)");
         });
 
         mb.Entity<LpmSKUMaxRule>(e =>

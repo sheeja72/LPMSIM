@@ -88,7 +88,12 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 var conn = db.Database.GetDbConnection();
                 if (conn.State != System.Data.ConnectionState.Open)
                     await db.Database.OpenConnectionAsync(ct);
-                var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+                // 1.14.77 — Route to the linked parent's WH source when this
+                // country is shipped from another country's warehouse (e.g.
+                // OMAN ships from UAE). For ordinary countries with no link,
+                // ResolveWhSourceCountryAsync returns the same country.
+                var whCountry = await CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct);
+                var whSrc = await WhBoxItemsSource.ResolveAsync(conn, whCountry, ct);
                 var codes = new HashSet<int>();
                 using var cmd = conn.CreateCommand();
                 cmd.CommandText = $@"
@@ -469,7 +474,11 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
 
         // Resolve country-aware whboxitems source (UAE → racks.dbo.whboxitems;
         // others → [<DataName>].dbo.WHBoxItemsExport).
-        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+        // 1.14.77 — Route to the linked parent's WH source when this country
+        // is a child (e.g. OMAN ships from UAE's warehouse). Ordinary
+        // countries with no link resolve to themselves.
+        var whCountry = await CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct);
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, whCountry, ct);
 
         var rows = new List<DivisionStockBreakdown>();
         using var cmd = conn.CreateCommand();
@@ -715,7 +724,10 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         {
             var conn = db.Database.GetDbConnection();
             await db.Database.OpenConnectionAsync(ct);
-            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            // 1.14.77 — Route child countries (e.g. OMAN) to the parent
+            // (UAE) so WH stock reads from the actual warehouse.
+            var whCountry = await CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct);
+            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, whCountry, ct);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = $@"
 WITH ItemDiv AS (
@@ -778,7 +790,10 @@ SELECT id.DivCode,
             var conn = db.Database.GetDbConnection();
             if (conn.State != System.Data.ConnectionState.Open)
                 await db.Database.OpenConnectionAsync(ct);
-            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            // 1.14.77 — Child countries (e.g. OMAN) route to the parent's
+            // (UAE) WH source.
+            var whCountry = await CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct);
+            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, whCountry, ct);
             using var cmd = conn.CreateCommand();
             cmd.CommandText = $@"
 WITH ItemDiv AS (

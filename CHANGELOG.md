@@ -23,6 +23,81 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.77 — Country linkage Part 1: EOM Calculator routes Child countries to Parent's WH source (2026-05-20)
+
+### What's new
+
+A new **country-linkage** concept introduced in two parts:
+
+- **Part 1 (this release, 1.14.77):** EOM Generate for a *child* country (e.g. OMAN) now reads the *parent* country's (e.g. UAE) warehouse source for WH Stock calculations.
+- **Part 2 (next release, 1.14.78):** SIM Generate for a *parent* (UAE) will include the *child* (OMAN) stores in the same allocation batch, with UAE stores ranked above OMAN within each phase.
+
+Linkage is opt-in per pair in a new `dbo.LPM_CountryLink` table. The migration seeds **UAE → OMAN**.
+
+### Concept
+
+| Role | Meaning |
+|---|---|
+| **Parent** country | Owns the physical warehouse. SIM batches run for this country. |
+| **Child** country | Has stores but no warehouse of its own; stock is shipped from the Parent's warehouse. |
+| Constraint | One Parent per Child (unique on `ChildCountry`). Multiple Children per Parent allowed (UAE can later feed OMAN + BAH + …). |
+
+### What Part 1 changes (this release)
+
+When EOM Generate runs for a country that's a Child in `LPM_CountryLink`, every WH-source resolution in `EomCalculator` re-routes to the Parent's source:
+
+- `LoadWhStockDivCodes` (readiness check)
+- Main `CalculateAsync` Stock-Breakdown SQL
+- Per-division WH Stock SQL
+- Per-division WH SKU/qty SQL for Tgt EOM
+
+Countries with NO link (the default — every country today except OMAN) resolve to themselves; behaviour is byte-identical to 1.14.76.
+
+For OMAN specifically:
+- The **WH Stock** readiness card now reads UAE's `racks.dbo.whboxitems` instead of trying (and failing) to find OMAN's missing `DataName` in `DataSettings`. The card text flips from *"WH Stock lookup failed: No DataName configured…"* to *"X of Y divisions have stock for this period"* (and is Ready, per 1.14.76's any-vs-all loosening).
+- The EOM math itself uses UAE's WH numbers when computing per-(Store, Div) stock breakdowns for OMAN's stores. Other inputs (Monthly Weights, Planned EOM, Sales/Turns, Store Grades, Volume Groups, SKU Max Rules) remain OMAN-specific.
+
+### What Part 1 does NOT yet do
+
+SIM Generate is **unchanged in 1.14.77**:
+
+- Running SIM for UAE still only allocates to UAE stores.
+- OMAN cannot be shipped to until 1.14.78 lands (Part 2).
+- Running SIM for OMAN directly would still fail at the box-loader (no boxes — OMAN has no own warehouse).
+
+So this release is useful primarily as a **stepping stone** — it unblocks OMAN EOM Generate so planners can see the EOM math + validate the per-(Store, Div) Tgt EOM values before the SIM piece arrives.
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/057_lpm_country_link.sql` | **NEW** migration — creates `LPM_CountryLink` table (composite PK on `(ParentCountry, ChildCountry)` + unique constraint on `ChildCountry`), seeds **UAE → OMAN**. Idempotent. |
+| `src/LpmSim.Core/Entities/LpmCountryLink.cs` | **NEW** entity. |
+| `src/LpmSim.Data/LpmDbContext.cs` | New `DbSet<LpmCountryLink> LpmCountryLinks` + entity config (table name + max-lengths). |
+| `src/LpmSim.Data/CountryLinkResolver.cs` | **NEW** static helper class. `GetParentCountryAsync` / `GetChildCountriesAsync` / `ResolveWhSourceCountryAsync`. |
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | 4 WH-source resolutions now call `CountryLinkResolver.ResolveWhSourceCountryAsync` before `WhBoxItemsSource.ResolveAsync` — when the country is a Child, resolve to the Parent first; otherwise unchanged. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.76 → 1.14.77 + new InformationalVersion. |
+
+### What was NOT touched (intentional)
+
+- **`LpmSimGenerator` unchanged.** SIM-side parent-child inclusion is 1.14.78 (Part 2).
+- **No UI change.** EOM Generate page renders the same; just the WH Stock card content changes when running for OMAN (now reads UAE).
+- **No change for countries without a link.** Every country except OMAN behaves exactly as in 1.14.76.
+- **Existing EOM batches** untouched. Only new Generate runs after migration 057 + 1.14.77 deploy apply the routing.
+- **`LpmEomOutput` schema unchanged.** OMAN's rows still have `Country='OMAN'` (per the QA decision — keep rows byte-identical to a normal OMAN EOM run; only the underlying WH-stock numbers change source).
+
+### Operator notes
+
+- **Apply migration 057** before / right after deploy: `sqlcmd -d LPMSIM -i db/057_lpm_country_link.sql` (or run via SSMS). Idempotent — safe to re-run.
+- After deploy + migration:
+  1. Open **EOM Generate → Country = OMAN**.
+  2. Click **Re-check**. WH Stock card should flip from Blocked (no DataName) to Ready, with UAE's division counts visible.
+  3. Sales/Turns / Volume Groups blockers from yesterday still apply — those are OMAN's own data quality issues (separate from the WH-source routing). Fix per the diagnostic SQL from earlier in the thread.
+  4. Once all cards are Ready, **Generate** will produce OMAN's per-(Store, Div) EOM Output rows. Stock numbers reflect UAE's warehouse; per-store Tgt EOM math is OMAN's own planned-EOM / store-grade / volume-group config.
+- **Adding more linkages later** — `INSERT INTO dbo.LPM_CountryLink (ParentCountry, ChildCountry) VALUES ('UAE', 'BAH');`. Takes effect on the next EOM Generate.
+- **Removing a linkage temporarily** — `UPDATE dbo.LPM_CountryLink SET IsActive = 0 WHERE ChildCountry = 'OMAN';`. The resolver skips inactive rows; the next EOM Generate for OMAN reverts to OMAN's own WH source (which will fail again if DataName is still missing).
+
+---
+
 ## 1.14.76 — EOM Generate: WH Stock readiness allows partial coverage; missing-division names surfaced (2026-05-20)
 
 ### What's new

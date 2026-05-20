@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.76</Version>
-    <AssemblyVersion>1.14.76.0</AssemblyVersion>
-    <FileVersion>1.14.76.0</FileVersion>
-    <InformationalVersion>1.14.76 (EOM Generate: WH Stock readiness loosened from "ALL active divisions must have stock" to "AT LEAST ONE has stock"; the card lists the missing divisions by name so the planner can spot data-quality issues vs intentionally-empty divisions)</InformationalVersion>
+    <Version>1.14.77</Version>
+    <AssemblyVersion>1.14.77.0</AssemblyVersion>
+    <FileVersion>1.14.77.0</FileVersion>
+    <InformationalVersion>1.14.77 (Country linkage — Part 1 of 2. New LPM_CountryLink table; EOM Calculator routes Child countries (e.g. OMAN) to Parent's WH source (e.g. UAE) so OMAN EOM Generate reads UAE warehouse instead of failing on missing DataName. SIM-side parent-child inclusion lands in 1.14.78.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
