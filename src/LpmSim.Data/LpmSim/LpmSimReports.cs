@@ -142,6 +142,12 @@ public class BoxDetailRow
     public DateTime? TrnDate { get; set; }
     public string? Warehouse { get; set; }
     public string? Rack { get; set; }
+    /// <summary>
+    /// 1.14.65 — Physical tote identifier from <c>whboxitems.ToteId</c>
+    /// (UAE) or <c>[&lt;DataName&gt;].dbo.WHBoxItemsExport.ToteId</c>. NULL
+    /// when the row has no tote tag.
+    /// </summary>
+    public string? ToteId { get; set; }
 
     /// <summary>% of the box's qty that was allocated in this batch (Allocated / Box Qty × 100).</summary>
     public decimal? SkuUsabilityPct =>
@@ -878,6 +884,7 @@ WITH BoxAgg AS (
 ),
 BoxMeta AS (
     -- 1.14.12: added MAX(PalletNo) so each (BoxNo) carries its pallet info.
+    -- 1.14.65: MAX(ToteId) for the new Tote ID column.
     SELECT BoxNo,
            SUM(CAST(Qty AS bigint)) AS BoxQty,
            MAX(PalletNo)   AS PalletNo,
@@ -885,14 +892,32 @@ BoxMeta AS (
            MAX(TrnDate)    AS TrnDate,
            MAX(Warehouse)  AS Warehouse,
            MAX(Rack)       AS Rack,
+           MAX(ToteId)     AS ToteId,
            CASE WHEN MAX(CASE WHEN LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1 THEN 'LPM' ELSE 'Non-LPM' END AS BoxKind
       FROM {whSrc}
      WHERE BoxNo IN (SELECT BoxNo FROM BoxAgg)
      GROUP BY BoxNo
+),
+-- 1.14.65 — Per-box Division (TOP-1 reduction). Boxes can technically span
+-- multiple divisions (multi-item boxes); MIN(d.DivCode) + MAX(d.Division)
+-- pick a single deterministic label so the rolled-up box list shows one
+-- division per row. Same pattern the non-rollup branch uses for items.
+BoxDiv AS (
+    SELECT w.BoxNo,
+           MIN(d.DivCode)  AS DivCode,
+           MAX(d.Division) AS DivisionName
+      FROM {whSrc} w
+      INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = w.ItemCode
+      INNER JOIN Datareporting.dbo.subclassmaster sm  ON sm.MH4ID   = u.MH4ID
+      INNER JOIN LPMSIM.dbo.Division               d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                                     AND d.IsActive = 1
+     WHERE w.BoxNo IN (SELECT BoxNo FROM BoxAgg)
+     GROUP BY w.BoxNo
 )
 SELECT b.LPMBatchNo,
        NULL AS StoreID, NULL AS StoreName,
-       NULL AS DivCode, NULL AS DivisionName,
+       bd.DivCode,                                   -- 1.14.65: was NULL
+       bd.DivisionName,                              -- 1.14.65: was NULL
        b.BoxNo,
        bm.PalletNo,                                  -- 1.14.12
        bm.BoxQty,
@@ -904,9 +929,11 @@ SELECT b.LPMBatchNo,
        bm.Warehouse,
        bm.Rack,
        b.RoundRobinQty,
-       bm.BoxKind
+       bm.BoxKind,
+       bm.ToteId                                     -- 1.14.65
   FROM BoxAgg b
   LEFT JOIN BoxMeta bm ON bm.BoxNo = b.BoxNo
+  LEFT JOIN BoxDiv  bd ON bd.BoxNo = b.BoxNo
   LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bm.PalletType
  ORDER BY b.BoxNo;"
             : $@"
@@ -950,7 +977,17 @@ SELECT sa.LPMBatchNo,
          WHERE w.BoxNo = sa.BoxNo) AS TypeName,
        (SELECT TOP 1 pt.PalletCategory FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-         WHERE w.BoxNo = sa.BoxNo) AS PalletCategory
+         WHERE w.BoxNo = sa.BoxNo) AS PalletCategory,
+       -- 1.14.65 — Pad to align with the rollup branch's column positions
+       -- so the shared ReadBoxDetail reader maps fields correctly. The
+       -- non-rollup mode doesn't surface these extras in the UI, but the
+       -- positional alignment lets ToteId land at index 17 cleanly.
+       CAST(NULL AS datetime) AS TrnDate,
+       CAST(NULL AS nvarchar(50)) AS Warehouse,
+       CAST(NULL AS nvarchar(50)) AS Rack,
+       CAST(0    AS bigint)       AS RoundRobinQty,
+       CAST(NULL AS nvarchar(10)) AS BoxKind,
+       (SELECT TOP 1 ToteId FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS ToteId
   FROM SimAgg sa
   LEFT JOIN dbo.DataSettings ds ON ds.StoreID = sa.StoreID
   LEFT JOIN dbo.Division div ON div.DivCode = sa.DivCode
@@ -1613,6 +1650,9 @@ SELECT TOP (@top)
         Rack           = r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14)   : null,
         RoundRobinQty  = r.FieldCount > 15 && !r.IsDBNull(15) ? r.GetInt64(15)    : 0,
         BoxKind        = r.FieldCount > 16 && !r.IsDBNull(16) ? r.GetString(16)   : null,
+        // 1.14.65 — ToteId column appended at index 17. FieldCount guard
+        // means callers reading an older SELECT (pre-1.14.65) still work.
+        ToteId         = r.FieldCount > 17 && !r.IsDBNull(17) ? r.GetString(17)   : null,
     };
 
     // 1.14.12: PalletNo column added at index 6; every subsequent index shifted by +1.

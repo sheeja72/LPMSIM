@@ -23,6 +23,44 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.65 — SIM Generate → SIM Boxes: add Tote ID + Division columns (2026-05-20)
+
+### What changed
+
+The SIM Boxes tab on **LPM SIM Generate** now shows two additional columns:
+
+| Column | Source |
+|---|---|
+| **Division** | TOP-1 reduction over `upc_subclass × subclassmaster × Division` for the items in the box. Boxes that span multiple divisions get a single deterministic label (MIN(DivCode), MAX(name)). |
+| **Tote ID** | `whboxitems.ToteId` (UAE) / `WHBoxItemsExport.ToteId` (other countries). Sourced via `MAX(ToteId)` per box. |
+
+Both columns also surface in the **Excel export** with `LPMSIM_Boxes_<batchNo>.xlsx` — new headers `Division` (after Kind) and `Tote ID` (after Rack), and the existing date / numeric format ranges shift accordingly.
+
+### Why these were possible without a service-layer signature change
+
+`BoxDetailRow` already had a `DivisionName` field (used by the non-rollup mode in LPM SIM Reports). It was just NULL in the rollup query because boxes can span multiple divisions. The new `BoxDiv` CTE picks a deterministic TOP-1 division per box. `ToteId` is a new field on the record, populated via `MAX(ToteId)` in the rollup `BoxMeta` CTE and a `TOP-1` subquery in the non-rollup branch (with padding so the column positions stay aligned for the shared reader).
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | `BoxDetailRow` gains `ToteId` (string?). Rollup SQL: `BoxMeta` adds `MAX(ToteId)`; new `BoxDiv` CTE maps BoxNo → DivCode + Division via the same item-to-division chain the rest of the codebase uses; final SELECT replaces `NULL AS DivCode, NULL AS DivisionName` with `bd.DivCode, bd.DivisionName` and appends `bm.ToteId`. Non-rollup SQL pads positions 12–16 with NULL/0 placeholders to keep ToteId at column index 17 so the shared `ReadBoxDetail` reader stays positional. Reader adds `ToteId` at index 17 with `FieldCount > 17` guard. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | SIM Boxes tab: Division column (after Kind) + Tote ID column (after Rack), both sortable. Excel export: matching headers + cell positions; date and numeric format ranges shifted by +1 / +2 to track the new columns. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.64 → 1.14.65. |
+
+### Caveat — `ToteId` column
+
+The SQL references `w.ToteId`. If your `whboxitems` / `WHBoxItemsExport` schema uses a different column name (e.g. `Tote_Id`, `ToteNo`), the query will throw `Invalid column name 'ToteId'` on the next SIM Boxes tab load — quick fix once you tell me the actual column.
+
+### Risk
+**Low.** Two new fields surfacing existing data. Other consumers of `BoxDetailRow` ignore the new `ToteId` field (it's just there). The `FieldCount > 17` reader guard means any older caller reading from a SELECT that doesn't emit ToteId still works.
+
+### Verification after deploy
+1. Open **LPM SIM Generate** → run/view a batch → **SIM Boxes** tab.
+2. Confirm **Division** column populates next to Kind, and **Tote ID** next to Rack.
+3. Click **Excel** → workbook should include both new columns.
+
+---
+
 ## 1.14.64 — SIM Generate: Warehouses + LPM Months dropdowns country-aware (2026-05-19)
 
 ### The bug

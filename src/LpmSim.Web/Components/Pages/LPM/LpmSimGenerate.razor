@@ -1354,11 +1354,15 @@
                         <MudTh><div class="th-total">@filteredBoxes.Count.ToString("N0") rows</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.PalletNo ?? string.Empty">Pallet No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxKind ?? string.Empty">Kind</MudTableSortLabel></MudTh>
+                        @* 1.14.65 — Division column added after Kind (top-1 mapping per box). *@
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.DivisionName ?? string.Empty">Division</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Pallet Type</MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Type Name</MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.TrnDate ?? DateTime.MinValue">Trn Date</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.Warehouse ?? string.Empty">Warehouse</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.Rack ?? string.Empty">Rack</MudTableSortLabel></MudTh>
+                        @* 1.14.65 — Tote ID column after Rack (physical-location group). *@
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.ToteId ?? string.Empty">Tote ID</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalBoxQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Total Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalSimQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalRrQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
@@ -1377,11 +1381,13 @@
                                 <span class="lpm-status lpm-status-warn">Non-LPM</span>
                             }
                         </MudTd>
+                        <MudTd>@context.DivisionName</MudTd>
                         <MudTd>@context.PalletType</MudTd>
                         <MudTd>@context.TypeName</MudTd>
                         <MudTd>@(context.TrnDate?.ToString("yyyy-MM-dd"))</MudTd>
                         <MudTd>@context.Warehouse</MudTd>
                         <MudTd>@context.Rack</MudTd>
+                        <MudTd><code>@context.ToteId</code></MudTd>
                         <MudTd>@(context.BoxQty?.ToString("N0"))</MudTd>
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
@@ -4364,7 +4370,10 @@
         await SaveExcelAsync($"LPMSIM_Boxes_{bn}.xlsx", "Boxes", sheet =>
         {
             // 1.14.12: Pallet No column added after Box No.
-            string[] headers = { "Box No", "Pallet No", "Kind", "Pallet Type", "Type Name", "Trn Date", "Warehouse", "Rack", "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
+            // 1.14.65: Division (after Kind) + Tote ID (after Rack) added.
+            string[] headers = { "Box No", "Pallet No", "Kind", "Division", "Pallet Type", "Type Name",
+                                 "Trn Date", "Warehouse", "Rack", "Tote ID",
+                                 "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
@@ -4372,19 +4381,21 @@
                 sheet.Cell(row, 1).Value  = r.BoxNo;
                 sheet.Cell(row, 2).Value  = r.PalletNo ?? "";
                 sheet.Cell(row, 3).Value  = r.BoxKind ?? "";
-                sheet.Cell(row, 4).Value  = r.PalletType ?? "";
-                sheet.Cell(row, 5).Value  = r.TypeName ?? "";
-                if (r.TrnDate.HasValue) sheet.Cell(row, 6).Value = r.TrnDate.Value;
-                sheet.Cell(row, 7).Value  = r.Warehouse ?? "";
-                sheet.Cell(row, 8).Value  = r.Rack ?? "";
-                sheet.Cell(row, 9).Value  = r.BoxQty ?? 0;
-                sheet.Cell(row, 10).Value = r.LpmSimQty;
-                sheet.Cell(row, 11).Value = r.RoundRobinQty;
-                sheet.Cell(row, 12).Value = (double?)r.SkuUsabilityPct;
+                sheet.Cell(row, 4).Value  = r.DivisionName ?? "";
+                sheet.Cell(row, 5).Value  = r.PalletType ?? "";
+                sheet.Cell(row, 6).Value  = r.TypeName ?? "";
+                if (r.TrnDate.HasValue) sheet.Cell(row, 7).Value = r.TrnDate.Value;
+                sheet.Cell(row, 8).Value  = r.Warehouse ?? "";
+                sheet.Cell(row, 9).Value  = r.Rack ?? "";
+                sheet.Cell(row, 10).Value = r.ToteId ?? "";
+                sheet.Cell(row, 11).Value = r.BoxQty ?? 0;
+                sheet.Cell(row, 12).Value = r.LpmSimQty;
+                sheet.Cell(row, 13).Value = r.RoundRobinQty;
+                sheet.Cell(row, 14).Value = (double?)r.SkuUsabilityPct;
             }
-            sheet.Range(2, 6, rows.Count + 1, 6).Style.NumberFormat.Format = "yyyy-mm-dd";
-            FormatNumeric(sheet, rows.Count, new[] { 9, 10, 11 });
-            sheet.Range(2, 12, rows.Count + 1, 12).Style.NumberFormat.Format = "0.0";
+            sheet.Range(2, 7, rows.Count + 1, 7).Style.NumberFormat.Format = "yyyy-mm-dd";
+            FormatNumeric(sheet, rows.Count, new[] { 11, 12, 13 });
+            sheet.Range(2, 14, rows.Count + 1, 14).Style.NumberFormat.Format = "0.0";
         });
     }
 
