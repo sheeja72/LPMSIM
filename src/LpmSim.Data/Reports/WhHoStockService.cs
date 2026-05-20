@@ -61,6 +61,13 @@ public record WhHoStockFilter(
 ///   unrestricted; tightened so reconcile with raw SSMS query works).</param>
 /// <param name="LpmStock">Σ Qty where LPM is set AND satisfies the
 ///   universal WH rule.</param>
+/// <param name="LpmEligibleStock">1.14.72 — Σ Qty where LPM is set AND
+///   <c>PalletCategory='ELIGIBLE'</c> AND <c>ShopEligible &lt;&gt; 'E'</c>.
+///   Intersection of <see cref="EligibleStock"/> and <see cref="LpmStock"/>.</param>
+/// <param name="NonLpmEligibleStock">1.14.72 — Σ Qty where LPM is NULL or
+///   empty AND <c>PalletCategory='ELIGIBLE'</c> AND
+///   <c>ShopEligible &lt;&gt; 'E'</c>. Intersection of <see cref="EligibleStock"/>
+///   and <see cref="NonLpmStock"/>.</param>
 public record WhHoStockRow(
     string Division,
     long HoStock,
@@ -71,7 +78,9 @@ public record WhHoStockRow(
     long OnHoldStock,
     long EligibleStock,
     long NonLpmStock,
-    long LpmStock);
+    long LpmStock,
+    long LpmEligibleStock,
+    long NonLpmEligibleStock);
 
 /// <summary>
 /// Data access for the Reports → WH/HO Stock page. Builds one Division ×
@@ -260,7 +269,19 @@ public class WhHoStockService(IConfiguration cfg)
                        SUM(CASE WHEN w.LPM IS NOT NULL AND w.LPM <> ''
                                  AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
                                  AND w.ShopEligible <> 'E'
-                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmStock
+                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmStock,
+                       -- 1.14.72 — Intersection of LPM AND Eligible:
+                       --   LPM set + PalletCategory='ELIGIBLE' + ShopEligible <> 'E'.
+                       SUM(CASE WHEN w.LPM IS NOT NULL AND w.LPM <> ''
+                                 AND UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
+                                 AND w.ShopEligible <> 'E'
+                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmEligibleStock,
+                       -- 1.14.72 — Intersection of Non-LPM AND Eligible:
+                       --   LPM NULL/empty + PalletCategory='ELIGIBLE' + ShopEligible <> 'E'.
+                       SUM(CASE WHEN (w.LPM IS NULL OR w.LPM = '')
+                                 AND UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
+                                 AND w.ShopEligible <> 'E'
+                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS NonLpmEligibleStock
                   FROM {whSrc} w
                   LEFT JOIN #WhRptItemDiv id ON id.itemcode = w.ItemCode
                  WHERE (@season = 'A'
@@ -279,7 +300,9 @@ public class WhHoStockService(IConfiguration cfg)
                 ISNULL(w.OnHoldStock,        0)    AS OnHoldStock,
                 ISNULL(w.EligibleStock,      0)    AS EligibleStock,
                 ISNULL(w.NonLpmStock,        0)    AS NonLpmStock,
-                ISNULL(w.LpmStock,           0)    AS LpmStock
+                ISNULL(w.LpmStock,           0)    AS LpmStock,
+                ISNULL(w.LpmEligibleStock,   0)    AS LpmEligibleStock,    -- 1.14.72
+                ISNULL(w.NonLpmEligibleStock, 0)   AS NonLpmEligibleStock  -- 1.14.72
               FROM HOByDiv h
               FULL OUTER JOIN WHByDiv w ON w.Division = h.Division
              WHERE COALESCE(h.Division, w.Division) IS NOT NULL
@@ -295,16 +318,19 @@ public class WhHoStockService(IConfiguration cfg)
         while (await rdr.ReadAsync(ct))
         {
             rows.Add(new WhHoStockRow(
-                Division:      rdr.IsDBNull(0) ? "" : rdr.GetString(0),
-                HoStock:       rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1),
-                WhStock:       rdr.IsDBNull(2) ? 0L : rdr.GetInt64(2),
-                Variance:      rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3),
-                ReservedStock: rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4),
-                SeasonalStock: rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5),
-                OnHoldStock:   rdr.IsDBNull(6) ? 0L : rdr.GetInt64(6),
-                EligibleStock: rdr.IsDBNull(7) ? 0L : rdr.GetInt64(7),
-                NonLpmStock:   rdr.IsDBNull(8) ? 0L : rdr.GetInt64(8),
-                LpmStock:      rdr.IsDBNull(9) ? 0L : rdr.GetInt64(9)));
+                Division:           rdr.IsDBNull(0)  ? "" : rdr.GetString(0),
+                HoStock:            rdr.IsDBNull(1)  ? 0L : rdr.GetInt64(1),
+                WhStock:            rdr.IsDBNull(2)  ? 0L : rdr.GetInt64(2),
+                Variance:           rdr.IsDBNull(3)  ? 0L : rdr.GetInt64(3),
+                ReservedStock:      rdr.IsDBNull(4)  ? 0L : rdr.GetInt64(4),
+                SeasonalStock:      rdr.IsDBNull(5)  ? 0L : rdr.GetInt64(5),
+                OnHoldStock:        rdr.IsDBNull(6)  ? 0L : rdr.GetInt64(6),
+                EligibleStock:      rdr.IsDBNull(7)  ? 0L : rdr.GetInt64(7),
+                NonLpmStock:        rdr.IsDBNull(8)  ? 0L : rdr.GetInt64(8),
+                LpmStock:           rdr.IsDBNull(9)  ? 0L : rdr.GetInt64(9),
+                // 1.14.72 — new intersections.
+                LpmEligibleStock:    rdr.IsDBNull(10) ? 0L : rdr.GetInt64(10),
+                NonLpmEligibleStock: rdr.IsDBNull(11) ? 0L : rdr.GetInt64(11)));
         }
         return rows;
     }

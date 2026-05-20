@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.71</Version>
-    <AssemblyVersion>1.14.71.0</AssemblyVersion>
-    <FileVersion>1.14.71.0</FileVersion>
-    <InformationalVersion>1.14.71 (EOM Calculator: filter DataSettings on SIMCountry instead of Country — aligns the EOM grid's store list with the SIM Generate pipeline so a store can't appear in EOM but be invisible to SIM or vice versa)</InformationalVersion>
+    <Version>1.14.72</Version>
+    <AssemblyVersion>1.14.72.0</AssemblyVersion>
+    <FileVersion>1.14.72.0</FileVersion>
+    <InformationalVersion>1.14.72 (SIM Boxes report: empty-BoxNo fallback joins whboxitems.BoxNo = LPMSIM_Output.PalletNo so lone-pallet entries get their correct PalletType / GIN columns; WH Stock Position: add LPM Eligible + NonLPM Eligible columns + per-column hover tooltips showing each criterion)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -901,79 +901,119 @@ DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
 
         var sql = rollupToBoxOnly
             ? $@"
+-- 1.14.72 — Two-pronged meta lookup. Some pallets in whboxitems carry an
+-- EMPTY BoxNo and only a PalletNo (lone-pallet entries). The allocator
+-- writes whatever BoxNo it found into LPMSIM_Output.BoxNo verbatim — so
+-- those rows land in LPMSIM_Output with BoxNo = '' (or NULL) and PalletNo
+-- = 'PLT…'. Pre-1.14.72 the report GROUP BY collapsed every empty-BoxNo
+-- row into one bucket and MAX(PalletType) returned an alphabetically-
+-- arbitrary value (e.g. 'XM' over 'R1' for PLT571291B).
+--
+-- New rule (per operator):
+--   • LPMSIM_Output.BoxNo <> '' → look up whboxitems WHERE BoxNo = LPMSIM_Output.BoxNo
+--     (PalletNo also matched to disambiguate multi-pallet boxes — 1.14.70 rule)
+--   • LPMSIM_Output.BoxNo  = '' → look up whboxitems WHERE BoxNo = LPMSIM_Output.PalletNo
+--     (the fallback the operator documented — empty-BoxNo rows in
+--      whboxitems whose BoxNo column carries the PalletNo string)
+--
+-- BoxAgg is now grouped by (BoxNo, PalletNo) so empty-BoxNo rows with
+-- different PalletNos no longer collapse together.
 WITH BoxAgg AS (
-    SELECT s.LPMBatchNo, s.BoxNo,
-           -- 1.14.70: project the allocator's PalletNo so the PalletType /
-           -- TypeName / GIN-* lookups below can target the SPECIFIC physical
-           -- pallet the box belongs to. Pre-1.14.70 BoxMeta used MAX(PalletType)
-           -- across every whboxitems row sharing the BoxNo — when a BoxNo
-           -- pointed at multiple pallets with different PalletTypes (the
-           -- PLT571291B XMAS-vs-R1 case), MAX picked alphabetically and
-           -- mislabelled the box.
-           MAX(s.PalletNo) AS PalletNo,
+    SELECT s.LPMBatchNo, s.BoxNo, s.PalletNo,
            SUM(CAST(s.Qty AS bigint)) AS LpmSimQty,
            SUM(CASE WHEN s.IsRoundRobin = 1 THEN CAST(s.Qty AS bigint) ELSE 0 END) AS RoundRobinQty
       FROM dbo.LPMSIM_Output s
      WHERE s.LPMBatchNo = @batchNo
-     GROUP BY s.LPMBatchNo, s.BoxNo
+     GROUP BY s.LPMBatchNo, s.BoxNo, s.PalletNo
 ),
+-- 1.14.72 — Combined per-(BoxNo, PalletNo) meta. UNION ALL of the two
+-- lookup branches (non-empty-BoxNo + empty-BoxNo fallback) so each branch
+-- runs as its own optimisable SQL plan instead of forcing the engine to
+-- evaluate an OR in a JOIN predicate.
 BoxMeta AS (
-    -- Per-box meta — BoxQty / TrnDate / Warehouse / Rack / ToteId / BoxKind
-    -- stay at the BoxNo level (summed across all pallets in the box).
-    -- 1.14.70 — PalletNo + PalletType moved to BoxPalletMeta so they
-    -- correspond to a SPECIFIC pallet.
-    SELECT BoxNo,
-           SUM(CAST(Qty AS bigint)) AS BoxQty,
-           MAX(TrnDate)    AS TrnDate,
-           MAX(Warehouse)  AS Warehouse,
-           MAX(Rack)       AS Rack,
-           MAX(ToteId)     AS ToteId,
-           CASE WHEN MAX(CASE WHEN LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1 THEN 'LPM' ELSE 'Non-LPM' END AS BoxKind
-      FROM {whSrc}
-     WHERE BoxNo IN (SELECT BoxNo FROM BoxAgg)
-     GROUP BY BoxNo
+    -- Branch A — LPMSIM_Output.BoxNo is non-empty.
+    -- Join whboxitems.BoxNo = LPMSIM_Output.BoxNo AND match the PalletNo
+    -- too (1.14.70 disambiguation for the multi-pallet-per-BoxNo case).
+    SELECT b.BoxNo, b.PalletNo,
+           SUM(CAST(w.Qty AS bigint))                                            AS BoxQty,
+           MAX(w.TrnDate)                                                        AS TrnDate,
+           MAX(w.Warehouse)                                                      AS Warehouse,
+           MAX(w.Rack)                                                           AS Rack,
+           MAX(w.ToteId)                                                         AS ToteId,
+           MAX(w.PalletType)                                                     AS PalletType,
+           MAX(w.PurDate)                                                        AS PurDate,
+           MAX(w.GINNo)                                                          AS GINNo,
+           MAX(w.GinDate)                                                        AS GinDate,
+           MAX(w.FromTo)                                                         AS FromTo,
+           CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
+                THEN 'LPM' ELSE 'Non-LPM' END                                    AS BoxKind
+      FROM BoxAgg b
+      INNER JOIN {whSrc} w
+              ON w.BoxNo = b.BoxNo
+             AND ISNULL(w.PalletNo, '') = ISNULL(b.PalletNo, '')
+     WHERE ISNULL(b.BoxNo, '') <> ''
+     GROUP BY b.BoxNo, b.PalletNo
+    UNION ALL
+    -- Branch B — LPMSIM_Output.BoxNo is empty.
+    -- Fall back to matching whboxitems.BoxNo = LPMSIM_Output.PalletNo.
+    SELECT b.BoxNo, b.PalletNo,
+           SUM(CAST(w.Qty AS bigint))                                            AS BoxQty,
+           MAX(w.TrnDate)                                                        AS TrnDate,
+           MAX(w.Warehouse)                                                      AS Warehouse,
+           MAX(w.Rack)                                                           AS Rack,
+           MAX(w.ToteId)                                                         AS ToteId,
+           MAX(w.PalletType)                                                     AS PalletType,
+           MAX(w.PurDate)                                                        AS PurDate,
+           MAX(w.GINNo)                                                          AS GINNo,
+           MAX(w.GinDate)                                                        AS GinDate,
+           MAX(w.FromTo)                                                         AS FromTo,
+           CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
+                THEN 'LPM' ELSE 'Non-LPM' END                                    AS BoxKind
+      FROM BoxAgg b
+      INNER JOIN {whSrc} w ON w.BoxNo = b.PalletNo
+     WHERE ISNULL(b.BoxNo, '') = ''
+     GROUP BY b.BoxNo, b.PalletNo
 ),
--- 1.14.70 — Per-(BoxNo, PalletNo) meta. PalletType / PurDate / GINNo /
--- GinDate / FromTo are pallet-level attributes, so grouping at the pallet
--- granularity gives one deterministic row per physical pallet. The main
--- SELECT joins this on (BoxNo, PalletNo) using the PalletNo from BoxAgg
--- (i.e. the one the allocator actually used).
-BoxPalletMeta AS (
-    SELECT BoxNo, PalletNo,
-           MAX(PalletType) AS PalletType,
-           MAX(PurDate)    AS PurDate,
-           MAX(GINNo)      AS GINNo,
-           MAX(GinDate)    AS GinDate,
-           MAX(FromTo)     AS FromTo
-      FROM {whSrc}
-     WHERE BoxNo IN (SELECT BoxNo FROM BoxAgg)
-     GROUP BY BoxNo, PalletNo
-),
--- 1.14.65 — Per-box Division (TOP-1 reduction). Boxes can technically span
--- multiple divisions (multi-item boxes); MIN(d.DivCode) + MAX(d.Division)
--- pick a single deterministic label so the rolled-up box list shows one
--- division per row. Same pattern the non-rollup branch uses for items.
+-- 1.14.65 — Per-box Division (TOP-1 reduction). 1.14.72 — same two-branch
+-- shape as BoxMeta so the empty-BoxNo fallback also resolves the Division.
 BoxDiv AS (
-    SELECT w.BoxNo,
+    -- Branch A — non-empty BoxNo
+    SELECT b.BoxNo, b.PalletNo,
            MIN(d.DivCode)  AS DivCode,
            MAX(d.Division) AS DivisionName
-      FROM {whSrc} w
+      FROM BoxAgg b
+      INNER JOIN {whSrc} w
+              ON w.BoxNo = b.BoxNo
+             AND ISNULL(w.PalletNo, '') = ISNULL(b.PalletNo, '')
       INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = w.ItemCode
       INNER JOIN Datareporting.dbo.subclassmaster sm  ON sm.MH4ID   = u.MH4ID
       INNER JOIN LPMSIM.dbo.Division               d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
                                                      AND d.IsActive = 1
-     WHERE w.BoxNo IN (SELECT BoxNo FROM BoxAgg)
-     GROUP BY w.BoxNo
+     WHERE ISNULL(b.BoxNo, '') <> ''
+     GROUP BY b.BoxNo, b.PalletNo
+    UNION ALL
+    -- Branch B — empty BoxNo, fall back to PalletNo
+    SELECT b.BoxNo, b.PalletNo,
+           MIN(d.DivCode)  AS DivCode,
+           MAX(d.Division) AS DivisionName
+      FROM BoxAgg b
+      INNER JOIN {whSrc} w ON w.BoxNo = b.PalletNo
+      INNER JOIN Datareporting.dbo.upc_subclass    u  ON u.itemcode = w.ItemCode
+      INNER JOIN Datareporting.dbo.subclassmaster sm  ON sm.MH4ID   = u.MH4ID
+      INNER JOIN LPMSIM.dbo.Division               d  ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                                                     AND d.IsActive = 1
+     WHERE ISNULL(b.BoxNo, '') = ''
+     GROUP BY b.BoxNo, b.PalletNo
 )
 SELECT b.LPMBatchNo,
        NULL AS StoreID, NULL AS StoreName,
-       bd.DivCode,                                   -- 1.14.65: was NULL
-       bd.DivisionName,                              -- 1.14.65: was NULL
+       bd.DivCode,
+       bd.DivisionName,
        b.BoxNo,
-       b.PalletNo,                                   -- 1.14.70: from LPMSIM_Output (was bm.PalletNo)
+       b.PalletNo,
        bm.BoxQty,
        b.LpmSimQty,
-       bpm.PalletType,                               -- 1.14.70: matched on (BoxNo, PalletNo)
+       bm.PalletType,
        pt.TypeName,
        pt.PalletCategory,
        bm.TrnDate,
@@ -981,19 +1021,20 @@ SELECT b.LPMBatchNo,
        bm.Rack,
        b.RoundRobinQty,
        bm.BoxKind,
-       bm.ToteId,                                    -- 1.14.65
-       bpm.PurDate,                                  -- 1.14.70 — new
-       bpm.GINNo,                                    -- 1.14.70 — new
-       bpm.GinDate,                                  -- 1.14.70 — new
-       bpm.FromTo                                    -- 1.14.70 — new
+       bm.ToteId,
+       bm.PurDate,
+       bm.GINNo,
+       bm.GinDate,
+       bm.FromTo
   FROM BoxAgg b
-  LEFT JOIN BoxMeta bm ON bm.BoxNo = b.BoxNo
-  LEFT JOIN BoxPalletMeta bpm
-         ON bpm.BoxNo = b.BoxNo
-        AND ISNULL(bpm.PalletNo, '') = ISNULL(b.PalletNo, '')
-  LEFT JOIN BoxDiv  bd ON bd.BoxNo = b.BoxNo
-  LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bpm.PalletType
- ORDER BY b.BoxNo;"
+  LEFT JOIN BoxMeta bm
+         ON ISNULL(bm.BoxNo, '')   = ISNULL(b.BoxNo, '')
+        AND ISNULL(bm.PalletNo, '') = ISNULL(b.PalletNo, '')
+  LEFT JOIN BoxDiv bd
+         ON ISNULL(bd.BoxNo, '')   = ISNULL(b.BoxNo, '')
+        AND ISNULL(bd.PalletNo, '') = ISNULL(b.PalletNo, '')
+  LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bm.PalletType
+ ORDER BY b.BoxNo, b.PalletNo;"
             : $@"
 WITH ItemDiv AS (
     -- subclassmaster.DivID (401..) does not match LPMSIM Division.DivCode (1..).
@@ -1012,17 +1053,22 @@ WITH ItemDiv AS (
      GROUP BY u.itemcode
 ),
 SimAgg AS (
-    -- 1.14.70: project the allocator's PalletNo so the PalletType / GIN-*
-    -- TOP-1 subqueries below can target the SPECIFIC physical pallet
-    -- (fixes the same PLT571291B XMAS-vs-R1 ambiguity the rollup branch
-    -- had).
-    SELECT s.LPMBatchNo, s.StoreID, id.DivID AS DivCode, s.BoxNo,
-           MAX(s.PalletNo) AS PalletNo,
+    -- 1.14.70 / 1.14.72: project the allocator's PalletNo so the per-pallet
+    -- TOP-1 subqueries below can target the SPECIFIC physical pallet AND
+    -- the MatchKey can switch between BoxNo (when populated) and PalletNo
+    -- (when BoxNo is empty in LPMSIM_Output).
+    -- 1.14.72: GROUP BY now includes PalletNo so empty-BoxNo rows with
+    -- different PalletNos don't collapse into a single combined row.
+    SELECT s.LPMBatchNo, s.StoreID, id.DivID AS DivCode, s.BoxNo, s.PalletNo,
+           -- 1.14.72 — Picks which whboxitems column the lookups join to:
+           --   • BoxNo non-empty → match w.BoxNo = sa.BoxNo (legacy path)
+           --   • BoxNo empty     → match w.BoxNo = sa.PalletNo (fallback)
+           CASE WHEN ISNULL(s.BoxNo, '') = '' THEN s.PalletNo ELSE s.BoxNo END AS MatchKey,
            SUM(CAST(s.Qty AS bigint)) AS LpmSimQty
       FROM dbo.LPMSIM_Output s
       INNER JOIN ItemDiv id ON id.itemcode = s.Itemcode
      WHERE s.LPMBatchNo = @batchNo
-     GROUP BY s.LPMBatchNo, s.StoreID, id.DivID, s.BoxNo
+     GROUP BY s.LPMBatchNo, s.StoreID, id.DivID, s.BoxNo, s.PalletNo
 )
 SELECT sa.LPMBatchNo,
        sa.StoreID,
@@ -1031,21 +1077,25 @@ SELECT sa.LPMBatchNo,
        MAX(div.Division)  AS DivisionName,
        sa.BoxNo,
        sa.PalletNo,                                              -- 1.14.70: from LPMSIM_Output (deterministic)
-       (SELECT SUM(CAST(Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS BoxQty,
+       (SELECT SUM(CAST(Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = sa.MatchKey) AS BoxQty,
        sa.LpmSimQty,
-       -- 1.14.70 — all per-pallet lookups now match BOTH BoxNo AND PalletNo
-       -- so the row picked corresponds to the allocator's chosen pallet.
+       -- 1.14.70 / 1.14.72 — per-pallet lookups join on MatchKey (BoxNo or
+       -- PalletNo per the rule above). When BoxNo is non-empty we ALSO
+       -- disambiguate by PalletNo so a multi-pallet-per-box BoxNo picks
+       -- the right pallet (the PLT571291B 1.14.70 fix). When BoxNo is
+       -- empty, MatchKey = PalletNo so the PalletNo disambiguation is
+       -- implicit — the extra predicate is bypassed by the OR.
        (SELECT TOP 1 PalletType FROM {whSrc} w
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS PalletType,
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS PalletType,
        (SELECT TOP 1 pt.TypeName       FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS TypeName,
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS TypeName,
        (SELECT TOP 1 pt.PalletCategory FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS PalletCategory,
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS PalletCategory,
        -- 1.14.65 — Pad to align with the rollup branch's column positions
        -- so the shared ReadBoxDetail reader maps fields correctly. The
        -- non-rollup mode doesn't surface these extras in the UI, but the
@@ -1055,25 +1105,27 @@ SELECT sa.LPMBatchNo,
        CAST(NULL AS nvarchar(50)) AS Rack,
        CAST(0    AS bigint)       AS RoundRobinQty,
        CAST(NULL AS nvarchar(10)) AS BoxKind,
-       (SELECT TOP 1 ToteId FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS ToteId,
+       (SELECT TOP 1 ToteId FROM {whSrc} w WHERE w.BoxNo = sa.MatchKey) AS ToteId,
        -- 1.14.70 — new columns from whboxitems / WHBoxItemsExport. All
-       -- pallet-level attributes so they're matched on (BoxNo, PalletNo).
+       -- pallet-level attributes so they're matched on (BoxNo, PalletNo)
+       -- in the non-empty branch and just (MatchKey=PalletNo) in the
+       -- empty-BoxNo branch.
        (SELECT TOP 1 PurDate FROM {whSrc} w
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS PurDate,
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS PurDate,
        (SELECT TOP 1 GINNo   FROM {whSrc} w
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS GINNo,
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS GINNo,
        (SELECT TOP 1 GinDate FROM {whSrc} w
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS GinDate,
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS GinDate,
        (SELECT TOP 1 FromTo  FROM {whSrc} w
-         WHERE w.BoxNo = sa.BoxNo
-           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS FromTo
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS FromTo
   FROM SimAgg sa
   LEFT JOIN dbo.DataSettings ds ON ds.StoreID = sa.StoreID
   LEFT JOIN dbo.Division div ON div.DivCode = sa.DivCode
- GROUP BY sa.LPMBatchNo, sa.StoreID, sa.DivCode, sa.BoxNo, sa.PalletNo, sa.LpmSimQty
+ GROUP BY sa.LPMBatchNo, sa.StoreID, sa.DivCode, sa.BoxNo, sa.PalletNo, sa.MatchKey, sa.LpmSimQty
  ORDER BY MAX(div.Division), sa.StoreID, sa.BoxNo;";
 
         return await ExecAsync(db, sql, ReadBoxDetail, ct, new Dictionary<string, object>

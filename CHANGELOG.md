@@ -23,6 +23,116 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.72 — SIM Boxes report: empty-BoxNo fallback + WH Stock Position: LPM Eligible / NonLPM Eligible columns + per-column hover tooltips (2026-05-20)
+
+### What's new
+
+The PLT571291B "shows as XMAS but the row says R1" bug had a different root cause than 1.14.70 fixed. 1.14.70 assumed BoxNo was non-empty and the bug came from multiple PalletNos sharing the same BoxNo. Verification with `SELECT BoxNo, COUNT(*) FROM racks.dbo.whboxitems WHERE BoxNo = 'PLT571291B'` returned **zero rows** — meaning `whboxitems.BoxNo` is actually **empty / NULL** for the PLT571291B row (only `PalletNo='PLT571291B'` is populated).
+
+That changes the picture entirely. The bug shape is:
+
+```
+whboxitems row    : PalletNo='PLT571291B', BoxNo='', PalletType='R1'
+LPMSIM_Output row : PalletNo='PLT571291B', BoxNo='', ... (allocator preserved the empty BoxNo)
+
+Report's GROUP BY BoxNo:
+    All empty-BoxNo rows in LPMSIM_Output → one collapsed bucket → BoxNo='' group
+    JOIN whboxitems WHERE BoxNo = ''     → MANY rows (every lone-pallet entry in whboxitems)
+    MAX(PalletType) across that big bucket → 'XM' wins over 'R1' alphabetically.
+```
+
+### The fix (per operator-provided rule)
+
+The SIM Boxes report SQL now uses the operator's documented rule for resolving the whboxitems source row:
+
+| LPMSIM_Output.BoxNo | Lookup JOIN |
+|---|---|
+| **non-empty** | `whboxitems.BoxNo = LPMSIM_Output.BoxNo` (legacy behaviour, with the 1.14.70 PalletNo disambiguation still applied for multi-pallet-per-BoxNo cases) |
+| **empty / NULL** | `whboxitems.BoxNo = LPMSIM_Output.PalletNo` (NEW — fall back to the PalletNo string as the BoxNo lookup key) |
+
+Both branches stay on `whboxitems.BoxNo` as the join column — that's the operator's instruction, matching the data convention they have for lone-pallet entries.
+
+### Plus a related grouping fix
+
+`BoxAgg` (rollup branch) and `SimAgg` (non-rollup branch) now `GROUP BY (BoxNo, PalletNo)` instead of just `BoxNo`. Pre-1.14.72, every LPMSIM_Output row with empty BoxNo collapsed into a single combined SimAgg row regardless of the PalletNo — so multiple physical pallets appeared as one in the report. After 1.14.72, each distinct PalletNo gets its own report row even when BoxNo is empty.
+
+### Behaviour matrix
+
+| Scenario | Pre-1.14.72 | 1.14.72 |
+|---|---|---|
+| LPMSIM_Output: BoxNo='X' (non-empty), 1 pallet 'A' | OK (R1) | OK (R1) — same path as 1.14.70 |
+| LPMSIM_Output: BoxNo='X', 2 pallets 'A'+'B' (both with output rows) | Wrong PalletType from `MAX()` | Correct per-pallet PalletType (1.14.70 (BoxNo, PalletNo) match) |
+| LPMSIM_Output: BoxNo='', PalletNo='PLT571291B' (one report row's worth) | Wrong — MAX collapsed across every empty-BoxNo row | Correct — JOIN whboxitems WHERE BoxNo='PLT571291B' resolves the lone-pallet row |
+| LPMSIM_Output: BoxNo='', multiple PalletNos | All collapsed into 1 report row | 1 row per PalletNo |
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | **Rollup branch**: `BoxAgg` now groups by `(BoxNo, PalletNo)`. `BoxMeta` + `BoxDiv` rewritten as `UNION ALL` of two branches (`ISNULL(BoxNo,'') <> ''` path with the 1.14.70 (BoxNo, PalletNo) match + `ISNULL(BoxNo,'') = ''` path matching `w.BoxNo = b.PalletNo`). `BoxPalletMeta` CTE folded into `BoxMeta` since the per-pallet attributes (PalletType / PurDate / GINNo / GinDate / FromTo) come from the same JOIN rows. Final `LEFT JOIN`s match on `(BoxNo, PalletNo)` with `ISNULL(...,'')` so NULL-BoxNo rows line up cleanly. **Non-rollup branch**: `SimAgg` groups by `(BoxNo, PalletNo)` and computes a `MatchKey` (BoxNo when non-empty, else PalletNo). Every per-pallet TOP-1 subquery uses `WHERE w.BoxNo = sa.MatchKey AND (ISNULL(sa.BoxNo,'') = '' OR ISNULL(w.PalletNo,'') = ISNULL(sa.PalletNo,''))` so the disambiguation only kicks in when BoxNo is non-empty (otherwise MatchKey IS PalletNo and no further filter is needed). |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.71 → 1.14.72. |
+
+### What was NOT touched (intentional)
+
+- **No schema change. No migration.** Data shape is identical; the report just resolves the source row differently.
+- **Allocator unchanged.** `ReadBoxesAsync` still preserves whatever `whboxitems.BoxNo` was (empty or non-empty) verbatim into `LPMSIM_Output.BoxNo`. The fix is purely in the report SQL.
+- **Pre-1.14.72 batches re-resolve correctly on next page load.** No re-Generate needed — the SQL change applies to existing batches the moment the user re-opens the SIM Boxes tab.
+- **SIM Generate page's own SIM Boxes tab** uses the same `GetBoxDetailsAsync` method, so it picks up the fix automatically — no separate change needed there.
+- **`BoxQty` sum at the matched-set level.** When `BoxNo='X'` matches 2 pallets in whboxitems, `BoxQty` sums across both (one row in the report, BoxQty = total qty in the BoxNo bucket). When `BoxNo=''`, BoxQty is summed across whboxitems rows where BoxNo=PalletNo (likely just one row per pallet). If you want per-pallet BoxQty in the multi-pallet case too, that's a follow-up.
+
+### Operator notes
+
+- **Verify the PLT571291B-style case after deploy:** open SIM Boxes for the affected batch, find PLT571291B → `PalletType` should now show **R1** (matching `racks..whboxitems WHERE PalletNo='PLT571291B'`), not XM. Same for the new `Purchase Dt`, `GIN No`, `GIN Date`, `From/To` columns — they should now resolve to the values from the lone-pallet row.
+- If any other "BoxNo lookup" cases were silently grabbing wrong meta (anywhere `LPMSIM_Output.BoxNo` is empty), they'll now show the correct values from the PalletNo-keyed whboxitems row.
+- **Watch for unexpected row-count changes** in the SIM Boxes tab. Pre-1.14.72 collapsed all empty-BoxNo rows into one; now they're per-pallet. A batch with N empty-BoxNo physical pallets will show N more rows than before. That's correct — they were always physically separate, just rolled up by the report.
+
+---
+
+## 1.14.72 (continued) — WH Stock Position: LPM Eligible + NonLPM Eligible columns + per-column hover tooltips
+
+### What's new
+
+Two new last columns on **Reports → WH Stock Position**:
+
+| Column | Criteria |
+|---|---|
+| **LPM Eligible** | `SUM(whboxitems.Qty) WHERE LPM IS NOT NULL AND LPM <> '' AND PalletCategory = 'ELIGIBLE' AND ShopEligible <> 'E'` |
+| **NonLPM Eligible** | `SUM(whboxitems.Qty) WHERE (LPM IS NULL OR LPM = '') AND PalletCategory = 'ELIGIBLE' AND ShopEligible <> 'E'` |
+
+These are the intersection of the existing **Eligible** column with **LPM** / **Non-LPM** — i.e. the stock SIM Generate can actually use from each pool. The pre-1.14.72 columns answer "how much LPM stock exists?" and "how much is Eligible?" separately; the new columns answer "how much LPM stock is Eligible?" directly. Same for the Non-LPM side.
+
+### Tooltips on every column header
+
+Every `<MudTh>` now has a `title` attribute spelling out the exact SQL filter for that column. Hover any header to see the criterion without leaving the page:
+
+| Column | Hover tooltip |
+|---|---|
+| Division | `upc_subclass × subclassmaster.Division` mapping; unmapped items → `(no division)` |
+| HO Stock | `SUM(LPM_LocStock.SOH) WHERE storeid IN (HO storeids); UAE → 'HODATA', others → DataSettings.storeid WHERE SIMCountry = country AND ExportWH = 'Y'` |
+| WH Stock | `SUM(whboxitems.Qty) WHERE PalletCategory NOT IN ('NON ELIGIBLE','ECOM') AND ShopEligible <> 'E'` |
+| Variance | `HO Stock − WH Stock` (red when negative) |
+| Reserved / Seasonal / On Hold / Eligible | `SUM(Qty) WHERE PalletCategory = '<X>' AND ShopEligible <> 'E'` |
+| Non-LPM / LPM | LPM-presence filter + universal WH rule |
+| LPM Eligible / NonLPM Eligible | Intersection of LPM-presence + `PalletCategory = 'ELIGIBLE'` (new) |
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Reports/WhHoStockService.cs` | `WhHoStockRow` record gains `LpmEligibleStock` + `NonLpmEligibleStock`. The `WHByDiv` CTE adds two SUM aggregates with the corresponding `CASE WHEN` filters; outer SELECT projects them; reader pulls indexes 10 + 11. |
+| `src/LpmSim.Web/Components/Pages/LPM/Reports/WhHoStock.razor` | Two new `<MudTh>` + `<MudTd>` cells at the end of the table, two new total locals (`totLpmEligible` / `totNonLpmEligible`), two new footer cells. Excel headers / data / totals extended to 12 columns. Every column header gains a `title=` tooltip naming its SQL criterion. |
+
+### What was NOT touched (intentional)
+
+- **No schema change.** The new columns are computed in the existing query — no whboxitems columns are added.
+- **Existing columns unchanged** (HO Stock, WH Stock, Variance, Reserved, Seasonal, On Hold, Eligible, Non-LPM, LPM). The two new columns are appended at the end; existing column order is preserved.
+- **Other reports' tooltips** (WH SKU Investigation, Variance Report, etc.) — same pattern could apply but not requested in this release. Flag if you want consistent tooltips across the Reports section.
+
+### Operator notes
+
+- **Σ LPM Eligible + Σ NonLPM Eligible ≤ Σ Eligible** by definition (both are slices of Eligible). The slack between (LPM Eligible + NonLPM Eligible) and Eligible should be zero — if you see a non-zero gap, that means whboxitems has rows with `PalletCategory = 'ELIGIBLE'` where the LPM column has some non-NULL non-empty value that doesn't fit the binary "LPM-set vs Non-LPM" split (unlikely but worth a glance for data-quality).
+- The new columns respect the Country, Division, and Season filters in the page header the same way the existing columns do.
+
+---
+
 ## 1.14.71 — EOM Calculator: filter DataSettings on SIMCountry instead of Country (2026-05-20)
 
 ### What's new

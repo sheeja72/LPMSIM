@@ -88,15 +88,18 @@
        and as the bottom row of the table. Computed once into locals for
        readability. (Inside an @if block already, so no leading @ on the
        code-only sub-block.) *@
-    var totHo       = _rows.Sum(r => r.HoStock);
-    var totWh       = _rows.Sum(r => r.WhStock);
-    var totVar      = _rows.Sum(r => r.Variance);
-    var totReserved = _rows.Sum(r => r.ReservedStock);
-    var totSeasonal = _rows.Sum(r => r.SeasonalStock);
-    var totOnHold   = _rows.Sum(r => r.OnHoldStock);
-    var totEligible = _rows.Sum(r => r.EligibleStock);
-    var totNonLpm   = _rows.Sum(r => r.NonLpmStock);
-    var totLpm      = _rows.Sum(r => r.LpmStock);
+    var totHo            = _rows.Sum(r => r.HoStock);
+    var totWh            = _rows.Sum(r => r.WhStock);
+    var totVar           = _rows.Sum(r => r.Variance);
+    var totReserved      = _rows.Sum(r => r.ReservedStock);
+    var totSeasonal      = _rows.Sum(r => r.SeasonalStock);
+    var totOnHold        = _rows.Sum(r => r.OnHoldStock);
+    var totEligible      = _rows.Sum(r => r.EligibleStock);
+    var totNonLpm        = _rows.Sum(r => r.NonLpmStock);
+    var totLpm           = _rows.Sum(r => r.LpmStock);
+    // 1.14.72 — Intersection totals.
+    var totLpmEligible    = _rows.Sum(r => r.LpmEligibleStock);
+    var totNonLpmEligible = _rows.Sum(r => r.NonLpmEligibleStock);
 
     <MudGrid Spacing="2" Class="mb-3">
         <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
@@ -120,12 +123,21 @@
     <MudTable Items="_rows" Dense="true" Striped="true" Hover="true" Bordered="true"
               SortLabel="Sort" Class="lpm-table">
         <HeaderContent>
-            <MudTh><MudTableSortLabel T="WhHoStockRow" InitialDirection="SortDirection.Ascending"
-                                       SortBy="r => r.Division">Division</MudTableSortLabel></MudTh>
-            <MudTh Style="text-align:right;">
+            @* 1.14.72 — `title` attribute on every header surfaces the
+               column's exact SQL criteria on mouse-hover, so a planner can
+               trace any number back to the underlying rule without diving
+               into source. The strings are intentionally close to the
+               literal SQL fragments in WhHoStockService.cs. *@
+            <MudTh title="upc_subclass × subclassmaster.Division (one row per division). Items without a subclass mapping land in '(no division)'.">
+                <MudTableSortLabel T="WhHoStockRow" InitialDirection="SortDirection.Ascending"
+                                       SortBy="r => r.Division">Division</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;"
+                   title="SUM(LPM_LocStock.SOH) WHERE storeid IN (HO storeids resolved per country: UAE → literal 'HODATA'; others → DataSettings.storeid WHERE SIMCountry = country AND ExportWH = 'Y'). Season filter (if not All) restricts to items whose UPCBarcodes.Itemtype matches W (Winter) / non-W (Summer).">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.HoStock">HO Stock</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE PalletCategory NOT IN ('NON ELIGIBLE','ECOM') AND ShopEligible <> 'E'. Season filter (if not All) restricts to whboxitems.Season = W (Winter) or <> W (Summer).">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.WhStock">WH Stock</MudTableSortLabel>
                 @* 1.13.2: surface the WH Stock filter rule directly in the
                    header so the planner can see at a glance why the total
@@ -135,26 +147,44 @@
                     excl. NON ELIGIBLE, ECOM
                 </div>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="HO Stock − WH Stock. Positive = HO has more (under-shipped); negative (red) = WH has more than HO (over-stocked).">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.Variance">Variance</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE PalletCategory = 'RESERVED' AND ShopEligible <> 'E'.">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.ReservedStock">Reserved</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE PalletCategory = 'SEASONAL' AND ShopEligible <> 'E'.">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.SeasonalStock">Seasonal</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE PalletCategory = 'ON HOLD' AND ShopEligible <> 'E'.">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.OnHoldStock">On Hold</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE PalletCategory = 'ELIGIBLE' AND ShopEligible <> 'E'. This is the column SIM Generate's eligible-box pool draws from.">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.EligibleStock">Eligible</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE (LPM IS NULL OR LPM = '') AND PalletCategory NOT IN ('NON ELIGIBLE','ECOM') AND ShopEligible <> 'E'.">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.NonLpmStock">Non-LPM</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE LPM IS NOT NULL AND LPM <> '' AND PalletCategory NOT IN ('NON ELIGIBLE','ECOM') AND ShopEligible <> 'E'.">
                 <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.LpmStock">LPM</MudTableSortLabel>
+            </MudTh>
+            @* 1.14.72 — Intersection columns: LPM ∩ Eligible and Non-LPM ∩ Eligible.
+               Useful for planners who want to see how much of each LPM/Non-LPM bucket
+               is actually shippable (vs locked in Reserved / Seasonal / On Hold). *@
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE LPM IS NOT NULL AND LPM <> '' AND PalletCategory = 'ELIGIBLE' AND ShopEligible <> 'E'. Intersection of the LPM and Eligible columns — the LPM stock SIM Generate can actually use this run.">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.LpmEligibleStock">LPM Eligible</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;"
+                   title="SUM(whboxitems.Qty) WHERE (LPM IS NULL OR LPM = '') AND PalletCategory = 'ELIGIBLE' AND ShopEligible <> 'E'. Intersection of the Non-LPM and Eligible columns — the Non-LPM stock SIM Generate can actually use this run.">
+                <MudTableSortLabel T="WhHoStockRow" SortBy="r => r.NonLpmEligibleStock">NonLPM Eligible</MudTableSortLabel>
             </MudTh>
         </HeaderContent>
         <RowTemplate>
@@ -172,6 +202,9 @@
             <MudTd Style="text-align:right;">@context.EligibleStock.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.NonLpmStock.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.LpmStock.ToString("N0")</MudTd>
+            @* 1.14.72 — LPM Eligible / NonLPM Eligible intersection cells. *@
+            <MudTd Style="text-align:right;">@context.LpmEligibleStock.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.NonLpmEligibleStock.ToString("N0")</MudTd>
         </RowTemplate>
         <FooterContent>
             @* Bold totals row — mirrors the metric cards so the planner
@@ -188,6 +221,9 @@
             <MudTd Style="text-align:right;font-weight:700;">@totEligible.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:700;">@totNonLpm.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:700;">@totLpm.ToString("N0")</MudTd>
+            @* 1.14.72 — Footer totals for the two new intersection columns. *@
+            <MudTd Style="text-align:right;font-weight:700;">@totLpmEligible.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:700;">@totNonLpmEligible.ToString("N0")</MudTd>
         </FooterContent>
     </MudTable>
 }
@@ -300,7 +336,9 @@ else
             string[] headers = {
                 "Division", "HO Stock", "WH Stock", "Variance",
                 "Reserved", "Seasonal", "On Hold", "Eligible",
-                "Non-LPM", "LPM"
+                "Non-LPM", "LPM",
+                // 1.14.72 — Intersection columns at the end.
+                "LPM Eligible", "NonLPM Eligible"
             };
             for (int i = 0; i < headers.Length; i++) ws.Cell(1, i + 1).Value = headers[i];
             ws.Range(1, 1, 1, headers.Length).Style.Font.Bold = true;
@@ -318,6 +356,9 @@ else
                 ws.Cell(row, 8).Value  = r.EligibleStock;
                 ws.Cell(row, 9).Value  = r.NonLpmStock;
                 ws.Cell(row, 10).Value = r.LpmStock;
+                // 1.14.72 — Intersection columns.
+                ws.Cell(row, 11).Value = r.LpmEligibleStock;
+                ws.Cell(row, 12).Value = r.NonLpmEligibleStock;
                 row++;
             }
             // Totals row.
@@ -331,6 +372,9 @@ else
             ws.Cell(row, 8).Value  = _rows.Sum(r => r.EligibleStock);
             ws.Cell(row, 9).Value  = _rows.Sum(r => r.NonLpmStock);
             ws.Cell(row, 10).Value = _rows.Sum(r => r.LpmStock);
+            // 1.14.72 — Intersection totals.
+            ws.Cell(row, 11).Value = _rows.Sum(r => r.LpmEligibleStock);
+            ws.Cell(row, 12).Value = _rows.Sum(r => r.NonLpmEligibleStock);
             ws.Range(row, 1, row, headers.Length).Style.Font.Bold = true;
             ws.Columns().AdjustToContents();
 
