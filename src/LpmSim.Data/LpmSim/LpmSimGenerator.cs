@@ -72,7 +72,17 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         {
             // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
             // others use [<DataName>].dbo.WHBoxItemsExport.
-            var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            var whSrc      = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            // 1.14.70 — Resolve the bare DataName too so we can build the
+            // closed-box exclusion expression for the segment-count query.
+            // Null for UAE (uses the fixed USA.dbo.upcboxhead path inside
+            // BuildIsClosedExpression).
+            var dataName   = await WhBoxItemsSource.ResolveDataNameAsync(conn, country, ct);
+            // 1.14.70 — Match SIM Generate's box exclusion so the readiness
+            // counts reflect what Generate will actually allocate. Without
+            // this, a planner sees "100 LPM Summer boxes available" but
+            // Generate only processes 95 (because 5 were closed).
+            var closedExpr = WhBoxItemsSource.BuildIsClosedExpression(country, dataName);
             using var cmd = conn.CreateCommand();
             // Build a parameterised IN-list for warehouses (empty = no filter, all warehouses).
             var (whClause, whParams)         = BuildWarehouseClause(warehouses);
@@ -169,7 +179,11 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                  WHERE 1 = 1
                    {palletClause}
                    {lpmDtClause}
-                   {whClause};";
+                   {whClause}
+                   -- 1.14.70 — Exclude closed boxes from the readiness counts so they
+                   -- reconcile with what Generate actually allocates (Generate applies
+                   -- the same exclusion in ReadBoxesAsync).
+                   AND NOT {closedExpr};";
             // First day of the month AFTER the run period — half-open
             // interval excludes future-dated LPM boxes.
             cmd.Parameters.Add(new SqlParameter("@endExclusive",
@@ -736,15 +750,29 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         var lpmBoxes    = new List<BoxItem>(8192);
         var nonLpmBoxes = new List<BoxItem>(8192);
 
+        // 1.14.70 — Resolve the country DataName once for the closed-box
+        // exclusion (passed through to ReadBoxesAsync, used to build the
+        // EXISTS clauses against [<DataName>]..Exclude_Transfers_Sim /
+        // CloseR1Pallet for non-UAE, or USA..upcboxhead.Closed='Y' for UAE).
+        // Null for UAE; ResolveDataNameAsync throws if a non-UAE country is
+        // missing its DataName in DataSettings (matches ResolveAsync's
+        // existing behaviour — fail fast rather than silently misroute).
+        var simDataName  = await WhBoxItemsSource.ResolveDataNameAsync(conn, req.Country, ct);
+        // Shared dictionary collected across both ReadBoxesAsync calls; keyed
+        // by BoxNo with first-write-wins on the meta. Used by the diagnostic
+        // builder below to emit CLOSED_BOX rows so the planner sees WHY a box
+        // wasn't shipped.
+        var closedBoxes  = new Dictionary<string, ClosedBoxMeta>(StringComparer.OrdinalIgnoreCase);
+
         if (req.Sources.HasFlag(LpmSimSourceFlags.LpmBoxes))
         {
-            await ReadBoxesAsync(conn, true, req.Country, req.RunYear, req.RunMonth, seasonClause, req.Warehouses, req.IncludePurchasedBoxes, req.PalletCategories, req.LpmMonths, lpmBoxes, ct);
+            await ReadBoxesAsync(conn, true, req.Country, simDataName, req.RunYear, req.RunMonth, seasonClause, req.Warehouses, req.IncludePurchasedBoxes, req.PalletCategories, req.LpmMonths, lpmBoxes, closedBoxes, ct);
         }
         if (req.Sources.HasFlag(LpmSimSourceFlags.NonLpmBoxes))
         {
             // Non-LPM boxes have LPMDt IS NULL by definition — LpmMonths
             // doesn't apply, so we pass null here.
-            await ReadBoxesAsync(conn, false, req.Country, req.RunYear, req.RunMonth, seasonClause, req.Warehouses, req.IncludePurchasedBoxes, req.PalletCategories, null, nonLpmBoxes, ct);
+            await ReadBoxesAsync(conn, false, req.Country, simDataName, req.RunYear, req.RunMonth, seasonClause, req.Warehouses, req.IncludePurchasedBoxes, req.PalletCategories, null, nonLpmBoxes, closedBoxes, ct);
         }
         msReadBoxes = swStep.ElapsedMilliseconds; swStep.Restart();
 
@@ -1389,6 +1417,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 eligibleBoxes,
                 filteredOutBoxes,
                 excludedByRuleBoxes,
+                closedBoxes,       // 1.14.70 — closed-box meta for CLOSED_BOX gap rows
                 output,
                 trace,
                 ct,
@@ -2107,16 +2136,26 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
     // Source readers
     // ============================================================
 
+    // 1.14.70 — `dataName` is the per-country DataName (null for UAE) so the
+    // closed-box exclusion expression can address the right country DB. The
+    // `closedBoxesDest` dictionary collects every BoxNo this query identifies
+    // as closed (UAE: USA..upcboxhead.Closed='Y'; non-UAE: Exclude_Transfers_Sim
+    // or CloseR1Pallet). Closed boxes are FILTERED OUT of `dest` so the
+    // allocator never sees them, but their per-box meta is captured here for
+    // the Gap-list CLOSED_BOX diagnostic insertion that runs in
+    // BuildAndInsertUnallocatedDiagnosticAsync.
     private static async Task ReadBoxesAsync(
         System.Data.Common.DbConnection conn,
         bool isLpm,
         string country,
+        string? dataName,
         int year, int month, string seasonClause,
         IReadOnlyList<string>? warehouses,
         bool includePurchasedBoxes,
         IReadOnlyList<string>? palletCategories,
         IReadOnlyList<DateTime>? lpmMonths,
         List<BoxItem> dest,
+        Dictionary<string, ClosedBoxMeta> closedBoxesDest,
         CancellationToken ct)
     {
         // SARGable predicates (Phase F perf fix):
@@ -2197,10 +2236,18 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         //   • PalletCategory filter  ⇒ w.PalletCategory  (unchanged from 1.14.17;
         //                              category data is identical between pt and w
         //                              and using w avoids a redundant lookup).
+        // 1.14.70 — Closed-box flag. Projected as a bit column on every row so
+        // the C# loop below can split eligible vs closed without a second
+        // round-trip. The expression composes country-specific EXISTS
+        // sub-queries against USA..upcboxhead (UAE) or [<DataName>]..
+        // Exclude_Transfers_Sim + CloseR1Pallet (non-UAE). See
+        // WhBoxItemsSource.BuildIsClosedExpression for the exact shape.
+        var isClosedExpr = WhBoxItemsSource.BuildIsClosedExpression(country, dataName);
         cmd.CommandText = $@"
             SELECT w.BoxNo, w.PalletNo, w.LPMDt, w.ItemCode, w.Qty,
                    Season = CASE WHEN UPPER(ISNULL(w.Season, '')) = 'W' THEN 'W' ELSE 'S' END,
-                   BoxQty = SUM(w.Qty) OVER (PARTITION BY w.BoxNo)
+                   BoxQty = SUM(w.Qty) OVER (PARTITION BY w.BoxNo),
+                   IsClosed = CASE WHEN {isClosedExpr} THEN 1 ELSE 0 END
               FROM {whSrc} w
               INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
               LEFT  JOIN dbo.LPM_WarehousePriority wp
@@ -2225,19 +2272,43 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         foreach (var p in whParams) cmd.Parameters.Add(p);
         cmd.CommandTimeout = 300;
         using var rdr = await cmd.ExecuteReaderAsync(ct);
+        var kindLabel = isLpm ? "LPM" : "Non-LPM";
         while (await rdr.ReadAsync(ct))
         {
+            var boxNo    = rdr.GetString(0);
+            var palletNo = rdr.IsDBNull(1) ? null : rdr.GetString(1);
+            var lpmDt    = rdr.IsDBNull(2) ? null : (DateTime?)rdr.GetDateTime(2);
+            var boxQty   = rdr.IsDBNull(6) ? 0L  : Convert.ToInt64(rdr.GetValue(6));
+            // 1.14.70 — IsClosed split. Closed boxes go to closedBoxesDest
+            // (keyed by BoxNo so per-row repeats collapse to one entry) and are
+            // skipped from `dest` so the allocator never iterates them.
+            // The kindLabel reflects the CURRENT call's isLpm (LPM call ⇒ "LPM",
+            // Non-LPM call ⇒ "Non-LPM"); since a single BoxNo is exclusively
+            // LPM or Non-LPM per its LPMDt, the first-write-wins behaviour
+            // never mislabels a box.
+            if (!rdr.IsDBNull(7) && rdr.GetInt32(7) == 1)
+            {
+                if (!closedBoxesDest.ContainsKey(boxNo))
+                {
+                    closedBoxesDest[boxNo] = new ClosedBoxMeta(
+                        PalletNo: palletNo,
+                        LPMDt:    lpmDt,
+                        BoxKind:  kindLabel,
+                        BoxQty:   boxQty);
+                }
+                continue;
+            }
             dest.Add(new BoxItem(
-                BoxNo:    rdr.GetString(0),
-                PalletNo: rdr.IsDBNull(1) ? null : rdr.GetString(1),
-                LPMDt:    rdr.IsDBNull(2) ? null : rdr.GetDateTime(2),
+                BoxNo:    boxNo,
+                PalletNo: palletNo,
+                LPMDt:    lpmDt,
                 ItemCode: rdr.IsDBNull(3) ? "" : rdr.GetString(3),
                 Qty:      rdr.IsDBNull(4) ? 0  : rdr.GetInt32(4),
                 Season:   rdr.IsDBNull(5) ? "S" : rdr.GetString(5),
                 // 1.14.18: read the BoxQty window-function column (was already
                 // projected for ORDER BY in 1.14.x; now consumed by the
                 // allocator too).
-                BoxQty:   rdr.IsDBNull(6) ? 0L : Convert.ToInt64(rdr.GetValue(6))));
+                BoxQty:   boxQty));
         }
     }
 
@@ -4496,6 +4567,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     // BoxQty is replicated from BoxItem.BoxQty (same value for every line
     // of the same BoxNo). BoxKind is "LPM" if LPMDt is set, else "Non-LPM".
     private record EligibleBoxSummary(string? PalletNo, DateTime? LPMDt, string BoxKind, long BoxQty);
+
+    /// <summary>
+    /// 1.14.70 — Per-box meta for closed boxes that were filtered out of the
+    /// allocator. Populated by <see cref="ReadBoxesAsync"/> when the closed-box
+    /// EXISTS check fires (UAE: USA..upcboxhead.Closed='Y'; non-UAE:
+    /// Exclude_Transfers_Sim.Trfno or CloseR1Pallet.palletno). Passed to
+    /// <see cref="BuildAndInsertUnallocatedDiagnosticAsync"/> so the planner
+    /// sees one CLOSED_BOX row per excluded box in the Gap list.
+    /// </summary>
+    private record ClosedBoxMeta(string? PalletNo, DateTime? LPMDt, string BoxKind, long BoxQty);
     private record EomStore(string StoreID, int DivCode, int SKUMax, decimal TargetEOM,
                             decimal PriorityRank, decimal WtAvgSold, string VolumeGroup,
                             decimal MerchNeedWeek);
@@ -4664,6 +4745,12 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     // best-effort (caller wraps it in try/catch), but if it succeeds it must
     // commit/rollback in lockstep with Output/Trace/Balances to keep the per-
     // batch view consistent.
+    // 1.14.70 — `closedBoxes` carries the meta for every BoxNo that
+    // ReadBoxesAsync filtered out due to the closed-box exclusion rules. They
+    // never reached the allocator, so they're not in `eligibleBoxes` —
+    // this method emits a separate CLOSED_BOX diagnostic row per closed BoxNo
+    // so the planner can see "shipped 0, reason: box marked closed" in the Gap
+    // list. The closed-box row uses SimQty=0 and BoxQty from the meta.
     private static async Task BuildAndInsertUnallocatedDiagnosticAsync(
         SqlConnection conn,
         long batchNo,
@@ -4674,6 +4761,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         Dictionary<string, EligibleBoxSummary> eligibleBoxes,
         HashSet<string> filteredOutBoxes,
         HashSet<string> excludedByRuleBoxes,
+        Dictionary<string, ClosedBoxMeta> closedBoxes,
         List<LpmSimOutput> output,
         List<LpmSimAllocTrace> trace,
         CancellationToken ct,
@@ -4889,6 +4977,33 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 simQty,
                 topReason,
                 reasons,
+                createTs);
+        }
+        // 1.14.70 — Emit one CLOSED_BOX row per closed box. These never entered
+        // the allocator (ReadBoxesAsync filtered them out), so they're absent
+        // from `eligibleBoxes`. We still want them in the Gap list so a planner
+        // checking "why didn't this box ship?" sees a clear "marked closed in
+        // [source]" answer instead of "no record found". SimQty is always 0 for
+        // closed boxes; BoxQty + PalletNo + LPMDt come from the meta captured
+        // in ReadBoxesAsync's IsClosed branch. The country-specific source
+        // text in `reasons` lets ops trace back to the controlling table.
+        var closedReasonSource = string.Equals(country, "UAE", StringComparison.OrdinalIgnoreCase)
+            ? "USA.dbo.upcboxhead.Closed = 'Y'"
+            : "[<DataName>].dbo.Exclude_Transfers_Sim.Trfno or [<DataName>].dbo.CloseR1Pallet.palletno";
+        foreach (var (boxNo, meta) in closedBoxes)
+        {
+            var closedReasons = $"CLOSED_BOX — {meta.BoxQty} qty not shipped; box is flagged as closed in {closedReasonSource}. The SIM allocator skipped it entirely so the closed-box flag is honoured downstream.";
+            if (closedReasons.Length > 400) closedReasons = closedReasons[..397] + "…";
+            dt.Rows.Add(
+                batchNo,
+                boxNo,
+                (object?)meta.PalletNo ?? DBNull.Value,
+                (object?)meta.LPMDt    ?? DBNull.Value,
+                meta.BoxKind,
+                meta.BoxQty,
+                0L,                                // SimQty — closed boxes are never allocated
+                "CLOSED_BOX",
+                closedReasons,
                 createTs);
         }
         dt.EndLoadData();

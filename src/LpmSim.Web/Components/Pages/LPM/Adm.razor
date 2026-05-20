@@ -149,7 +149,7 @@
         {
             <span style="color:#b45309;"><strong>Deferred:</strong> @_run.DeferredBoxes.ToString("N0") boxes / @_run.DeferredQty.ToString("N0") qty</span>
         }
-        <span style="color:#64748b;">· Created @_run.CreateTS.ToString("dd-MMM HH:mm") by @_run.CreatedBy</span>
+        <span style="color:#64748b;">· Created @TimeFormatting.ToGccString(_run.CreateTS, "dd-MMM HH:mm") by @_run.CreatedBy</span>
     </div>
 
     @* Week Target banner — shows what the engine pulled from EOM and the

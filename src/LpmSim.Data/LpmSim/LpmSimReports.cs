@@ -149,6 +149,20 @@ public class BoxDetailRow
     /// </summary>
     public string? ToteId { get; set; }
 
+    // 1.14.70 — Pallet-purchase / GIN columns. Sourced from whboxitems /
+    // WHBoxItemsExport, matched on (BoxNo, PalletNo) so the value belongs
+    // to the SPECIFIC pallet the allocator chose (rather than a non-
+    // deterministic MAX across all rows sharing the BoxNo). Nullable —
+    // many older rows have these blank.
+    /// <summary>1.14.70 — Purchase date for the pallet (whboxitems.PurDate). NULL when not set.</summary>
+    public DateTime? PurDate { get; set; }
+    /// <summary>1.14.70 — Goods Inwards Note number for the pallet (whboxitems.GINNo). NULL when not set.</summary>
+    public string? GINNo { get; set; }
+    /// <summary>1.14.70 — Goods Inwards Note date for the pallet (whboxitems.GinDate). NULL when not set.</summary>
+    public DateTime? GinDate { get; set; }
+    /// <summary>1.14.70 — From/To routing label for the pallet (whboxitems.FromTo). NULL when not set.</summary>
+    public string? FromTo { get; set; }
+
     /// <summary>% of the box's qty that was allocated in this batch (Allocated / Box Qty × 100).</summary>
     public decimal? SkuUsabilityPct =>
         BoxQty.HasValue && BoxQty.Value > 0
@@ -889,6 +903,14 @@ DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
             ? $@"
 WITH BoxAgg AS (
     SELECT s.LPMBatchNo, s.BoxNo,
+           -- 1.14.70: project the allocator's PalletNo so the PalletType /
+           -- TypeName / GIN-* lookups below can target the SPECIFIC physical
+           -- pallet the box belongs to. Pre-1.14.70 BoxMeta used MAX(PalletType)
+           -- across every whboxitems row sharing the BoxNo — when a BoxNo
+           -- pointed at multiple pallets with different PalletTypes (the
+           -- PLT571291B XMAS-vs-R1 case), MAX picked alphabetically and
+           -- mislabelled the box.
+           MAX(s.PalletNo) AS PalletNo,
            SUM(CAST(s.Qty AS bigint)) AS LpmSimQty,
            SUM(CASE WHEN s.IsRoundRobin = 1 THEN CAST(s.Qty AS bigint) ELSE 0 END) AS RoundRobinQty
       FROM dbo.LPMSIM_Output s
@@ -896,12 +918,12 @@ WITH BoxAgg AS (
      GROUP BY s.LPMBatchNo, s.BoxNo
 ),
 BoxMeta AS (
-    -- 1.14.12: added MAX(PalletNo) so each (BoxNo) carries its pallet info.
-    -- 1.14.65: MAX(ToteId) for the new Tote ID column.
+    -- Per-box meta — BoxQty / TrnDate / Warehouse / Rack / ToteId / BoxKind
+    -- stay at the BoxNo level (summed across all pallets in the box).
+    -- 1.14.70 — PalletNo + PalletType moved to BoxPalletMeta so they
+    -- correspond to a SPECIFIC pallet.
     SELECT BoxNo,
            SUM(CAST(Qty AS bigint)) AS BoxQty,
-           MAX(PalletNo)   AS PalletNo,
-           MAX(PalletType) AS PalletType,
            MAX(TrnDate)    AS TrnDate,
            MAX(Warehouse)  AS Warehouse,
            MAX(Rack)       AS Rack,
@@ -910,6 +932,22 @@ BoxMeta AS (
       FROM {whSrc}
      WHERE BoxNo IN (SELECT BoxNo FROM BoxAgg)
      GROUP BY BoxNo
+),
+-- 1.14.70 — Per-(BoxNo, PalletNo) meta. PalletType / PurDate / GINNo /
+-- GinDate / FromTo are pallet-level attributes, so grouping at the pallet
+-- granularity gives one deterministic row per physical pallet. The main
+-- SELECT joins this on (BoxNo, PalletNo) using the PalletNo from BoxAgg
+-- (i.e. the one the allocator actually used).
+BoxPalletMeta AS (
+    SELECT BoxNo, PalletNo,
+           MAX(PalletType) AS PalletType,
+           MAX(PurDate)    AS PurDate,
+           MAX(GINNo)      AS GINNo,
+           MAX(GinDate)    AS GinDate,
+           MAX(FromTo)     AS FromTo
+      FROM {whSrc}
+     WHERE BoxNo IN (SELECT BoxNo FROM BoxAgg)
+     GROUP BY BoxNo, PalletNo
 ),
 -- 1.14.65 — Per-box Division (TOP-1 reduction). Boxes can technically span
 -- multiple divisions (multi-item boxes); MIN(d.DivCode) + MAX(d.Division)
@@ -932,10 +970,10 @@ SELECT b.LPMBatchNo,
        bd.DivCode,                                   -- 1.14.65: was NULL
        bd.DivisionName,                              -- 1.14.65: was NULL
        b.BoxNo,
-       bm.PalletNo,                                  -- 1.14.12
+       b.PalletNo,                                   -- 1.14.70: from LPMSIM_Output (was bm.PalletNo)
        bm.BoxQty,
        b.LpmSimQty,
-       bm.PalletType,
+       bpm.PalletType,                               -- 1.14.70: matched on (BoxNo, PalletNo)
        pt.TypeName,
        pt.PalletCategory,
        bm.TrnDate,
@@ -943,11 +981,18 @@ SELECT b.LPMBatchNo,
        bm.Rack,
        b.RoundRobinQty,
        bm.BoxKind,
-       bm.ToteId                                     -- 1.14.65
+       bm.ToteId,                                    -- 1.14.65
+       bpm.PurDate,                                  -- 1.14.70 — new
+       bpm.GINNo,                                    -- 1.14.70 — new
+       bpm.GinDate,                                  -- 1.14.70 — new
+       bpm.FromTo                                    -- 1.14.70 — new
   FROM BoxAgg b
   LEFT JOIN BoxMeta bm ON bm.BoxNo = b.BoxNo
+  LEFT JOIN BoxPalletMeta bpm
+         ON bpm.BoxNo = b.BoxNo
+        AND ISNULL(bpm.PalletNo, '') = ISNULL(b.PalletNo, '')
   LEFT JOIN BoxDiv  bd ON bd.BoxNo = b.BoxNo
-  LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bm.PalletType
+  LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bpm.PalletType
  ORDER BY b.BoxNo;"
             : $@"
 WITH ItemDiv AS (
@@ -967,7 +1012,12 @@ WITH ItemDiv AS (
      GROUP BY u.itemcode
 ),
 SimAgg AS (
+    -- 1.14.70: project the allocator's PalletNo so the PalletType / GIN-*
+    -- TOP-1 subqueries below can target the SPECIFIC physical pallet
+    -- (fixes the same PLT571291B XMAS-vs-R1 ambiguity the rollup branch
+    -- had).
     SELECT s.LPMBatchNo, s.StoreID, id.DivID AS DivCode, s.BoxNo,
+           MAX(s.PalletNo) AS PalletNo,
            SUM(CAST(s.Qty AS bigint)) AS LpmSimQty
       FROM dbo.LPMSIM_Output s
       INNER JOIN ItemDiv id ON id.itemcode = s.Itemcode
@@ -980,17 +1030,22 @@ SELECT sa.LPMBatchNo,
        sa.DivCode,
        MAX(div.Division)  AS DivisionName,
        sa.BoxNo,
-       -- 1.14.12: PalletNo via the same TOP 1 lookup pattern used for PalletType.
-       (SELECT TOP 1 PalletNo FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS PalletNo,
+       sa.PalletNo,                                              -- 1.14.70: from LPMSIM_Output (deterministic)
        (SELECT SUM(CAST(Qty AS bigint)) FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS BoxQty,
        sa.LpmSimQty,
-       (SELECT TOP 1 PalletType FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS PalletType,
+       -- 1.14.70 — all per-pallet lookups now match BOTH BoxNo AND PalletNo
+       -- so the row picked corresponds to the allocator's chosen pallet.
+       (SELECT TOP 1 PalletType FROM {whSrc} w
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS PalletType,
        (SELECT TOP 1 pt.TypeName       FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-         WHERE w.BoxNo = sa.BoxNo) AS TypeName,
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS TypeName,
        (SELECT TOP 1 pt.PalletCategory FROM {whSrc} w
           LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
-         WHERE w.BoxNo = sa.BoxNo) AS PalletCategory,
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS PalletCategory,
        -- 1.14.65 — Pad to align with the rollup branch's column positions
        -- so the shared ReadBoxDetail reader maps fields correctly. The
        -- non-rollup mode doesn't surface these extras in the UI, but the
@@ -1000,11 +1055,25 @@ SELECT sa.LPMBatchNo,
        CAST(NULL AS nvarchar(50)) AS Rack,
        CAST(0    AS bigint)       AS RoundRobinQty,
        CAST(NULL AS nvarchar(10)) AS BoxKind,
-       (SELECT TOP 1 ToteId FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS ToteId
+       (SELECT TOP 1 ToteId FROM {whSrc} w WHERE w.BoxNo = sa.BoxNo) AS ToteId,
+       -- 1.14.70 — new columns from whboxitems / WHBoxItemsExport. All
+       -- pallet-level attributes so they're matched on (BoxNo, PalletNo).
+       (SELECT TOP 1 PurDate FROM {whSrc} w
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS PurDate,
+       (SELECT TOP 1 GINNo   FROM {whSrc} w
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS GINNo,
+       (SELECT TOP 1 GinDate FROM {whSrc} w
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS GinDate,
+       (SELECT TOP 1 FromTo  FROM {whSrc} w
+         WHERE w.BoxNo = sa.BoxNo
+           AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')) AS FromTo
   FROM SimAgg sa
   LEFT JOIN dbo.DataSettings ds ON ds.StoreID = sa.StoreID
   LEFT JOIN dbo.Division div ON div.DivCode = sa.DivCode
- GROUP BY sa.LPMBatchNo, sa.StoreID, sa.DivCode, sa.BoxNo, sa.LpmSimQty
+ GROUP BY sa.LPMBatchNo, sa.StoreID, sa.DivCode, sa.BoxNo, sa.PalletNo, sa.LpmSimQty
  ORDER BY MAX(div.Division), sa.StoreID, sa.BoxNo;";
 
         return await ExecAsync(db, sql, ReadBoxDetail, ct, new Dictionary<string, object>
@@ -1679,6 +1748,13 @@ SELECT TOP (@top)
         // 1.14.65 — ToteId column appended at index 17. FieldCount guard
         // means callers reading an older SELECT (pre-1.14.65) still work.
         ToteId         = r.FieldCount > 17 && !r.IsDBNull(17) ? r.GetString(17)   : null,
+        // 1.14.70 — PurDate / GINNo / GinDate / FromTo appended at 18-21.
+        // FieldCount guards preserve forward-compat for any callers that
+        // somehow run an older SELECT shape.
+        PurDate        = r.FieldCount > 18 && !r.IsDBNull(18) ? r.GetDateTime(18) : null,
+        GINNo          = r.FieldCount > 19 && !r.IsDBNull(19) ? r.GetString(19)   : null,
+        GinDate        = r.FieldCount > 20 && !r.IsDBNull(20) ? r.GetDateTime(20) : null,
+        FromTo         = r.FieldCount > 21 && !r.IsDBNull(21) ? r.GetString(21)   : null,
     };
 
     // 1.14.12: PalletNo column added at index 6; every subsequent index shifted by +1.

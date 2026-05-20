@@ -23,6 +23,120 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.70 — SIM Generate closed-box exclusion + SIM Boxes report PalletType bug + 4 new pallet-purchase columns + GCC time + LPM/NonLPM filename tags (2026-05-20)
+
+### What's new
+
+Seven related changes — three filter additions on the SIM Generate input side, one bug fix on the SIM Boxes report, four new columns on that report, GCC time everywhere a batch timestamp is shown, and an LPM/NonLPM tag in every SIM Reports filename.
+
+#### 1) Non-UAE SIM: exclude boxes listed in `<CountryDB>..Exclude_Transfers_Sim.Trfno`
+
+For every non-UAE country, the box loader (`LpmSimGenerator.ReadBoxesAsync`) now skips any `whboxitems`/`WHBoxItemsExport` row whose `BoxNo` appears in `[<DataName>].dbo.Exclude_Transfers_Sim.Trfno`. The DataName is resolved from `bfldata.dbo.DataSettings` (same lookup `WhBoxItemsSource.ResolveAsync` already does for the WHBoxItemsExport path).
+
+#### 2) UAE SIM: exclude boxes where `USA..upcboxhead.Closed = 'Y'`
+
+For UAE, the loader skips any `racks..whboxitems` row whose `BoxNo` has at least one matching `USA.dbo.upcboxhead` row with `Closed = 'Y'`. The join key is `BoxNo` per your confirmation.
+
+#### 3) Non-UAE SIM: exclude boxes whose `BoxNo` is in `<CountryDB>..CloseR1Pallet.palletno`
+
+For every non-UAE country, the loader also skips boxes whose `BoxNo` matches any value in `[<DataName>].dbo.CloseR1Pallet.palletno` (despite the column name containing "palletno", per your confirmation the comparison is `BoxNo → palletno`).
+
+**All three exclusion sources also drive a new `CLOSED_BOX` row in `dbo.LPMSIM_UnallocatedDiagnostic`.** Closed boxes never reach the allocator (saving CPU), but the Gap list explicitly tells the planner *why* a box was held back instead of silently dropping it. SimQty for these rows is always 0; BoxQty / PalletNo / LPMDt / BoxKind come from `whboxitems` so the row is still grounded in real stock data.
+
+| Country | Exclusion sources |
+|---|---|
+| **UAE** | `USA.dbo.upcboxhead.Closed = 'Y'` (join on `BoxNo`) |
+| **Non-UAE** (KSA, etc.) | `[<DataName>].dbo.Exclude_Transfers_Sim.Trfno` (join on `BoxNo`) OR `[<DataName>].dbo.CloseR1Pallet.palletno` (join on `BoxNo`) |
+
+The readiness counts on the SIM Generate page (`CheckAsync`'s per-segment box×qty grid) also apply the same exclusion so the displayed counts match what Generate will actually process — no more "100 LPM Summer boxes" headline followed by Generate processing only 95.
+
+#### 4) Fix the PLT571291B "shows as XMAS but DB says R1" bug
+
+In the SIM Boxes report SQL, `BoxMeta`/`SimAgg` used `MAX(PalletType)` (or a `TOP 1` subquery without `ORDER BY`) keyed only on `BoxNo`. When a single `BoxNo` mapped to multiple physical pallets with different `PalletType` values, the report picked one alphabetically — which is **non-deterministic** and surfaced as "XM" winning over "R1" for the BFL DXB Dubai Outlet Mall 2 PLT571291B example.
+
+The fix:
+
+- **Rollup branch**: `BoxAgg` now also projects `MAX(s.PalletNo)` (the allocator's chosen pallet from `LPMSIM_Output`). A new `BoxPalletMeta` CTE groups whboxitems by `(BoxNo, PalletNo)` so `PalletType` is per-pallet, not per-box. The main `SELECT` joins on `(BoxNo, PalletNo)` so the PalletType / TypeName / PalletCategory shown all correspond to the allocator's specific pallet.
+- **Non-rollup branch**: `SimAgg` adds `MAX(s.PalletNo)`. Every `TOP 1` per-pallet subquery (`PalletType`, `TypeName`, `PalletCategory`, plus the four new columns) gains an `AND ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, '')` predicate so the row matched is the right pallet.
+
+`BoxQty` and `RoundRobinQty` stay box-level (summed across all pallets in the box) — the join change only narrows the per-pallet attribute lookups, not the per-box aggregates.
+
+#### 5) Add `Purchase Dt`, `GIN No`, `GIN Date`, `From/To` to the SIM Boxes report
+
+Four new columns sourced from `whboxitems` / `WHBoxItemsExport` (same source as `Brand`, `BoxNo`, etc. per your confirmation). All four are pallet-level attributes so they're matched on `(BoxNo, PalletNo)` for the same deterministic reason as the PalletType fix above.
+
+The columns appear on:
+- **LPM SIM Reports → SIM Boxes** tab (after Pallet Category, before the footer)
+- **LPM SIM Generate → SIM Boxes** tab on the result preview (after Tote ID, before Total Qty)
+- **Excel export** on both pages (formatted as `yyyy-mm-dd` for dates)
+
+#### 6) Show all batch timestamps in GCC time (Arabian Standard Time, UTC+4)
+
+Azure App Service runs in UTC by default, so `DateTime.Now` (used by every batch's `CreateTS` / `ApprovedTS`) ends up holding UTC wall-clock values. Planners reading "Generated 12:52" on the UI saw UTC — 4 hours behind their actual wall clock — and had to mentally convert every time.
+
+A new `LpmSim.Core.TimeFormatting.ToGccString(DateTime?, format)` helper centralises the conversion. It looks up the IANA `"Asia/Dubai"` zone first (works on Linux + recent .NET on Windows), falls back to the Windows `"Arabian Standard Time"` ID, and as a final safety net constructs a fixed +4h zone in code so the UI never crashes due to a missing tz database. The output is formatted with the caller's format string + a trailing `" GST"` suffix so the timezone is unambiguous on the screen.
+
+Applied to every user-facing batch timestamp:
+
+| Page | Field |
+|---|---|
+| **EOM Generate** | `Generated <_savedAt>` next to "Saved Output — N rows" |
+| **LPM SIM Generate** | `Generated <CurrentCreateTS>` and `Approved <CurrentApprovedTS>` in the CURRENT BATCH header |
+| **LPM SIM Generate** | Per-batch `CreateTS` chip in the period-batches strip below the result preview |
+| **LPM SIM → Adm (Production)** | `Created <CreateTS>` in the run header |
+| **Production Schedule** | `Generated <CreateTS>` in the schedule header |
+
+Existing format strings on each page are preserved — only the value passes through `ToGccString` now.
+
+#### 7) Add LPM / NonLPM tag to every SIM Reports Excel filename
+
+The three Excel downloads on **LPM SIM Reports** (EOM Summary, SIM Boxes, Item Details) now embed the batch's `Sources` value into the filename so a planner downloading multiple batches doesn't have to rename them by hand:
+
+| Old filename | New filename |
+|---|---|
+| `SimReports_EomSummary_Batch62_20260520_1252.xlsx` | `SimReports_EomSummary_Batch62_NonLPM_20260520_1252.xlsx` |
+| `SimReports_SimBoxes_Batch62_20260520_1252.xlsx` | `SimReports_SimBoxes_Batch62_NonLPM_20260520_1252.xlsx` |
+| `SimReports_ItemDetails_Batch62_20260520_1252.xlsx` | `SimReports_ItemDetails_Batch62_NonLPM_20260520_1252.xlsx` |
+
+Sources mapping:
+- `"LPM"` → `_LPM`
+- `"Non-LPM"` or `"Non-LPM*"` → `_NonLPM` (the trailing `*` IncludePurchasedBoxes marker is stripped)
+- `"LPM,Non-LPM"` → `_LPM_NonLPM`
+- missing / unknown batch → tag omitted (graceful degradation)
+
+The Item Filter Template download (`SimReports_ItemFilter_Template.xlsx`) is **not** tagged — it's a template, not a batch export.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Warehouse/WhBoxItemsSource.cs` | **NEW** `ResolveDataNameAsync` — returns the bare DataName (or null for UAE). `ResolveAsync` refactored to use it. **NEW** `BuildIsClosedExpression(country, dataName)` — emits the country-aware EXISTS expression for the closed-box flag. |
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | `ReadBoxesAsync` accepts a `dataName` parameter + a `closedBoxesDest` dictionary. The SQL now projects an `IsClosed` bit alongside the existing columns. C# loop splits the rows: closed boxes get their meta captured in `closedBoxesDest` and are skipped from the allocator's `dest`. `CheckAsync` adds the same exclusion to the box-segment count query so readiness counts reconcile with Generate. `GenerateAsync` resolves the DataName once and threads the closed-box dictionary through to `BuildAndInsertUnallocatedDiagnosticAsync`. The diagnostic builder emits one CLOSED_BOX row per closed BoxNo with the country-specific source named in the `Reasons` text. New private record `ClosedBoxMeta`. |
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | SIM Boxes SQL (both rollup + non-rollup branches): PLT571291B PalletType bug fixed by adding a `(BoxNo, PalletNo)` per-pallet meta CTE / per-pallet subquery predicate. Added 4 new columns to both branches at SELECT positions 18–21: `PurDate`, `GINNo`, `GinDate`, `FromTo`. `BoxDetailRow` gains the 4 new properties. `ReadBoxDetail` reads the 4 new indexes with `FieldCount` guards. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimReports.razor` | SIM Boxes table gains 4 new columns (Purchase Dt / GIN No / GIN Date / From/To) at the end. Footer row updated with 4 dashes. Excel export adds the 4 columns. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | SIM Boxes tab (result-preview) gains the 4 new columns between Tote ID and Total Qty. Excel export adds the 4 columns with date formatting. CURRENT BATCH `Generated` / `Approved` timestamps + per-batch chip CreateTS now via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | `Generated` timestamp next to "Saved Output" now via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/LPM/Adm.razor` | `Created` timestamp in run header via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/LPM/ProductionSchedule.razor` | `Generated` timestamp in schedule header via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Core/TimeFormatting.cs` | **NEW** — `ToGccString(DateTime?, format)` helper with three-level zone fallback (`Asia/Dubai` → `Arabian Standard Time` → fixed UTC+4). |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.69 → 1.14.70. |
+
+### What was NOT touched (intentional)
+
+- **No schema change.** `dbo.LPMSIM_UnallocatedDiagnostic` already has `TopReason` as `varchar` so `'CLOSED_BOX'` slots in alongside `CAP` / `UNKNOWN` / `EXCLUDED_BY_RULE` / `FILTERED_SEASON` / `SKIP_NO_DIV` / `SKIP_NO_EOM`. The four new SIM Boxes columns read from `whboxitems` / `WHBoxItemsExport` directly — both tables already carry them per your confirmation, no schema work.
+- **EOM Calculator unchanged.** The EOM waterfall (Stage 4a–4c) doesn't read closed-box data; only SIM Generate cares about which boxes can ship. Closed-box rules are SIM-only per your request.
+- **`LPMSIM_Output` allocator-write path unchanged.** Closed boxes are filtered before reaching the allocator, so they never get written. The PalletType the allocator persists (per row) is byte-identical to 1.14.69.
+- **Existing Gap reasons unchanged.** CAP / UNKNOWN / EXCLUDED_BY_RULE / FILTERED_SEASON / SKIP_NO_DIV / SKIP_NO_EOM all keep their pre-1.14.70 semantics. CLOSED_BOX is a new sibling, not a replacement.
+- **No retroactive re-classification.** Pre-1.14.70 batches' `LPMSIM_UnallocatedDiagnostic` rows stay as they were. Only batches generated from 1.14.70 onwards have CLOSED_BOX rows.
+
+### Operator notes
+
+- **Re-Generate SIM** after upgrade to see closed boxes filtered + CLOSED_BOX rows in the Gap list. Pre-1.14.70 Approved batches keep their old Output / Trace / Diagnostic rows untouched.
+- The closed-box NOT EXISTS subqueries add three extra correlated lookups per `whboxitems` row read. With normal indexes on `USA.dbo.upcboxhead(BoxNo)`, `Exclude_Transfers_Sim(Trfno)`, and `CloseR1Pallet(palletno)`, this is sub-millisecond per row — no noticeable Generate slowdown expected. If you do see slower generates, the diagnostic step in the QA report (just below) confirms which subquery is the bottleneck.
+- The PLT571291B-style fix is **forward-only** — old Approved batches still display the pre-1.14.70 (potentially mis-resolved) PalletType in the report. Re-Generate to refresh.
+- The four new columns can be NULL in `whboxitems` (the screenshot you sent showed all four NULL for the TCHIBO row). The UI / Excel render NULL as an empty cell.
+
+---
+
 ## 1.14.69 — EOM Generate: Store Capacity acts as BOTH ceiling AND floor (2026-05-20)
 
 ### What's new

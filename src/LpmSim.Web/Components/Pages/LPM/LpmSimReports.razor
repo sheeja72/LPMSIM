@@ -244,6 +244,11 @@ else
                         <MudTh>Pallet Type</MudTh>
                         <MudTh>Type Name</MudTh>
                         <MudTh>Pallet Category</MudTh>
+                        @* 1.14.70 — Pallet-purchase / GIN columns from whboxitems. *@
+                        <MudTh>Purchase Dt</MudTh>
+                        <MudTh>GIN No</MudTh>
+                        <MudTh>GIN Date</MudTh>
+                        <MudTh>From/To</MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>#@context.LPMBatchNo</MudTd>
@@ -266,6 +271,13 @@ else
                         <MudTd>@context.PalletType</MudTd>
                         <MudTd>@context.TypeName</MudTd>
                         <MudTd>@context.PalletCategory</MudTd>
+                        @* 1.14.70 — Pallet-purchase / GIN cells. Empty string
+                           when the underlying column is NULL so the cell
+                           renders as blank rather than showing "01/01/0001". *@
+                        <MudTd>@(context.PurDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
+                        <MudTd>@(context.GINNo ?? string.Empty)</MudTd>
+                        <MudTd>@(context.GinDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
+                        <MudTd>@(context.FromTo ?? string.Empty)</MudTd>
                     </RowTemplate>
                     <FooterContent>
                         @* 1.14.60 — Totals row. Box Qty is summed across DISTINCT
@@ -285,6 +297,12 @@ else
                         <MudTd Style="font-weight:600;">@totalBoxQty.ToString("N0")</MudTd>
                         <MudTd Style="font-weight:600;">@totalAlloc.ToString("N0")</MudTd>
                         <MudTd Style="font-weight:600;">@avgUsability.ToString("0.0")% avg</MudTd>
+                        <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
+                        @* 1.14.70 — Footer cells for the 4 new pallet-purchase
+                           columns. Dashes (no totals — these are date / text). *@
+                        <MudTd>—</MudTd>
                         <MudTd>—</MudTd>
                         <MudTd>—</MudTd>
                         <MudTd>—</MudTd>
@@ -377,6 +395,33 @@ else
     private DateTime? _runDate;
     private long _batchNo;
     private List<BatchHeader> _batches = new();
+
+    /// <summary>
+    /// 1.14.70 — Filename tag derived from the current batch's <c>Sources</c>
+    /// column so every Excel download names the LPM / Non-LPM run:
+    /// <list type="bullet">
+    ///   <item><c>"LPM"</c> → <c>"_LPM"</c></item>
+    ///   <item><c>"Non-LPM"</c> or <c>"Non-LPM*"</c> → <c>"_NonLPM"</c></item>
+    ///   <item><c>"LPM,Non-LPM"</c> → <c>"_LPM_NonLPM"</c></item>
+    ///   <item>missing / unknown batch → <c>""</c> (filename omits the tag)</item>
+    /// </list>
+    /// The trailing <c>"*"</c> marker (IncludePurchasedBoxes) is stripped from
+    /// the filename — it's metadata that lives in the DB, not something the
+    /// planner browses by.
+    /// </summary>
+    private string CurrentBatchTag()
+    {
+        var b = _batches.FirstOrDefault(x => x.LPMBatchNo == _batchNo);
+        var raw = b?.Sources;
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        // "Non-LPM*" → "Non-LPM"; ".replace(",",..)" then ".replace("-","")"
+        // collapses "LPM,Non-LPM" to "LPM_NonLPM" and "Non-LPM" to "NonLPM".
+        var s = raw.TrimEnd('*').Trim()
+                   .Replace(" ", "")
+                   .Replace(",", "_")
+                   .Replace("-", "");
+        return string.IsNullOrEmpty(s) ? "" : "_" + s;
+    }
     private string _filterStore = "";
     private string _filterDiv = "";
     private int _activeTab;
@@ -675,7 +720,8 @@ else
             ws.Range(2, 5, totalRow, 9).Style.NumberFormat.Format = "#,##0";
             ws.Columns().AdjustToContents();
 
-            var fileName = $"SimReports_EomSummary_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            // 1.14.70 — Filename includes the LPM / Non-LPM tag from the batch's Sources.
+            var fileName = $"SimReports_EomSummary_Batch{_batchNo}{CurrentBatchTag()}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }
@@ -700,7 +746,9 @@ else
             var headers = new List<string> { "Batch" };
             if (!_rollupBoxOnly) { headers.Add("StoreID"); headers.Add("StoreName"); headers.Add("Division"); }
             headers.AddRange(new[] { "BoxNo", "Box Qty", "Allocated Qty", "SKU Usability %",
-                                     "Pallet Type", "Type Name", "Pallet Category" });
+                                     "Pallet Type", "Type Name", "Pallet Category",
+                                     // 1.14.70 — Pallet-purchase / GIN columns.
+                                     "Purchase Dt", "GIN No", "GIN Date", "From/To" });
             for (int c = 0; c < headers.Count; c++)
             {
                 ws.Cell(1, c + 1).Value = headers[c];
@@ -725,6 +773,13 @@ else
                 ws.Cell(r, c++).Value = x.PalletType ?? "";
                 ws.Cell(r, c++).Value = x.TypeName ?? "";
                 ws.Cell(r, c++).Value = x.PalletCategory ?? "";
+                // 1.14.70 — Pallet-purchase / GIN columns. Excel handles
+                // DateTime natively so dates land as proper sortable cells;
+                // GIN No + From/To are free-text strings.
+                if (x.PurDate.HasValue) ws.Cell(r, c).Value = x.PurDate.Value; c++;
+                ws.Cell(r, c++).Value = x.GINNo ?? "";
+                if (x.GinDate.HasValue) ws.Cell(r, c).Value = x.GinDate.Value; c++;
+                ws.Cell(r, c++).Value = x.FromTo ?? "";
                 r++;
             }
             // TOTAL row — Box Qty deduped by BoxNo, Allocated summed, Usability averaged.
@@ -748,7 +803,8 @@ else
             ws.Range(2, usableCol, totalRow, usableCol).Style.NumberFormat.Format = "0.0";
             ws.Columns().AdjustToContents();
 
-            var fileName = $"SimReports_SimBoxes_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            // 1.14.70 — Filename includes the LPM / Non-LPM tag from the batch's Sources.
+            var fileName = $"SimReports_SimBoxes_Batch{_batchNo}{CurrentBatchTag()}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }
@@ -803,7 +859,8 @@ else
             ws.Range(2, 7, totalRow, 10).Style.NumberFormat.Format = "#,##0";
             ws.Columns().AdjustToContents();
 
-            var fileName = $"SimReports_ItemDetails_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            // 1.14.70 — Filename includes the LPM / Non-LPM tag from the batch's Sources.
+            var fileName = $"SimReports_ItemDetails_Batch{_batchNo}{CurrentBatchTag()}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }

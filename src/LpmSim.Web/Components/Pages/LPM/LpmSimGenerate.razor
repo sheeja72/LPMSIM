@@ -547,13 +547,13 @@
                     @if (_readiness.CurrentCreateTS is DateTime _bCts)
                     {
                         <span style="color:#475569;font-size:0.78rem;">
-                            · Generated <strong>@_bCts.ToString("dd-MMM-yyyy HH:mm")</strong>@(string.IsNullOrEmpty(_readiness.CurrentCreatedBy) ? "" : $" by {_readiness.CurrentCreatedBy}")
+                            · Generated <strong>@TimeFormatting.ToGccString(_bCts, "dd-MMM-yyyy HH:mm")</strong>@(string.IsNullOrEmpty(_readiness.CurrentCreatedBy) ? "" : $" by {_readiness.CurrentCreatedBy}")
                         </span>
                     }
                     @if (_readiness.ExistingApproved && _readiness.CurrentApprovedTS is not null)
                     {
                         <span style="color:#16a34a;font-size:0.78rem;">
-                            · Approved <strong>@_readiness.CurrentApprovedTS?.ToString("dd-MMM-yyyy HH:mm")</strong> by @_readiness.CurrentApprovedBy
+                            · Approved <strong>@TimeFormatting.ToGccString(_readiness.CurrentApprovedTS, "dd-MMM-yyyy HH:mm")</strong> by @_readiness.CurrentApprovedBy
                         </span>
                     }
                     <span style="color:#cbd5e1;font-size:0.85rem;">|</span>
@@ -908,7 +908,7 @@
                            Size="Size.Small" DropShadow="false"
                            OnClick="@(() => ViewBatchAsync(b.LPMBatchNo))">
                     #@b.LPMBatchNo @b.Status
-                    <span style="margin-left:.4rem;color:#94a3b8;font-weight:400;">@b.CreateTS.ToString("dd-MMM HH:mm")</span>
+                    <span style="margin-left:.4rem;color:#94a3b8;font-weight:400;">@TimeFormatting.ToGccString(b.CreateTS, "dd-MMM HH:mm")</span>
                 </MudButton>
             }
         </div>
@@ -1370,6 +1370,12 @@
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.Rack ?? string.Empty">Rack</MudTableSortLabel></MudTh>
                         @* 1.14.65 — Tote ID column after Rack (physical-location group). *@
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.ToteId ?? string.Empty">Tote ID</MudTableSortLabel></MudTh>
+                        @* 1.14.70 — Pallet-purchase / GIN columns from whboxitems. Same data group
+                           as Tote ID (per-pallet meta) so kept adjacent. *@
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.PurDate ?? DateTime.MinValue">Purchase Dt</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.GINNo ?? string.Empty">GIN No</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.GinDate ?? DateTime.MinValue">GIN Date</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.FromTo ?? string.Empty">From/To</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalBoxQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Total Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalSimQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalRrQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
@@ -1395,6 +1401,11 @@
                         <MudTd>@context.Warehouse</MudTd>
                         <MudTd>@context.Rack</MudTd>
                         <MudTd><code>@context.ToteId</code></MudTd>
+                        @* 1.14.70 — Pallet-purchase / GIN cells. Empty when NULL. *@
+                        <MudTd>@(context.PurDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
+                        <MudTd>@(context.GINNo ?? string.Empty)</MudTd>
+                        <MudTd>@(context.GinDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
+                        <MudTd>@(context.FromTo ?? string.Empty)</MudTd>
                         <MudTd>@(context.BoxQty?.ToString("N0"))</MudTd>
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
@@ -4382,8 +4393,10 @@
         {
             // 1.14.12: Pallet No column added after Box No.
             // 1.14.65: Division (after Kind) + Tote ID (after Rack) added.
+            // 1.14.70: Purchase Dt / GIN No / GIN Date / From-To added after Tote ID.
             string[] headers = { "Box No", "Pallet No", "Kind", "Division", "Pallet Type", "Type Name",
                                  "Trn Date", "Warehouse", "Rack", "Tote ID",
+                                 "Purchase Dt", "GIN No", "GIN Date", "From/To",
                                  "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
@@ -4399,14 +4412,23 @@
                 sheet.Cell(row, 8).Value  = r.Warehouse ?? "";
                 sheet.Cell(row, 9).Value  = r.Rack ?? "";
                 sheet.Cell(row, 10).Value = r.ToteId ?? "";
-                sheet.Cell(row, 11).Value = r.BoxQty ?? 0;
-                sheet.Cell(row, 12).Value = r.LpmSimQty;
-                sheet.Cell(row, 13).Value = r.RoundRobinQty;
-                sheet.Cell(row, 14).Value = (double?)r.SkuUsabilityPct;
+                // 1.14.70 — Pallet-purchase / GIN columns. Dates kept as
+                // DateTime so Excel formats them natively + sorts properly.
+                if (r.PurDate.HasValue) sheet.Cell(row, 11).Value = r.PurDate.Value;
+                sheet.Cell(row, 12).Value = r.GINNo ?? "";
+                if (r.GinDate.HasValue) sheet.Cell(row, 13).Value = r.GinDate.Value;
+                sheet.Cell(row, 14).Value = r.FromTo ?? "";
+                sheet.Cell(row, 15).Value = r.BoxQty ?? 0;
+                sheet.Cell(row, 16).Value = r.LpmSimQty;
+                sheet.Cell(row, 17).Value = r.RoundRobinQty;
+                sheet.Cell(row, 18).Value = (double?)r.SkuUsabilityPct;
             }
             sheet.Range(2, 7, rows.Count + 1, 7).Style.NumberFormat.Format = "yyyy-mm-dd";
-            FormatNumeric(sheet, rows.Count, new[] { 11, 12, 13 });
-            sheet.Range(2, 14, rows.Count + 1, 14).Style.NumberFormat.Format = "0.0";
+            // 1.14.70 — Format the two new date columns (Purchase Dt at 11, GIN Date at 13).
+            sheet.Range(2, 11, rows.Count + 1, 11).Style.NumberFormat.Format = "yyyy-mm-dd";
+            sheet.Range(2, 13, rows.Count + 1, 13).Style.NumberFormat.Format = "yyyy-mm-dd";
+            FormatNumeric(sheet, rows.Count, new[] { 15, 16, 17 });
+            sheet.Range(2, 18, rows.Count + 1, 18).Style.NumberFormat.Format = "0.0";
         });
     }
 

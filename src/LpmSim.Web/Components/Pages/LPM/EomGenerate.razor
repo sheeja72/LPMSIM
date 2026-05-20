@@ -424,7 +424,7 @@
         {
             <span class="lpm-status lpm-status-ok">
                 <MudIcon Icon="@Icons.Material.Filled.History" Size="Size.Small" />
-                Generated @_savedAt?.ToString("yyyy-MM-dd HH:mm")
+                Generated @TimeFormatting.ToGccString(_savedAt)
             </span>
         }
         else
