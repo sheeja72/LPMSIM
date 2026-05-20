@@ -66,4 +66,37 @@ public static class TimeFormatting
     /// </summary>
     public static string ToGccString(DateTime utc, string format = "yyyy-MM-dd HH:mm")
         => ToGccString((DateTime?)utc, format);
+
+    /// <summary>
+    /// 1.14.75 — Current wall-clock time in the GCC zone (UTC+4).
+    /// Returns a <see cref="DateTime"/> with <see cref="DateTimeKind.Unspecified"/>
+    /// (because the value is in GST, not UTC and not the server's local
+    /// time). Used by the nightly Build SKU Max scheduler to compute
+    /// "what year / month is it in Dubai right now?".
+    /// </summary>
+    public static DateTime NowGst()
+        => TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, Gcc);
+
+    /// <summary>
+    /// 1.14.75 — Returns the next UTC instant when the GCC local clock reads
+    /// <paramref name="targetGstTime"/>. If the GST moment has already passed
+    /// today (in GST), returns tomorrow's instance. Used by the scheduler to
+    /// compute "how long until the next 04:00 GST?".
+    /// </summary>
+    public static DateTime NextGstUtc(TimeOnly targetGstTime)
+    {
+        var nowGst         = NowGst();
+        var todayTargetGst = new DateTime(
+            nowGst.Year, nowGst.Month, nowGst.Day,
+            targetGstTime.Hour, targetGstTime.Minute, 0,
+            DateTimeKind.Unspecified);
+
+        if (todayTargetGst <= nowGst)
+            todayTargetGst = todayTargetGst.AddDays(1);
+
+        // Convert the GST wall-clock instant to UTC. Kind=Unspecified +
+        // explicit timezone is the safe pattern (Kind=Local would assume
+        // the server's local timezone, which on Azure App Service is UTC).
+        return TimeZoneInfo.ConvertTimeToUtc(todayTargetGst, Gcc);
+    }
 }

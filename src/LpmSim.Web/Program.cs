@@ -110,6 +110,14 @@ public class Program
         // navigation no longer kills the build mid-way.
         builder.Services.AddSingleton<SkuMaxBuildJobManager>();
 
+        // 1.14.75 — Nightly auto-build scheduler. Fires at the GCC-local
+        // time configured in `ScheduledBuilds:SkuMax:DailyAtGst` (default
+        // 04:00 GST), discovers every country with DataSettings.SIMCountry
+        // populated, and runs Build SKU Max sequentially via the manager
+        // above. Failures on one country don't stop the rest — see the
+        // class docstring for failure-handling semantics.
+        builder.Services.AddHostedService<LpmSim.Web.Hosting.SkuMaxBuildScheduler>();
+
         // ─── Authentication ──────────────────────────────────────────────
         // Two modes selected via configuration `Auth:Mode`:
         //   "Negotiate" (default) — Windows / Kerberos, no UI changes needed.

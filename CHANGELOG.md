@@ -23,6 +23,71 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.75 — Nightly Build SKU Max auto-scheduler (2026-05-20)
+
+### What's new
+
+A new `IHostedService` (`SkuMaxBuildScheduler`) wakes up every day at **04:00 GST** (GCC local time, UTC+4) and runs Build SKU Max for every country configured in `bfldata.dbo.DataSettings.SIMCountry`. Each country's build runs sequentially via the existing `SkuMaxBuildJobManager` — the same path the "Build SKU Max" button on SIM Generate uses — so:
+
+- The "Last Build" panel on SIM Generate shows the scheduled run automatically.
+- The audit row in `dbo.LPM_SimItemSkuMaxBuild` is stamped `CreatedBy = 'scheduler@system'` so it's easy to distinguish from manual runs.
+- The same in-memory job tracking applies — if a planner opens SIM Generate at 04:30 mid-build, the live "Running" banner appears.
+
+### Why this matters
+
+Pre-1.14.75 every Build SKU Max had to be triggered manually. Planners arrived at 08:00 and had to wait through a 5–15 min build before they could run SIM. With the nightly schedule, the snapshot for every country is fresh-built by 04:00–05:00 GST and ready to use as soon as the morning shift logs in.
+
+### Configuration (`appsettings.json`)
+
+```json
+"ScheduledBuilds": {
+  "SkuMax": {
+    "Enabled":    true,
+    "DailyAtGst": "04:00"
+  }
+}
+```
+
+Both keys are re-read **every cycle** (not just at startup), so an admin can toggle `Enabled` to `false` (or move the time to e.g. `"02:30"`) via Azure App Service Application settings without a redeploy. The change takes effect on the next scheduler cycle (within 24h).
+
+### Behaviour
+
+| Scenario | Result |
+|---|---|
+| App restarts at 03:55 GST | Scheduler computes next run at 04:00 GST → 5 minute wait → fires. |
+| App restarts at 04:30 GST | Scheduler computes next run at 04:00 GST tomorrow → 23.5h wait. (Today's run was missed; planner can manually trigger if needed.) |
+| Country has DataName missing (OMAN-style) | Build fails for that country, logged with the error message, scheduler moves to the next country. |
+| Build for one country still running when the next country is queued | Sequential — the next country waits. Total nightly run is ~5–15 min per country × N countries. |
+| `Enabled = false` in appsettings | Scheduler logs "disabled via config" each cycle and skips the build. |
+| Same period already has a Running job from a manual click | Scheduler logs "skipping — a build is already running" and proceeds to the next country. |
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/SkuMaxBuildScheduler.cs` | **NEW** — `BackgroundService` that computes next-run-GST via `TimeFormatting.NextGstUtc`, discovers countries from `DataSettings.SIMCountry`, calls `SkuMaxBuildJobManager.Start(country, year, month, "scheduler@system")` for each, awaits `RunningTask`, logs per-country success/failure + a cycle summary. |
+| `src/LpmSim.Core/TimeFormatting.cs` | Added public helpers `NowGst()` and `NextGstUtc(TimeOnly target)` so the scheduler (and any future GCC-aware code) can compute "what time is it in Dubai?" and "when is the next 04:00 GST in UTC?" without re-implementing the timezone conversion. |
+| `src/LpmSim.Web/Program.cs` | One-line `builder.Services.AddHostedService<SkuMaxBuildScheduler>();` registration. |
+| `src/LpmSim.Web/appsettings.json` | New `ScheduledBuilds.SkuMax` block with `Enabled = true` + `DailyAtGst = "04:00"`. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.74 → 1.14.75. |
+
+### What was NOT touched (intentional)
+
+- **`SkuMaxBuildJobManager` unchanged.** The scheduler is a pure consumer — same `Start()` / `IsRunning()` / `RunningTask` API the SIM Generate UI uses.
+- **`LpmSimGenerator.BuildSkuMaxAsync` unchanged.** All the heavy lifting (rule-merging, validation, multi-table writes) is identical to a manual run.
+- **No schema change. No migration.** `LPM_SimItemSkuMaxBuild` already has a `CreatedBy` column that captures the "scheduler@system" value.
+- **No new endpoints / no auth changes.** Scheduler is in-process, not exposed externally.
+- **No DB lock for multi-instance scaling.** Single-instance was confirmed for now. If you ever scale to multiple App Service instances, add a small `LPM_ScheduledJobs(JobName, RunDate)` table with a unique PK so only one instance per night wins the INSERT and runs the job — that's a ~30-line follow-up.
+
+### Operator notes
+
+- **After deploy** — restart isn't required; the next App Service instance pickup includes the new BackgroundService. The first 04:00 GST after deploy will fire automatically.
+- **To disable** — set `ScheduledBuilds:SkuMax:Enabled` to `false` in App Service → Configuration → Application settings. Takes effect on the next cycle (within 24h, sooner if you restart the App Service).
+- **To change the time** — set `ScheduledBuilds:SkuMax:DailyAtGst` to a `HH:mm` value (e.g. `"02:30"`). Same applies — next cycle picks it up.
+- **To verify it ran** — check `dbo.LPM_SimItemSkuMaxBuild` for rows where `CreatedBy = 'scheduler@system'`, ordered by `CreateTS DESC`. The latest row per country shows the previous night's run + duration + row count. The same info also surfaces on the SIM Generate page's "Last Build" panel.
+- **App Service Always On** — keep it ENABLED (default for paid plans) so the App Service doesn't get unloaded when idle. Without Always On, the scheduler can't fire if no traffic hit the app for hours before 04:00.
+
+---
+
 ## 1.14.74 — SIM Generate: closed-box exclusion now allocator-only; Input Readiness counts show full whboxitems totals (2026-05-20)
 
 ### What's new

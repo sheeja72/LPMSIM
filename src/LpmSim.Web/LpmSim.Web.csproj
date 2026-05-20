@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.74</Version>
-    <AssemblyVersion>1.14.74.0</AssemblyVersion>
-    <FileVersion>1.14.74.0</FileVersion>
-    <InformationalVersion>1.14.74 (SIM Generate: closed-box exclusion now applies ONLY in the allocator + Gap diagnostic; the Input Readiness counts grid shows the full unfiltered whboxitems totals — operator preference for the grid as a "what's in the warehouse" view rather than a "what will ship" view)</InformationalVersion>
+    <Version>1.14.75</Version>
+    <AssemblyVersion>1.14.75.0</AssemblyVersion>
+    <FileVersion>1.14.75.0</FileVersion>
+    <InformationalVersion>1.14.75 (Nightly Build SKU Max auto-scheduler — fires at 04:00 GST daily, discovers all countries from DataSettings.SIMCountry, builds the current-month snapshot for each one sequentially via the existing SkuMaxBuildJobManager; CreatedBy stamped 'scheduler@system'. Enable/disable + reschedule via appsettings without redeploy.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
