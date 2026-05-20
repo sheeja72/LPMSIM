@@ -23,6 +23,60 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.66 — User Access: two new roles for EOM/SIM Generate-Approve (2026-05-20)
+
+### What's new
+
+Two new finer-grained roles so an admin can grant **Generate / Approve** rights on EOM Generate (and/or SIM Generate) **without** giving full Admin:
+
+| Role code | Role name (shown in dialog) |
+|---|---|
+| `EomGenerateApprove` | EOM Generate/Approve Access |
+| `SimGenerateApprove` | SIM Generate/Approve Access |
+
+Both surface as checkboxes in the **Admin → User Access** dialog automatically (the dialog renders all `LpmRole` rows). A user with **only** the new role can:
+
+| Role | Can access EOM Generate page | Can click Generate / Approve / Delete |
+|---|---|---|
+| Admin | ✅ | ✅ |
+| Editor | ✅ | ❌ (replaced by the italic caption) |
+| **EomGenerateApprove** | ✅ | ✅ (EOM only) |
+| **SimGenerateApprove** | ✅ (SIM page) | ✅ (SIM only) |
+| Viewer / PlanningManager | (existing rules) | ❌ |
+
+### Why this matters
+
+Before 1.14.66 the buttons gate (added in 1.14.57) was `<AuthorizeView Roles="Admin">`. So granting run-rights required full Admin — which also grants User Access management, audit log, etc. That was too coarse for the planners who needed to trigger EOM / SIM runs but not manage users.
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/056_lpm_role_generate_approve.sql` | **NEW** — idempotent `MERGE` adding the 2 role rows to `dbo.LPMRole`. Also keeps `RoleName` in sync if a later release renames it. |
+| `src/LpmSim.Core/Roles.cs` | Two new role-code constants: `EomGenerateApprove`, `SimGenerateApprove`. Two new page-level aggregates: `EomGeneratePageAccess = "Admin,Editor,EomGenerateApprove"`, `SimGeneratePageAccess = "Admin,Editor,PlanningManager,SimGenerateApprove"`. Existing `AdminOrEditor` / `AdminOrEditorOrPlanner` aggregates intentionally **unchanged** so other pages (Monthly Weights, Planned Inputs, Stores Capacity, Uploads, DivMax, Adm, ProductionSchedule) don't accidentally inherit the new role. `AnyRole` extended to include the two new codes. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | Page `@attribute` switched to `Roles.EomGeneratePageAccess`. Button-group `<AuthorizeView>` now accepts `Admin,EomGenerateApprove`. NotAuthorized caption text updated. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | Page `@attribute` switched to `Roles.SimGeneratePageAccess`. Button-group `<AuthorizeView>` now accepts `Admin,SimGenerateApprove`. NotAuthorized caption text updated. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.65 → 1.14.66. |
+
+### What was NOT touched (intentional)
+- **`Users.razor` + `UserEditDialog.razor`** — render all `LpmRole` rows dynamically, no code change needed; the new roles appear automatically once migration 056 lands.
+- **`LpmClaimsTransformer.cs`** — already iterates whatever roles are in `LpmUserRole` and emits them as role claims; new role codes work without any code change.
+- **`NavMenu.razor`** — EOM/SIM menu items aren't gated at the link level (any authenticated user sees them). The page-level `[Authorize]` enforces access on click.
+- **Other Editor-gated pages** (Monthly Weights, Planned Inputs, Stores Capacity, Uploads, DivMax, Adm, ProductionSchedule) — kept on the narrower `AdminOrEditor` / `AdminOrEditorOrPlanner` aggregates so the new role doesn't accidentally widen their access.
+
+### Migration required
+Run **`db/056_lpm_role_generate_approve.sql`** on the prod DB. Idempotent; the two roles will appear in the User Access dialog immediately after the migration runs.
+
+### Risk
+**Low.** Pure permission-model expansion. Admin behaviour identical. Existing role assignments unchanged. The new roles add capabilities — nothing is removed.
+
+### Verification after deploy + migration 056
+1. Sign in as Admin → **Admin → User Access** → Edit any user → confirm two new checkboxes: **EOM Generate/Approve Access**, **SIM Generate/Approve Access**.
+2. Assign **EOM Generate/Approve Access** to a test user → save → that user signs in.
+3. As that user: EOM Generate page should be reachable, **Generate** and **Generate & Approve** buttons visible and active. SIM Generate page might or might not be reachable depending on other roles.
+4. Symmetric check for the SIM role.
+
+---
+
 ## 1.14.65 — SIM Generate → SIM Boxes: add Tote ID + Division columns (2026-05-20)
 
 ### What changed

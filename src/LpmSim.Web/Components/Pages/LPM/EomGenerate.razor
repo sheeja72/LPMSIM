@@ -1,6 +1,10 @@
 @page "/lpm/eom/generate"
 @rendermode InteractiveServer
-@attribute [Authorize(Roles = Roles.AdminOrEditor)]
+@* 1.14.66 — Page access widened to include the new "EOM Generate/Approve
+   Access" role so a user with ONLY that role can reach this page (without
+   needing Editor or Admin). The button-group AuthorizeView below still
+   gates Generate / Approve. *@
+@attribute [Authorize(Roles = Roles.EomGeneratePageAccess)]
 @using LpmSim.Data.Eom
 @using LpmSim.Data.Auditing
 @using ClosedXML.Excel
@@ -320,8 +324,11 @@
                Editors retain page-view access (readiness, preview, exports)
                via the page-level [Authorize(Roles = AdminOrEditor)] attribute
                but cannot trigger a run / save. Non-Admin users see no buttons
-               here; the action surface is empty. *@
-            <AuthorizeView Roles="Admin">
+               here; the action surface is empty.
+               1.14.66 — Also accept the new "EOM Generate/Approve Access"
+               role (RoleCode = "EomGenerateApprove") so an admin can grant
+               run-rights without giving full Admin. *@
+            <AuthorizeView Roles="Admin,EomGenerateApprove">
                 <Authorized>
                     <MudButton Variant="Variant.Filled" Color="Color.Secondary" DropShadow="false"
                                StartIcon="@Icons.Material.Filled.PlayArrow"
@@ -344,7 +351,7 @@
                 </Authorized>
                 <NotAuthorized>
                     <MudText Typo="Typo.caption" Style="color:#94a3b8;font-style:italic;">
-                        Generate / Approve restricted to Admin users.
+                        Generate / Approve restricted to Admin or "EOM Generate/Approve Access" users.
                     </MudText>
                 </NotAuthorized>
             </AuthorizeView>

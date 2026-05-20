@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.65</Version>
-    <AssemblyVersion>1.14.65.0</AssemblyVersion>
-    <FileVersion>1.14.65.0</FileVersion>
-    <InformationalVersion>1.14.65 (SIM Generate → SIM Boxes report: add Tote ID + Division columns)</InformationalVersion>
+    <Version>1.14.66</Version>
+    <AssemblyVersion>1.14.66.0</AssemblyVersion>
+    <FileVersion>1.14.66.0</FileVersion>
+    <InformationalVersion>1.14.66 (User Access: two new roles — "EOM Generate/Approve Access" and "SIM Generate/Approve Access")</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -1,6 +1,10 @@
 @page "/lpm/lpm-sim/generate"
 @rendermode InteractiveServer
-@attribute [Authorize(Roles = Roles.AdminOrEditorOrPlanner)]
+@* 1.14.66 — Page access widened to include the new "SIM Generate/Approve
+   Access" role so a user with ONLY that role can reach this page (without
+   needing Editor, PlanningManager, or Admin). The button-group AuthorizeView
+   below still gates Generate / Approve / Delete. *@
+@attribute [Authorize(Roles = Roles.SimGeneratePageAccess)]
 @using LpmSim.Data.LpmSim
 @using LpmSim.Data.Auditing
 @using LpmSim.Core.Entities
@@ -466,8 +470,11 @@
                [Authorize(Roles = AdminOrEditorOrPlanner)] attribute but cannot
                run / approve / delete a SIM batch. Build SKU Max stays open to
                all roles since it's a planning prep step, not a batch
-               commitment. *@
-            <AuthorizeView Roles="Admin">
+               commitment.
+               1.14.66 — Also accept the new "SIM Generate/Approve Access"
+               role (RoleCode = "SimGenerateApprove") so an admin can grant
+               run-rights without giving full Admin. *@
+            <AuthorizeView Roles="Admin,SimGenerateApprove">
                 <Authorized>
                     <MudTooltip Text="@(_skuMaxStatus?.LastBuildTS is null ? "Click Build SKU Max first — no snapshot exists for this period" : "")"
                                 Disabled="@(_skuMaxStatus?.LastBuildTS is not null)">
@@ -491,7 +498,7 @@
                 </Authorized>
                 <NotAuthorized>
                     <MudText Typo="Typo.caption" Style="color:#94a3b8;font-style:italic;">
-                        Generate / Approve / Delete restricted to Admin users.
+                        Generate / Approve / Delete restricted to Admin or "SIM Generate/Approve Access" users.
                     </MudText>
                 </NotAuthorized>
             </AuthorizeView>
