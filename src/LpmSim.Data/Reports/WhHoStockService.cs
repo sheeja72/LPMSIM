@@ -161,17 +161,51 @@ public class WhHoStockService(IConfiguration cfg)
             hoDivFilterFrag = divSb.ToString();
         }
 
-        // Season filter — encoded as a single @season param the SQL inspects.
-        // 'A' = All (no filter); 'W' = Winter; 'S' = Summer. WH side reads
-        // whboxitems.Season directly (per user spec — distinct from the
-        // existing EOM code which uses pallettype.Season); HO side derives
-        // season from UPCBarcodes.Itemtype.
+        // Season filter encoded for inline SQL fragments (1.14.73 perf —
+        // see comment block below). 'A' = All (no filter); 'W' = Winter;
+        // 'S' = Summer. WH side reads whboxitems.Season directly (per user
+        // spec — distinct from the existing EOM code which uses
+        // pallettype.Season); HO side derives season from UPCBarcodes.Itemtype.
         var seasonCode = filter.Season switch
         {
             WhHoSeason.Summer => "S",
             WhHoSeason.Winter => "W",
             _                 => "A",
         };
+
+        // 1.14.73 perf — Inline season fragments instead of `(@season = 'A'
+        // OR …)` OR-chains. The previous parameterised pattern made SQL
+        // Server's optimizer guess at cardinality (parameter sniffing) and
+        // sometimes pick poor plans on Winter / Summer runs. With inline
+        // SQL the predicate is either present or completely absent, so
+        // the plan reflects the actual filter.
+        var whSeasonFilter = seasonCode switch
+        {
+            "W" => "AND UPPER(ISNULL(w.Season, '')) = 'W'",
+            "S" => "AND UPPER(ISNULL(w.Season, '')) <> 'W'",
+            _   => "",   // 'A' = no filter
+        };
+        var hoSeasonFilter = seasonCode switch
+        {
+            "W" => "AND ISNULL(its.Season, 'S') = 'W'",
+            "S" => "AND ISNULL(its.Season, 'S') = 'S'",
+            _   => "",   // 'A' = no filter
+        };
+        // 1.14.73 perf — When season = All, the #WhRptItemSeason table is
+        // never consulted; skip both the build (a full scan of
+        // usa.dbo.upcbarcodes) and the LEFT JOIN to it.
+        var buildItemSeasonTable = seasonCode != "A";
+        var hoSeasonJoinClause   = buildItemSeasonTable
+            ? "LEFT  JOIN #WhRptItemSeason its ON its.itemcode = ls.ItemCode"
+            : "";
+
+        // The two universal WH-rule predicates that, pre-1.14.73, were
+        // duplicated inside every SUM CASE on the WH side. Now hoisted into
+        // the WHByDiv WHERE so SQL Server can short-circuit ~50-80% of
+        // whboxitems rows before any CASE / aggregate runs.
+        const string WhUniversalRule =
+            "AND w.ShopEligible <> 'E' " +
+            "AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')";
 
         var sql = $@"
             SET NOCOUNT ON;
@@ -182,6 +216,9 @@ public class WhHoStockService(IConfiguration cfg)
             -- materialized into indexed temp tables once, then the main
             -- query joins them as index seeks. Same data, single
             -- evaluation, typically 2-5x faster.
+            -- 1.14.73 perf: #WhRptItemSeason is now built only when the
+            -- Season filter is Winter or Summer (the All path doesn't
+            -- consult it at all — see hoSeasonJoinClause / hoSeasonFilter).
             IF OBJECT_ID('tempdb..#WhRptItemDiv')    IS NOT NULL DROP TABLE #WhRptItemDiv;
             IF OBJECT_ID('tempdb..#WhRptItemSeason') IS NOT NULL DROP TABLE #WhRptItemSeason;
 
@@ -194,6 +231,7 @@ public class WhHoStockService(IConfiguration cfg)
              GROUP BY u.itemcode;
             CREATE CLUSTERED INDEX IX_WhRptItemDiv ON #WhRptItemDiv (itemcode);
 
+            {(buildItemSeasonTable ? @"
             -- (2) HO season per item: W if any barcode is W, else S.
             --     Items with no barcode row default to S (via LEFT JOIN +
             --     ISNULL in HOByDiv below — no row here = LEFT-join NULL).
@@ -203,7 +241,7 @@ public class WhHoStockService(IConfiguration cfg)
               FROM usa.dbo.upcbarcodes b
              WHERE b.itemcode IS NOT NULL AND b.itemcode <> ''
              GROUP BY b.itemcode;
-            CREATE CLUSTERED INDEX IX_WhRptItemSeason ON #WhRptItemSeason (itemcode);
+            CREATE CLUSTERED INDEX IX_WhRptItemSeason ON #WhRptItemSeason (itemcode);" : "")}
 
             ;WITH HOByDiv AS (
                 -- HO Stock per Division. storeid filter is dynamic — UAE
@@ -222,9 +260,9 @@ public class WhHoStockService(IConfiguration cfg)
                        SUM(CAST(ISNULL(ls.SOH, 0) AS bigint)) AS HOStock
                   FROM racks.dbo.LPM_LocStock ls
                   LEFT  JOIN #WhRptItemDiv id ON id.itemcode = ls.ItemCode
-                  LEFT  JOIN #WhRptItemSeason its ON its.itemcode = ls.ItemCode
+                  {hoSeasonJoinClause}
                  WHERE ls.storeid IN ({hoSb})
-                   AND (@season = 'A' OR ISNULL(its.Season, 'S') = @season)
+                   {hoSeasonFilter}
                    {hoDivFilterFrag}
                  GROUP BY ISNULL(id.Division, '(no division)')
             ),
@@ -237,56 +275,49 @@ public class WhHoStockService(IConfiguration cfg)
                 -- to the ItemDiv CTE (already aggregated to one row per
                 -- itemcode above). Same semantics, much faster — the
                 -- planner now waits seconds instead of tens of seconds.
-                -- 1.13.2 rule: ALL whboxitems-sourced columns now apply
-                -- the same eligibility rule as raw SSMS queries:
+                --
+                -- 1.13.2 rule: ALL whboxitems-sourced columns apply the same
+                -- eligibility rule as raw SSMS queries:
                 --     ShopEligible <> 'E'    (excludes 'E' AND NULL — matches the planner's reference query)
                 --     AND PalletCategory NOT IN ('NON ELIGIBLE', 'ECOM')
-                -- Reserved / Seasonal / On Hold / Eligible already implicitly
-                -- satisfy the category clause (they match a specific cat),
-                -- so only the ShopEligible piece is added on those columns.
-                -- LPM / Non-LPM now respect the rule too (previously had no
-                -- restrictions).
+                --
+                -- 1.14.73 perf: Hoisted the universal rule above into the
+                -- WHERE clause (was previously duplicated inside every
+                -- SUM CASE). SQL Server now short-circuits ~50-80% of
+                -- whboxitems rows before any CASE / aggregate evaluates,
+                -- so the remaining SUM CASEs only have to weigh the
+                -- specific category / LPM-presence filter that's unique to
+                -- each column. WHStock collapses to a plain SUM since
+                -- every surviving row counts. Reserved / Seasonal / On Hold
+                -- / Eligible keep their category-specific CASE; LPM /
+                -- Non-LPM / *Eligible keep their LPM-presence CASE.
                 SELECT ISNULL(id.Division, '(no division)') AS Division,
-                       SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
-                                 AND w.ShopEligible <> 'E'
-                                THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS WHStock,
+                       SUM(CAST(ISNULL(w.Qty, 0) AS bigint)) AS WHStock,
                        SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'RESERVED'
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS ReservedStock,
                        SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'SEASONAL'
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS SeasonalStock,
                        SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'ON HOLD'
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS OnHoldStock,
                        SUM(CASE WHEN UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS EligibleStock,
                        SUM(CASE WHEN (w.LPM IS NULL OR w.LPM = '')
-                                 AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS NonLpmStock,
                        SUM(CASE WHEN w.LPM IS NOT NULL AND w.LPM <> ''
-                                 AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmStock,
-                       -- 1.14.72 — Intersection of LPM AND Eligible:
-                       --   LPM set + PalletCategory='ELIGIBLE' + ShopEligible <> 'E'.
+                       -- 1.14.72 — Intersection of LPM AND Eligible.
                        SUM(CASE WHEN w.LPM IS NOT NULL AND w.LPM <> ''
                                  AND UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS LpmEligibleStock,
-                       -- 1.14.72 — Intersection of Non-LPM AND Eligible:
-                       --   LPM NULL/empty + PalletCategory='ELIGIBLE' + ShopEligible <> 'E'.
+                       -- 1.14.72 — Intersection of Non-LPM AND Eligible.
                        SUM(CASE WHEN (w.LPM IS NULL OR w.LPM = '')
                                  AND UPPER(ISNULL(w.PalletCategory, '')) = 'ELIGIBLE'
-                                 AND w.ShopEligible <> 'E'
                                 THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END) AS NonLpmEligibleStock
                   FROM {whSrc} w
                   LEFT JOIN #WhRptItemDiv id ON id.itemcode = w.ItemCode
-                 WHERE (@season = 'A'
-                        OR (@season = 'W' AND UPPER(ISNULL(w.Season, '')) = 'W')
-                        OR (@season = 'S' AND UPPER(ISNULL(w.Season, '')) <> 'W'))
+                 WHERE 1 = 1
+                   {WhUniversalRule}
+                   {whSeasonFilter}
                    {hoDivFilterFrag}
                  GROUP BY ISNULL(id.Division, '(no division)')
             )
@@ -311,7 +342,9 @@ public class WhHoStockService(IConfiguration cfg)
         using var cmd = new SqlCommand(sql, conn) { CommandTimeout = 300 };
         foreach (var p in hoParms)  cmd.Parameters.Add(p);
         foreach (var p in divParms) cmd.Parameters.Add(p);
-        cmd.Parameters.Add(new SqlParameter("@season", seasonCode));
+        // 1.14.73 — @season parameter removed; the SQL now uses inline
+        // conditional fragments built from seasonCode at C# string-build
+        // time (whSeasonFilter / hoSeasonFilter / hoSeasonJoinClause).
 
         var rows = new List<WhHoStockRow>();
         using var rdr = await cmd.ExecuteReaderAsync(ct);

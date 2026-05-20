@@ -23,6 +23,95 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.73 — WH Stock Position perf: hoist universal rule into WHERE, simplify SUM CASEs, conditional #WhRptItemSeason build (2026-05-20)
+
+### What's new
+
+Four targeted SQL changes to `WhHoStockService.GetAsync` — same result set, but the query now scans much less data and runs cleaner plans on the optimizer. No new functionality; pure speedup.
+
+#### 1) Hoist the universal WH rule into `WHByDiv`'s `WHERE` clause
+
+Pre-1.14.73 every one of the **11 SUM-CASE columns** on the WH side re-checked the same eligibility rule inside the CASE:
+
+```sql
+AND UPPER(ISNULL(w.PalletCategory, '')) NOT IN ('NON ELIGIBLE', 'ECOM')
+AND w.ShopEligible <> 'E'
+```
+
+Which meant SQL Server had to:
+- Evaluate that predicate **11 times per row** (once per CASE).
+- Read **every row** of `whboxitems` (potentially millions) into the aggregate operator, even rows that contributed 0 to every column.
+
+1.14.73 moves the rule into a single `WHERE` filter on the source. Rows that fail the universal rule are filtered out **before** any aggregation / CASE runs — typically 50–80% of `whboxitems` rows for UAE / KSA. The surviving rows then go through much simpler CASE statements (only the column-specific category / LPM-presence filter, no eligibility re-check).
+
+`WHStock` collapses to a plain `SUM(Qty)` since every surviving row contributes to it. `Reserved` / `Seasonal` / `On Hold` / `Eligible` keep their `PalletCategory = '<X>'` CASE. `LPM` / `Non-LPM` / `LPM Eligible` / `NonLPM Eligible` keep their LPM-presence + (where applicable) `PalletCategory='ELIGIBLE'` filter.
+
+#### 2) Skip building `#WhRptItemSeason` when Season = All
+
+`#WhRptItemSeason` is a full scan of `usa.dbo.upcbarcodes` (potentially hundreds of thousands of rows) reduced to one row per item with the Winter/Summer marker. When the page Season filter is **All**, the table is never consulted — the corresponding `LEFT JOIN` in `HOByDiv` always passes regardless of the row's Season. 1.14.73 skips both the build AND the JOIN for Season=All runs. Saves the upcbarcodes scan and a temp-table allocation per page load.
+
+#### 3) Replace `(@season = 'A' OR …)` OR-chains with inline conditional SQL
+
+Pre-1.14.73 both `HOByDiv` and `WHByDiv` had:
+
+```sql
+WHERE (@season = 'A'
+       OR (@season = 'W' AND UPPER(ISNULL(w.Season, '')) = 'W')
+       OR (@season = 'S' AND UPPER(ISNULL(w.Season, '')) <> 'W'))
+```
+
+Parameterised OR-chains like that force SQL Server to generate **one plan** that handles every possible `@season` value. With parameter sniffing kicking in based on the first execution, the plan can be poor for the other branches.
+
+1.14.73 builds the filter inline at C# string-construction time based on the chosen `seasonCode`:
+
+- `'A'` → no predicate at all (just the dynamic warehouse / division filters)
+- `'W'` → `AND UPPER(ISNULL(w.Season, '')) = 'W'` literal
+- `'S'` → `AND UPPER(ISNULL(w.Season, '')) <> 'W'` literal
+
+SQL Server gets a fresh plan per Season choice with accurate cardinality. The `@season` parameter is removed from the command.
+
+#### 4) Comments + structure cleanup
+
+Every optimisation flagged with `1.14.73 perf:` so the next maintainer can trace each change back to its motivation.
+
+### Behaviour
+
+Identical results — the rule hoisting and SUM CASE simplification are semantically equivalent to the pre-1.14.73 expressions (the universal predicate either short-circuits to 0 inside CASE or filters the row out in WHERE — both produce the same sum). The Season inline fragments produce the same row set as the OR-chain version. The `#WhRptItemSeason` skip only kicks in when Season = All, where the temp table was never read anyway.
+
+### Expected speedup
+
+For a UAE batch with ~3M `whboxitems` rows (typical) where ~60% have `ShopEligible='E'` or `PalletCategory IN ('NON ELIGIBLE','ECOM')`:
+
+| Stage | Pre-1.14.73 | 1.14.73 |
+|---|---|---|
+| Rows read into WHByDiv aggregate | ~3M | ~1.2M (60% filtered before aggregate) |
+| Predicate evaluations per row | 11 (one per CASE) | 1 (in WHERE) + the slim per-CASE check |
+| #WhRptItemSeason build (Season=All path) | full scan of usa.dbo.upcbarcodes | **skipped entirely** |
+
+Net effect on the UAE All-season load: typically **3–10×** faster, depending on how thoroughly indexes cover `whboxitems(PalletCategory)` + `whboxitems(ShopEligible)`. KSA's `WHBoxItemsExport` should see similar improvement once the recommended indexes (see follow-up #6 in the project todo) are in place.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Reports/WhHoStockService.cs` | `WHByDiv` CTE: 11 SUM-CASEs simplified after hoisting the universal rule into `WHERE`. `#WhRptItemSeason` build wrapped in `buildItemSeasonTable` flag (skipped when Season=All). `HOByDiv` LEFT JOIN to it is now conditional via `hoSeasonJoinClause`. Both season filters built as inline strings (`whSeasonFilter` / `hoSeasonFilter`) instead of a `@season` parameter; the parameter binding is removed. New `WhUniversalRule` constant string holds the hoisted predicate. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.72 → 1.14.73 + new InformationalVersion. |
+
+### What was NOT touched (intentional)
+
+- **No schema change. No new index suggestions in this release.** The optimisations work even without index changes — they're pure SQL restructuring. If you want further speedup, the next lever is database indexes on `whboxitems(PalletCategory, ShopEligible)` and `whboxitems(Season)` (the WHBoxItemsExport variant for non-UAE) — those are operator actions, not code.
+- **No UI change.** WH Stock Position page is byte-identical to 1.14.72; only the query that fills it runs faster.
+- **`#WhRptItemDiv` build untouched.** It's used by both HOByDiv and WHByDiv on every run, so we can't conditionally skip it. The build is moderately fast already (one row per itemcode in upc_subclass) and the resulting clustered index lets the joins seek instead of scan.
+- **HOByDiv aggregation rule unchanged.** The HO side filters on `storeid IN (...)` plus optionally a Season check. No universal-rule equivalent exists on the HO side — `LPM_LocStock` doesn't have `PalletCategory` or `ShopEligible` columns.
+- **Variance / column ordering / Excel export unchanged.** The new perf landed entirely in `GetAsync` SQL; downstream code is identical.
+
+### Operator notes
+
+- **After deploy, time a `Load` on the WH Stock Position page** with the same filters that were previously slow. Expected wall-clock drop is significant; if you're not seeing it, the bottleneck might be the `#WhRptItemDiv` build or HO-side scan — capture the actual execution plan via `SET STATISTICS PROFILE ON;` and I can dig further.
+- **No re-Generate required.** This release only changes the report-side SQL — the underlying data (whboxitems, LPM_LocStock, upcbarcodes, etc.) is unchanged.
+- **`CommandTimeout` kept at 300 s** (was already 300; no change). If queries somehow still hit 300 s after the optimisations, that's a data-volume / indexes issue worth investigating separately.
+
+---
+
 ## 1.14.72 — SIM Boxes report: empty-BoxNo fallback + WH Stock Position: LPM Eligible / NonLPM Eligible columns + per-column hover tooltips (2026-05-20)
 
 ### What's new

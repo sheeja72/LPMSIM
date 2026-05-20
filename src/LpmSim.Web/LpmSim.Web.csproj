@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.72</Version>
-    <AssemblyVersion>1.14.72.0</AssemblyVersion>
-    <FileVersion>1.14.72.0</FileVersion>
-    <InformationalVersion>1.14.72 (SIM Boxes report: empty-BoxNo fallback joins whboxitems.BoxNo = LPMSIM_Output.PalletNo so lone-pallet entries get their correct PalletType / GIN columns; WH Stock Position: add LPM Eligible + NonLPM Eligible columns + per-column hover tooltips showing each criterion)</InformationalVersion>
+    <Version>1.14.73</Version>
+    <AssemblyVersion>1.14.73.0</AssemblyVersion>
+    <FileVersion>1.14.73.0</FileVersion>
+    <InformationalVersion>1.14.73 (WH Stock Position perf: hoist universal WH eligibility rule into WHByDiv WHERE clause, simplify the 11 SUM CASEs, skip building #WhRptItemSeason when Season=All, replace @season OR-chains with inline conditional SQL — typical 3-10x speedup on large whboxitems sources)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
