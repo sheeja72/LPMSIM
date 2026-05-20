@@ -12,6 +12,7 @@
 @using System.IO
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject LpmSimReportService Reports
+@inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
 @inject IJSRuntime JS
 
@@ -450,7 +451,10 @@ else
         if (string.IsNullOrEmpty(_country)) { _batches = new(); _batchNo = 0; StateHasChanged(); return; }
         try
         {
-            _batches = await Reports.ListBatchesAsync(_country, _runDate);
+            // 1.14.67 — Pass the current user so "Running" batches that
+            // another user started but hasn't finished are hidden from this
+            // viewer (and won't pre-select as the latest batch).
+            _batches = await Reports.ListBatchesAsync(_country, _runDate, CurrentUser.Name);
             _batchNo = _batches.FirstOrDefault()?.LPMBatchNo ?? 0;
         }
         catch (Exception ex)

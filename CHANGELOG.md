@@ -23,6 +23,106 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.67 — SIM Generate: hide in-flight "Running" batches + transactional persist phase (2026-05-20)
+
+### What's new
+
+Three related Generate-resilience improvements bundled into one release.
+
+#### 1) Hide in-flight "Running" batches from other users
+
+While **User A** is generating a SIM batch, **User B** opening **LPM SIM → Generate** (or **LPM SIM → Reports**) no longer sees User A's mid-flight batch as the **CURRENT BATCH** indicator / latest-batch pill. User A still sees their own in-flight batch (so the Result preview area on their screen behaves exactly as before).
+
+The fix uses a new transient lifecycle state:
+
+```
+GenerateAsync inserts → "Running"
+                            │
+                            ▼
+   (allocation + writes happen — minutes)
+                            │
+                            ▼
+GenerateAsync completes  → "Draft"  ◀── from here on, behaves exactly like 1.14.66 Draft
+                            │
+                            ▼
+                  Approve → "Approved"
+```
+
+A `Running` batch is hidden from any other user's:
+
+- **CURRENT BATCH** pill on SIM Generate (`CheckAsync` latest-batch lookup)
+- per-period batch list under the Result preview (`GetBatchesForPeriodAsync`)
+- batch dropdown on SIM Reports (`ListBatchesAsync`)
+
+The creator still sees it (for visual continuity — their own page can show "Generating…" without dropping the pill). A **30-minute TTL safety net** also hides the creator's own `Running` batch once it goes stale, so a crashed mid-flight build doesn't clutter the UI forever (the row stays in the DB, just hidden — an Admin can still find it via direct batch-number lookup if needed).
+
+### Why this matters
+
+Before 1.14.67, `LpmSimBatches` got inserted at the very start of `GenerateAsync` with `Status = "Draft"` — so the moment User A clicked **Generate**, a Draft row existed with `LinesGenerated = 0`, `TotalQty = 0`, and incomplete metadata. Any other user refreshing **SIM Generate** for the same Country / RunDate saw that empty row light up as their **CURRENT BATCH**, with zeros in every counter. Worse, if they clicked into Reports, they'd see an empty batch and assume the run had failed.
+
+This was visible during the 1.14.62 KSA run on the 20th — Ajmal was mid-generation and another user saw batch 62 listed with no data.
+
+#### 2) Drop `SqlBulkCopyOptions.TableLock` from the Output + AllocTrace bulk inserts
+
+The two heaviest bulk inserts inside `LpmSimGenerator.GenerateAsync` — into `dbo.LPMSIM_Output` and `dbo.LPMSIM_AllocTrace` — used to acquire a Bulk Update (BU) table-level lock via `SqlBulkCopyOptions.TableLock`. Under concurrent reads on either table (most commonly **someone else viewing SIM Reports while a Generate is running**) the bulk copy would queue behind the readers and, on a large UAE batch (132 K box qty / ~80 K output rows / a few hundred K trace rows), exhaust the 600 s `BulkCopyTimeout` — surfacing to the user as **"Execution Timeout Expired"** with a half-built Draft batch left in the database.
+
+Removing `TableLock` switches the bulk copy to row-level X locks. The insert is marginally slower in isolation (more lock-manager overhead) but no longer fights concurrent readers on the same table — Reports queries and the in-flight Generate can interleave freely. Each Generate run only writes its own `LPMBatchNo` rows, so the row-level locks never collide across concurrent Generators either.
+
+Observed in production for UAE 2026-05-20 batch #62 (Ajmal) — Generate started, the initial batch row INSERT succeeded, then the Output/Trace bulk copies timed out. The half-built batch was hidden from other users by part **(1)** above; this part **(2)** stops the timeout from happening in the first place.
+
+#### 3) Wrap the entire persist phase in a SQL transaction so a failed Generate leaves zero phantom rows
+
+Before 1.14.67, every `SqlBulkCopy` ran with its own per-batch auto-commits. So when batch #62 timed out mid-persist, `LPMSIM_Output` had already gained **164 K committed rows** for that batch even though Generate never finished. A planner querying the table directly couldn't tell whether the run had completed cleanly or stopped halfway — both look the same in the data.
+
+The fix opens one `IDbContextTransaction` at the start of the persist phase and threads its underlying `SqlTransaction` through every persist write:
+
+| Operation | Now enlisted in `persistTx` |
+|---|---|
+| `UPDATE LPMSIM_Batch` (lines/qty totals) | ✅ via EF auto-enrolment |
+| `SqlBulkCopy → LPMSIM_Output` | ✅ via new `SqlTransaction? tx` param |
+| `SqlBulkCopy → LPMSIM_AllocTrace` | ✅ |
+| `SqlBulkCopy → LPMSIM_StoreItemBalance` | ✅ |
+| `SqlBulkCopy → LPMSIM_StoreDivBalance` | ✅ |
+| `SqlBulkCopy → LPMSIM_BoxBalance` | ✅ |
+| `BuildAndInsertUnallocatedDiagnosticAsync` (5 internal `SqlCommand` + `SqlBulkCopy`) | ✅ |
+| SOH refresh `UPDATE LPM_SimItemSkuMax` | ✅ |
+| `UPDATE LPMSIM_Batch SET Status = 'Draft'` (the 1.14.67 flip from part 1) | ✅ via EF |
+| Final `CommitAsync` | ← single atomic visibility point |
+
+If anything inside the persist phase throws — timeout, deadlock, network blip, even a transient SQL Server hiccup — the outer `catch` calls `RollbackAsync`. After rollback the per-batch row count is **zero** across every persist table. A planner who re-Generates afterwards starts from a clean slate, no manual cleanup needed.
+
+The initial `INSERT INTO LPMSIM_Batch` (with `Status="Running"`) at line 1035 stays **outside** the transaction — it was committed earlier so `batch.LPMBatchNo` is real and stable for downstream code. If `persistTx` rolls back, the batch row stays in `Running` status forever; it's hidden by part (1)'s per-user filter, and the 30-min TTL safety net hides it from the creator too once stale.
+
+Locks held during the transaction are **row-level X locks on rows tagged with the new `LPMBatchNo`** — exactly what part (2)'s TableLock removal set up. So the transaction doesn't block readers querying other batches (Reports page, ProductionSchedule, etc.), and concurrent Generators (different LPMBatchNo) never collide.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | `GenerateAsync` inserts the batch row with `Status = "Running"` instead of `"Draft"`, then explicitly flips to `"Draft"` after all writes commit (right before returning the result). `CheckAsync` gains a new optional `string? currentUser` parameter — when non-null, the latest-batch lookup applies a `VisibleToViewer` filter that hides `Running` batches not created by the viewer (and any `Running` batch older than 30 minutes — the stale safety net). Existing batch lookup now fetches a small `Take(20)` candidate set and filters in-memory so the `Country, RunDate` index does the heavy lifting. **Also:** `BulkInsertOutputAsync` and `BulkInsertTraceAsync` no longer pass `SqlBulkCopyOptions.TableLock` to `SqlBulkCopy` — row-level locks instead, so concurrent Reports reads no longer collide with the bulk insert. **And:** the entire persist phase (UPDATE batch counts → 5 bulk inserts → diagnostic → SOH refresh → Status="Draft") is now wrapped in a `db.Database.BeginTransactionAsync` that commits atomically at the end; on any exception the outer `catch` calls `RollbackAsync` so zero rows from a failed Generate are visible afterwards. `BulkInsertOutputAsync` / `BulkInsertTraceAsync` / `BulkInsertStoreItemBalancesAsync` / `BulkInsertStoreDivBalancesAsync` / `BulkInsertBoxBalancesAsync` / `BuildAndInsertUnallocatedDiagnosticAsync` each gained an optional `SqlTransaction? tx = null` parameter; the SOH refresh `SqlCommand` sets `Transaction = sqlTx`. Added `using Microsoft.EntityFrameworkCore.Storage;` for the `GetDbTransaction()` extension. |
+| `src/LpmSim.Data/LpmSim/LpmSimReports.cs` | `ListBatchesAsync` and `GetBatchesForPeriodAsync` both gain the same `string? currentUser` optional parameter + identical filter (`Status != "Running" OR (CreatedBy == currentUser AND CreateTS >= now - 30 min)`). Left optional so existing callers that don't have a user context (background jobs, tests) keep their legacy behaviour. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | `Sim.CheckAsync(...)` and `Reports.GetBatchesForPeriodAsync(...)` call sites pass `CurrentUser.Name` so the filter actually engages. `ICurrentUser` was already injected. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimReports.razor` | New `@inject ICurrentUser CurrentUser` line. `Reports.ListBatchesAsync(...)` call site passes `CurrentUser.Name`. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.66 → 1.14.67. |
+
+### What was NOT touched (intentional)
+
+- **No schema change.** `Status` was already a free-form `varchar` on `LpmSimBatches`; "Running" is a new value but the column doesn't need to be widened. No migration in this release.
+- **No change to `ApproveAsync` / `DeleteAsync` permissions.** They still gate on Draft/Approved as before; "Running" can be neither approved nor deleted by anyone other than the creator (and even the creator's UI only exposes Approve once the row flips to Draft, which only happens after `GenerateAsync` returns).
+- **No change to batch number allocation.** The Running row still gets a real `LPMBatchNo` from SQL identity at insert time, so the creator's own UI sees the correct number throughout. The initial batch INSERT happens BEFORE the persist transaction opens — by design, so the identity assignment is committed regardless of any later rollback.
+- **Background allocation flow unchanged.** All the inner SKU Max / box / item loops are byte-identical to 1.14.66 — only the wrapper status transition, the bulk-insert lock hint, and the persist transaction are new.
+- **Diagnostic + SOH refresh keep their best-effort `try/catch`.** Inside the outer persist transaction, those two blocks still swallow their own exceptions (a missing migration 046 table / a slow SOH refresh shouldn't fail the whole Generate). Their writes still enrol in the outer tx so a successful diagnostic / refresh participates in the same atomic commit; a swallowed failure inside leaves the outer transaction alive and the rest of the persist phase commits normally.
+
+### Operator notes
+
+- Any pre-1.14.67 mid-flight batches stuck in some other state will not be affected — only batches created from 1.14.67 onwards use the `Running` lifecycle. Old `Draft` rows continue to behave exactly as before.
+- If a build crashes between the initial insert and the final `Status = "Draft"` flip, the row sits at `Running` indefinitely in the DB. UI filters hide it after 30 min. No cleanup job is required — but Admins can manually `DELETE FROM LpmSimBatches WHERE Status = 'Running' AND CreateTS < DATEADD(hour, -1, GETDATE())` if they want to keep the table tidy.
+- The 30-minute TTL is a safe upper-bound; real SIM Generate runs typically finish in 30 s – 5 min (UAE) to ~10 min (KSA after indexes). Pick a tighter cutoff later if needed by adjusting the `staleRunningCutoff` constant in all three methods.
+- If "Execution Timeout Expired" reappears for very large batches even after the TableLock removal, the next step is to either bump `BulkCopyTimeout` to 1800 (30 min) on the two inserts, or add `SET LOCK_TIMEOUT 0` before them so they fail fast instead of waiting the full 600 s.
+- **Verifying the rollback behaviour after deploy:** start a UAE Generate, kill the App Service mid-run (or pull the network cable from the SQL server), then `SELECT COUNT(*) FROM dbo.LPMSIM_Output WHERE LPMBatchNo = <new batch no>`. Expected: **0 rows.** Pre-1.14.67 the same test left 80K+ rows behind.
+- The persist transaction holds locks for the full duration of bulk inserts + diagnostic + refresh. For UAE that's typically 30 s – 3 min; for KSA after the recommended indexes go in, similar. The row-level X locks only block readers of the SAME batch's rows (which doesn't exist anywhere in the UI since 1.14.67 also hides the in-flight batch). So no observed contention with concurrent Reports queries on older batches.
+
+---
+
 ## 1.14.66 — User Access: two new roles for EOM/SIM Generate-Approve (2026-05-20)
 
 ### What's new

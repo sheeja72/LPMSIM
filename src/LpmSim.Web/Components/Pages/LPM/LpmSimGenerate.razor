@@ -3417,10 +3417,14 @@
             {
                 _checkPending = false;
                 var d = _runDate.Value.Date;
-                _readiness = await Sim.CheckAsync(_country, d.Year, d.Month, d, CurrentSources, CurrentSeasons, _selectedWarehouses.ToList(), _includePurchasedBoxes, _selectedPalletCategories.ToList(), _selectedLpmMonths.ToList(), _viewBatchNo);
+                // 1.14.67 — Pass CurrentUser.Name so any in-flight "Running"
+                // batch started by a different user is hidden from this viewer
+                // (no half-built CURRENT BATCH pill, no premature flip). The
+                // creator still sees their own Running batch.
+                _readiness = await Sim.CheckAsync(_country, d.Year, d.Month, d, CurrentSources, CurrentSeasons, _selectedWarehouses.ToList(), _includePurchasedBoxes, _selectedPalletCategories.ToList(), _selectedLpmMonths.ToList(), _viewBatchNo, CurrentUser.Name);
                 // Refresh the list of batches for this period so the result-preview
                 // pills show every Draft + Approved the planner can flip to.
-                try { _periodBatches = await Reports.GetBatchesForPeriodAsync(_country, d); }
+                try { _periodBatches = await Reports.GetBatchesForPeriodAsync(_country, d, CurrentUser.Name); }
                 catch { _periodBatches = new(); }
                 var bnNow = _readiness.CurrentBatchNo;
 

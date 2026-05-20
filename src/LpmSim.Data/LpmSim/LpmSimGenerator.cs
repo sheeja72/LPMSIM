@@ -3,6 +3,7 @@ using LpmSim.Core.Entities;
 using LpmSim.Data.Warehouse;
 using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;   // 1.14.67 — GetDbTransaction() extension on IDbContextTransaction
 
 namespace LpmSim.Data.LpmSim;
 
@@ -42,6 +43,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         IReadOnlyList<string>? palletCategories = null,
         IReadOnlyList<DateTime>? lpmMonths = null,
         long? viewBatchNo = null,
+        // 1.14.67 — Pass the current page user so this method can hide
+        // "Running" batches that another user started but hasn't finished.
+        // Null defaults to the legacy behaviour (no per-user filter — every
+        // batch visible) for backward compat with any tests/callers that
+        // don't have a user context handy.
+        string? currentUser = null,
         CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
@@ -268,13 +275,41 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // page user has clicked into a non-latest batch (viewBatchNo set),
         // load THAT batch instead so the readiness fields surface its
         // metadata (Sources/Seasons/etc.) rather than the latest's.
-        var existing = viewBatchNo.HasValue
-            ? await db.LpmSimBatches.AsNoTracking()
-                .FirstOrDefaultAsync(b => b.LPMBatchNo == viewBatchNo.Value, ct)
-            : await db.LpmSimBatches.AsNoTracking()
+        //
+        // 1.14.67 — Skip "Running" batches that another user is currently
+        // generating, unless the viewer is that same user (so the creator
+        // can still see their own in-flight run). The 30-minute safety net
+        // hides stale Running batches even from the creator — a crashed
+        // mid-flight build shouldn't clutter the UI forever.
+        var staleRunningCutoff = DateTime.Now.AddMinutes(-30);
+        bool VisibleToViewer(LpmSimBatch b) =>
+            b.Status != "Running"
+            || (string.Equals(b.CreatedBy, currentUser, StringComparison.OrdinalIgnoreCase)
+                && b.CreateTS >= staleRunningCutoff);
+
+        LpmSimBatch? existing;
+        if (viewBatchNo.HasValue)
+        {
+            existing = await db.LpmSimBatches.AsNoTracking()
+                .FirstOrDefaultAsync(b => b.LPMBatchNo == viewBatchNo.Value, ct);
+            // Honour explicit batch picks — if the user typed a batch # in
+            // "View another batch", show it regardless of Status (the
+            // creator's own Running batch lookup should still resolve).
+        }
+        else
+        {
+            // Pick the latest visible batch — applies the Running filter
+            // server-side so we don't drag rows we'll discard. Done by
+            // pulling a small candidate set and filtering in-memory; the
+            // (Country, RunDate) index keeps the candidate set tiny (most
+            // periods have 1–5 batches).
+            var candidates = await db.LpmSimBatches.AsNoTracking()
                 .Where(b => b.Country == country && b.RunDate == runDate.Date)
                 .OrderByDescending(b => b.LPMBatchNo)
-                .FirstOrDefaultAsync(ct);
+                .Take(20)
+                .ToListAsync(ct);
+            existing = candidates.FirstOrDefault(VisibleToViewer);
+        }
 
         var srcLabel  = SourceLabel(sources);
         var seasLabel = SeasonLabel(seasons);
@@ -959,7 +994,18 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             RunYear  = req.RunYear,
             RunMonth = req.RunMonth,
             RunDate  = req.RunDate.Date,
-            Status   = "Draft",
+            // 1.14.67 — Insert as "Running" so other users querying the
+            // SIM Generate page don't see this batch as a CURRENT BATCH
+            // while allocation is still in flight (a previous bug: User B
+            // would see ajmal's mid-generation batch #62 listed as the
+            // current Draft before any output rows had been committed).
+            // After the entire allocation finishes successfully, the
+            // transition to "Draft" happens explicitly just before this
+            // method returns. CheckAsync / ListBatchesAsync /
+            // GetBatchesForPeriodAsync filter Running batches not created
+            // by the current user (and any Running batch older than 30 min
+            // — stale safety net for the rare crashed-mid-flight case).
+            Status   = "Running",
             CreateTS = DateTime.Now,
             CreatedBy = req.User,
             // Snapshot the filters that produced this batch — so the Result preview
@@ -1182,11 +1228,37 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // batch row UPDATE plus its single audit-log INSERT.
         db.Database.SetCommandTimeout(300);
 
-        // Update batch header first (count totals).
-        batch.BoxesProcessed = distinctBoxes.Count;
-        batch.LinesGenerated = output.Count;
-        batch.TotalQty       = totalQty;
-        await db.SaveChangesAsync(ct);
+        // 1.14.67 — Wrap the entire persist phase in a SQL transaction so
+        // every bulk insert (Output, Trace, StoreItemBalance, StoreDivBalance,
+        // BoxBalance, UnallocatedDiagnostic) and the final Status="Draft" flip
+        // commit atomically. If anything in this scope throws (timeout,
+        // deadlock, connection drop), the rollback erases ALL per-batch rows
+        // so dbo.LPMSIM_Output / dbo.LPMSIM_AllocTrace / dbo.LPMSIM_*Balance
+        // never sit with phantom rows from a failed Generate (the bug seen
+        // on UAE 2026-05-20 batch #62 — 164K Output rows present even
+        // though Generate timed out).
+        //
+        // The INITIAL batch row (inserted at line 1035 with Status="Running")
+        // is NOT inside this transaction — it was committed earlier so
+        // batch.LPMBatchNo is real and stable. The batch row stays in
+        // "Running" forever if Generate throws (hidden from other users by
+        // CheckAsync / ListBatchesAsync / GetBatchesForPeriodAsync filters
+        // and the 30-minute TTL safety net).
+        //
+        // Lock scope: with TableLock removed from the Output/Trace bulk
+        // inserts (see BulkInsertOutputAsync), the transaction only holds
+        // row-level X locks on rows tagged with the new LPMBatchNo. These
+        // don't block readers of other batches.
+        await using var persistTx = await db.Database.BeginTransactionAsync(ct);
+        var sqlTx = (SqlTransaction)persistTx.GetDbTransaction();
+
+        try
+        {
+            // Update batch header first (count totals).
+            batch.BoxesProcessed = distinctBoxes.Count;
+            batch.LinesGenerated = output.Count;
+            batch.TotalQty       = totalQty;
+            await db.SaveChangesAsync(ct);
 
         // 1.14.18 — Stamp UsabilityPct on every output row before bulk insert.
         // Per-box metric: SUM(allocated Qty across all stores for this box)
@@ -1210,24 +1282,26 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
 
         // Bulk-copy everything heavy. EF AddRange + SaveChanges on millions of
         // rows would take many minutes / hours, so we use SqlBulkCopy.
+        // 1.14.67 — All 5 bulk inserts now run inside `sqlTx`, so they
+        // commit/rollback together with the rest of the persist phase.
         if (output.Count > 0)
-            await BulkInsertOutputAsync((SqlConnection)conn, output, ct);
+            await BulkInsertOutputAsync((SqlConnection)conn, output, ct, sqlTx);
         msPersistOutput = swStep.ElapsedMilliseconds; swStep.Restart();
 
         if (trace.Count > 0)
-            await BulkInsertTraceAsync((SqlConnection)conn, trace, ct);
+            await BulkInsertTraceAsync((SqlConnection)conn, trace, ct, sqlTx);
         msPersistTrace = swStep.ElapsedMilliseconds; swStep.Restart();
 
         await BulkInsertStoreItemBalancesAsync((SqlConnection)conn, batch.LPMBatchNo, batch.CreateTS,
             sohMap, skuMaxByStoreItem, itemDiv,
-            p1NormalSI, p1RrSI, p2NormalSI, p2RrSI, ct);
+            p1NormalSI, p1RrSI, p2NormalSI, p2RrSI, ct, sqlTx);
 
         await BulkInsertStoreDivBalancesAsync((SqlConnection)conn, batch.LPMBatchNo, batch.CreateTS,
             sohByStoreDiv, eomByDiv,
-            p1NormalSD, p1RrSD, p2NormalSD, p2RrSD, ct);
+            p1NormalSD, p1RrSD, p2NormalSD, p2RrSD, ct, sqlTx);
 
         await BulkInsertBoxBalancesAsync((SqlConnection)conn, batch.LPMBatchNo, batch.CreateTS,
-            lpmBoxes, nonLpmBoxes, boxAllocByPhase, ct);
+            lpmBoxes, nonLpmBoxes, boxAllocByPhase, ct, sqlTx);
         msPersistBalances = swStep.ElapsedMilliseconds;
 
         // 1.14.26 — Per-eligible-box allocation gap diagnostic. One row in
@@ -1317,7 +1391,8 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 excludedByRuleBoxes,
                 output,
                 trace,
-                ct);
+                ct,
+                sqlTx);            // 1.14.67 — enrol diagnostic insert in outer persist tx
         }
         catch (SqlException ex) when (ex.Number == 208 /* invalid object — table missing */)
         {
@@ -1367,6 +1442,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // is country-agnostic since it's just rows for this batch.
             var refreshWhSrc = await WhBoxItemsSource.ResolveAsync((SqlConnection)conn, req.Country, ct);
             using var refresh = conn.CreateCommand();
+            refresh.Transaction = sqlTx;   // 1.14.67 — enrol refresh UPDATE in outer persist tx
             refresh.CommandText = $@"
                 WITH BatchItems AS (
                     -- Items the allocator successfully placed
@@ -1410,6 +1486,42 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         catch
         {
             // Best-effort — build is committed; refresh is just a UX nicety.
+        }
+
+        // 1.14.67 — All allocation writes are now staged inside `persistTx`.
+        // Flip the batch from "Running" → "Draft" and then COMMIT — the
+        // status change + every bulk insert above become visible to other
+        // sessions atomically at the CommitAsync call. If the method threw
+        // before reaching this point, the OUTER catch (below) rolls back
+        // every persist write AND the batch row stays in "Running" state
+        // (the initial INSERT at line 1035 happened OUTSIDE this tx). The
+        // readiness/list filters hide the orphan "Running" row from the
+        // creator's co-workers, and the 30-minute TTL safety-net hides it
+        // from everyone (including the creator) once stale, so it doesn't
+        // clutter the UI forever.
+        batch.Status = "Draft";
+        db.LpmSimBatches.Update(batch);
+        await db.SaveChangesAsync(ct);
+
+            // 1.14.67 — Commit. Output / Trace / Balance / Diagnostic /
+            // Status flip all become visible to other connections here in
+            // one atomic step.
+            await persistTx.CommitAsync(ct);
+        }
+        catch
+        {
+            // 1.14.67 — Any persist-phase failure (timeout, deadlock,
+            // network blip) rolls back every bulk-inserted row for this
+            // batch. After this, dbo.LPMSIM_Output / LPMSIM_AllocTrace /
+            // LPMSIM_StoreItemBalance / LPMSIM_StoreDivBalance /
+            // LPMSIM_BoxBalance / LPMSIM_UnallocatedDiagnostic contain
+            // ZERO rows for this batch — clean slate for a re-Generate.
+            // The initial batch row (Status="Running", inserted outside
+            // this tx) stays; it's hidden by the per-user filter and gets
+            // the 30-min TTL safety net.
+            try { await persistTx.RollbackAsync(ct); }
+            catch { /* tx already doomed or disposed by SQL Server */ }
+            throw;
         }
 
         return new LpmSimGenerateResult
@@ -4437,7 +4549,12 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     // Bulk-insert helpers
     // ============================================================
 
-    private static async Task BulkInsertOutputAsync(SqlConnection conn, List<LpmSimOutput> rows, CancellationToken ct)
+    // 1.14.67 — `tx` threads the outer persist-phase SqlTransaction through to
+    // the bulk copy. When non-null, every batch this SqlBulkCopy writes is
+    // enrolled in `tx` instead of auto-committing per-batch — so a ROLLBACK at
+    // the outer level erases all rows this method wrote. When null (legacy
+    // callers / tests), each batch still auto-commits.
+    private static async Task BulkInsertOutputAsync(SqlConnection conn, List<LpmSimOutput> rows, CancellationToken ct, SqlTransaction? tx = null)
     {
         using var dt = new System.Data.DataTable();
         dt.Columns.Add("LPMBatchNo",   typeof(long));
@@ -4488,8 +4605,21 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         }
         dt.EndLoadData();
 
-        // Phase F perf fix — TableLock + streaming + larger batch.
-        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, null)
+        // Phase F perf fix — streaming + larger batch.
+        // 1.14.67 — TableLock REMOVED. The BU (Bulk Update) table-level lock
+        // SqlBulkCopyOptions.TableLock acquires used to block (and be blocked
+        // by) any concurrent reader on dbo.LPMSIM_Output — the Reports page
+        // reads this table on every batch flip, so two users (one Generating,
+        // one viewing Reports) could collide and the 600 s BulkCopyTimeout
+        // would fire as "Execution Timeout Expired" (which is what we saw
+        // for UAE 2026-05-20). Without TableLock, SqlBulkCopy uses row-level
+        // X locks; the bulk insert is slightly slower in isolation but no
+        // longer fights concurrent reads. Each Generate run only writes its
+        // own LPMBatchNo rows, so there's no risk of two generators
+        // interfering with each other's data.
+        // 1.14.67 — `tx` parameter enrols this bulk copy in the outer
+        // persist-phase transaction so partial writes ROLLBACK on failure.
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, tx)
         {
             DestinationTableName = "dbo.LPMSIM_Output",
             BatchSize            = 50_000,
@@ -4528,6 +4658,12 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     ///     must be due to per-store cap saturation.
     ///   • <c>UNKNOWN</c> — defensive fallback. Shouldn't happen.
     /// </summary>
+    // 1.14.67 — `tx` enrols every internal SqlCommand + SqlBulkCopy in the
+    // outer persist transaction so the diagnostic's final UnallocatedDiagnostic
+    // INSERT also rolls back if the outer Generate fails. The diagnostic IS
+    // best-effort (caller wraps it in try/catch), but if it succeeds it must
+    // commit/rollback in lockstep with Output/Trace/Balances to keep the per-
+    // batch view consistent.
     private static async Task BuildAndInsertUnallocatedDiagnosticAsync(
         SqlConnection conn,
         long batchNo,
@@ -4540,7 +4676,8 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         HashSet<string> excludedByRuleBoxes,
         List<LpmSimOutput> output,
         List<LpmSimAllocTrace> trace,
-        CancellationToken ct)
+        CancellationToken ct,
+        SqlTransaction? tx = null)
     {
         if (eligibleBoxes.Count == 0) return;
 
@@ -4593,13 +4730,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             // in the diagnostic anyway.
             using (var ddl = conn.CreateCommand())
             {
+                ddl.Transaction = tx;       // 1.14.67 — enlist in outer persist transaction
                 ddl.CommandText = @"
                     IF OBJECT_ID('tempdb..#DiagBoxes') IS NOT NULL DROP TABLE #DiagBoxes;
                     CREATE TABLE #DiagBoxes (BoxNo varchar(100) NOT NULL PRIMARY KEY);";
                 await ddl.ExecuteNonQueryAsync(ct);
             }
 
-            using (var diagBulk = new SqlBulkCopy(conn) { DestinationTableName = "#DiagBoxes" })
+            using (var diagBulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, tx) { DestinationTableName = "#DiagBoxes" })
             {
                 using var dtBoxes = new System.Data.DataTable();
                 dtBoxes.Columns.Add("BoxNo", typeof(string));
@@ -4611,6 +4749,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             var diagWhSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
             using (var q = conn.CreateCommand())
             {
+                q.Transaction = tx;         // 1.14.67 — enlist in outer persist transaction
                 q.CommandText = $@"
                     SELECT DISTINCT w.BoxNo
                       FROM {diagWhSrc} w
@@ -4636,6 +4775,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
             using (var cleanup = conn.CreateCommand())
             {
+                cleanup.Transaction = tx;   // 1.14.67 — enlist in outer persist transaction
                 cleanup.CommandText = "DROP TABLE IF EXISTS #DiagBoxes;";
                 await cleanup.ExecuteNonQueryAsync(ct);
             }
@@ -4755,7 +4895,11 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
         if (dt.Rows.Count == 0) return;    // every eligible box fully allocated — nothing to write
 
-        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, null)
+        // 1.14.67 — `tx` enrols the diagnostic insert in the outer persist
+        // transaction. TableLock is preserved here — UnallocatedDiagnostic is
+        // small (one row per box, typically <10K rows) and is NOT read by any
+        // concurrent UI path during Generate, so the BU lock is fine.
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, tx)
         {
             DestinationTableName = "dbo.LPMSIM_UnallocatedDiagnostic",
             BatchSize            = 50_000,
@@ -4783,7 +4927,8 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 StringComparer.Ordinal.GetHashCode(obj.Reason ?? ""));
     }
 
-    private static async Task BulkInsertTraceAsync(SqlConnection conn, List<LpmSimAllocTrace> rows, CancellationToken ct)
+    // 1.14.67 — `tx` enrols the bulk copy in the outer persist transaction.
+    private static async Task BulkInsertTraceAsync(SqlConnection conn, List<LpmSimAllocTrace> rows, CancellationToken ct, SqlTransaction? tx = null)
     {
         using var dt = new System.Data.DataTable();
         dt.Columns.Add("LPMBatchNo",       typeof(long));
@@ -4830,8 +4975,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         }
         dt.EndLoadData();
 
-        // Phase F perf fix — TableLock + streaming + larger batch.
-        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.TableLock, null)
+        // Phase F perf fix — streaming + larger batch.
+        // 1.14.67 — TableLock REMOVED (same reason as BulkInsertOutputAsync
+        // above — see the longer comment there). dbo.LPMSIM_AllocTrace is
+        // read by the Allocation Trace tab in SIM Reports and the
+        // BuildAndInsertUnallocatedDiagnosticAsync read-back; without
+        // TableLock those queries can read past the inserter without
+        // waiting for the bulk copy to finish.
+        // 1.14.67 — `tx` enrols this bulk copy in the outer persist-phase
+        // transaction so all trace rows for the batch ROLLBACK together if
+        // any persist step fails.
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, tx)
         {
             DestinationTableName = "dbo.LPMSIM_AllocTrace",
             BatchSize            = 50_000,
@@ -4843,6 +4997,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         await bulk.WriteToServerAsync(dt, ct);
     }
 
+    // 1.14.67 — `tx` enrols the bulk copy in the outer persist transaction.
     private static async Task BulkInsertStoreItemBalancesAsync(
         SqlConnection conn, long batchNo, DateTime createTs,
         Dictionary<(string, string), int> sohMap,
@@ -4852,7 +5007,8 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         Dictionary<(string Store, string Item), int> p1r,
         Dictionary<(string Store, string Item), int> p2n,
         Dictionary<(string Store, string Item), int> p2r,
-        CancellationToken ct)
+        CancellationToken ct,
+        SqlTransaction? tx = null)
     {
         // Collect every (Store,Item) that appears in any phase totals — case-insensitive
         // so duplicates that differ only in case are merged (matches SQL PK collation).
@@ -4900,7 +5056,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 createTs);
         }
 
-        using var bulk = new SqlBulkCopy(conn)
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, tx)
         {
             DestinationTableName = "dbo.LPMSIM_StoreItemBalance",
             BatchSize            = 5000,
@@ -4911,6 +5067,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         await bulk.WriteToServerAsync(dt, ct);
     }
 
+    // 1.14.67 — `tx` enrols the bulk copy in the outer persist transaction.
     private static async Task BulkInsertStoreDivBalancesAsync(
         SqlConnection conn, long batchNo, DateTime createTs,
         Dictionary<(string Store, int Div), int> sohByStoreDiv,
@@ -4919,7 +5076,8 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         Dictionary<(string Store, int Div), int> p1r,
         Dictionary<(string Store, int Div), int> p2n,
         Dictionary<(string Store, int Div), int> p2r,
-        CancellationToken ct)
+        CancellationToken ct,
+        SqlTransaction? tx = null)
     {
         // Case-insensitive on StoreID — matches SQL PK collation, dedupes case-only differences.
         var keys = new HashSet<(string, int)>(StoreDivComparer.Instance);
@@ -4966,7 +5124,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 createTs);
         }
 
-        using var bulk = new SqlBulkCopy(conn)
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, tx)
         {
             DestinationTableName = "dbo.LPMSIM_StoreDivBalance",
             BatchSize            = 5000,
@@ -4982,11 +5140,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     /// Matches the SIM Boxes report tab so a SELECT * already gives the same
     /// Box-level numbers (BoxQty, P1/P2 Normal/RR, Usability %, LeftOver).
     /// </summary>
+    // 1.14.67 — `tx` enrols the bulk copy in the outer persist transaction.
     private static async Task BulkInsertBoxBalancesAsync(
         SqlConnection conn, long batchNo, DateTime createTs,
         List<BoxItem> lpmBoxes, List<BoxItem> nonLpmBoxes,
         Dictionary<(string Box, string Phase), long> boxAllocByPhase,
-        CancellationToken ct)
+        CancellationToken ct,
+        SqlTransaction? tx = null)
     {
         // Index source rows once: BoxQty (sum of per-line Qty) + LPMDt (any).
         // Case-insensitive on BoxNo so it matches the dictionary key collation.
@@ -5040,7 +5200,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
                 m.BoxQty, p1n, p1r, p2n, p2r, total, left, use, createTs);
         }
 
-        using var bulk = new SqlBulkCopy(conn)
+        using var bulk = new SqlBulkCopy(conn, SqlBulkCopyOptions.Default, tx)
         {
             DestinationTableName = "dbo.LPMSIM_BoxBalance",
             BatchSize            = 5000,

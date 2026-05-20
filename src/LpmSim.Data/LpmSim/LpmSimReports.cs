@@ -361,11 +361,24 @@ SELECT TOP (@top)
         return rows;
     }
 
-    public async Task<List<BatchHeader>> ListBatchesAsync(string country, DateTime? runDate, CancellationToken ct = default)
+    public async Task<List<BatchHeader>> ListBatchesAsync(
+        string country, DateTime? runDate,
+        // 1.14.67 — optional viewer-user for the "Running" batch filter.
+        // Null → don't hide Running batches from anyone (legacy behaviour).
+        string? currentUser = null,
+        CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
         var q = db.LpmSimBatches.AsNoTracking().Where(b => b.Country == country);
         if (runDate.HasValue) q = q.Where(b => b.RunDate == runDate.Value.Date);
+        // 1.14.67 — Hide "Running" batches from anyone except their creator
+        // (and only if they're not stale — older than 30 minutes).
+        var staleCutoff = DateTime.Now.AddMinutes(-30);
+        if (!string.IsNullOrEmpty(currentUser))
+        {
+            q = q.Where(b => b.Status != "Running"
+                          || (b.CreatedBy == currentUser && b.CreateTS >= staleCutoff));
+        }
         return await q.OrderByDescending(b => b.LPMBatchNo)
             .Select(b => new BatchHeader
             {
@@ -1390,11 +1403,24 @@ SELECT s.LPMBatchNo,
     /// when no batches exist. Multiple Approved batches are now allowed
     /// (since the GenerateAsync logic was relaxed to keep Approved ones).
     /// </summary>
-    public async Task<List<BatchListEntry>> GetBatchesForPeriodAsync(string country, DateTime runDate, CancellationToken ct = default)
+    public async Task<List<BatchListEntry>> GetBatchesForPeriodAsync(
+        string country, DateTime runDate,
+        // 1.14.67 — Optional current-user filter so "Running" batches from
+        // other users don't show up in the SIM Generate page's per-period
+        // pill list while their generation is in flight.
+        string? currentUser = null,
+        CancellationToken ct = default)
     {
         await using var db = await dbFactory.CreateDbContextAsync(ct);
-        return await db.LpmSimBatches.AsNoTracking()
-            .Where(b => b.Country == country && b.RunDate == runDate.Date)
+        var q = db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.Country == country && b.RunDate == runDate.Date);
+        var staleCutoff = DateTime.Now.AddMinutes(-30);
+        if (!string.IsNullOrEmpty(currentUser))
+        {
+            q = q.Where(b => b.Status != "Running"
+                          || (b.CreatedBy == currentUser && b.CreateTS >= staleCutoff));
+        }
+        return await q
             .OrderByDescending(b => b.LPMBatchNo)
             .Select(b => new BatchListEntry(
                 b.LPMBatchNo, b.Status ?? "", b.CreateTS, b.CreatedBy ?? "",
