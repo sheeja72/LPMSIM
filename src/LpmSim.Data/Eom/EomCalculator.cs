@@ -185,11 +185,43 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         // still flips green after a division is retired (e.g. DivCode 420).
         var plannedDivs = planned.Select(p => p.DivCode).ToHashSet();
         var plannedOk   = activeDivCodes.IsSubsetOf(plannedDivs);
-        var whOk        = activeDivCodes.IsSubsetOf(whStockDivs);
+        // 1.14.76 — WH Stock readiness loosened from "ALL active divisions
+        // must have stock" to "AT LEAST ONE active division must have
+        // stock". Some countries have a handful of active divisions that
+        // genuinely don't stock anything in a given period (e.g. Bahrain
+        // not stocking BFL Services this month). Blocking the entire EOM
+        // run for one missing division was too strict — the missing
+        // divisions just produce zero WH Stock in their EOM rows, which
+        // is what the planner expects anyway. The card text below still
+        // shows the count + names of any missing divisions so the planner
+        // can spot data-quality issues vs intentionally-empty divisions.
+        var whOk        = whStockDivs.Any(d => activeDivCodes.Contains(d));
         // Counts for the user-visible "X of Y divisions" message — both are
         // active-only so the text reads consistently.
         var plannedActiveCount = plannedDivs.Count(d => activeDivCodes.Contains(d));
         var whActiveCount      = whStockDivs.Count(d => activeDivCodes.Contains(d));
+        // 1.14.76 — Active divisions that have NO WH stock for this period.
+        // Surfaced in the WH Stock card so the planner sees which divisions
+        // will end up with zero stock (most often expected; occasionally a
+        // data-quality clue when a division SHOULD have stock and doesn't).
+        var whMissingDivCodes  = activeDivCodes.Where(d => !whStockDivs.Contains(d))
+                                               .OrderBy(d => d)
+                                               .ToList();
+        string whMissingNames  = "";
+        if (whMissingDivCodes.Count > 0)
+        {
+            // Cheap one-shot lookup; only loads when there's something to
+            // name. Cap the displayed list at 10 to keep the card readable.
+            await using var dbNames = await dbFactory.CreateDbContextAsync(ct);
+            var nameDict = await dbNames.Divisions.AsNoTracking()
+                .Where(d => whMissingDivCodes.Contains(d.DivCode))
+                .ToDictionaryAsync(d => d.DivCode, d => d.Name ?? d.DivCode.ToString(), ct);
+            var names = whMissingDivCodes.Select(c => nameDict.TryGetValue(c, out var n) ? n : c.ToString())
+                                         .ToList();
+            whMissingNames = names.Count <= 10
+                ? string.Join(", ", names)
+                : string.Join(", ", names.Take(10)) + $" (+{names.Count - 10} more)";
+        }
         var gradeSum  = activeGrades.Sum(g => g.SharePct);
         var gradesOk  = activeGrades.Count > 0 && Math.Abs(gradeSum - 1m) < 0.0001m;
         // 1.14.39 — Volume Groups are now per-(Country, DivCode, GroupCode).
@@ -249,9 +281,16 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
                 // the planner sees WHY this card is blocked (e.g. "No DataName
                 // configured … for SIMCountry 'KSA'") instead of a misleading
                 // "0 of N divisions" zero count.
-                whStockErrorLocal is null
-                    ? $"{whActiveCount} of {divCount} divisions have stock for this period."
-                    : $"WH Stock lookup failed: {whStockErrorLocal}"),
+                // 1.14.76 — When some (but not all) divisions are missing
+                // stock, append the missing-division names so the planner
+                // sees what to expect (most often this is "Ready" with an
+                // informational note like "BFL Services has no stock this
+                // period — that's normal for Bahrain").
+                whStockErrorLocal is not null
+                    ? $"WH Stock lookup failed: {whStockErrorLocal}"
+                    : whMissingDivCodes.Count == 0
+                        ? $"{whActiveCount} of {divCount} divisions have stock for this period."
+                        : $"{whActiveCount} of {divCount} divisions have stock. Missing: {whMissingNames}."),
             Grades = new(gradesOk,
                 "Store Grades",
                 activeGrades.Count == 0

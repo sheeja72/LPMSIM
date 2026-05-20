@@ -23,6 +23,56 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.76 — EOM Generate: WH Stock readiness allows partial coverage; missing-division names surfaced (2026-05-20)
+
+### What's new
+
+The **WH Stock** readiness card on EOM Generate no longer blocks the whole run when one or two active divisions have no warehouse stock for the period — a common, often-intentional state for smaller countries (e.g. Bahrain doesn't stock BFL Services this month).
+
+| | Pre-1.14.76 | 1.14.76 |
+|---|---|---|
+| All active divisions have stock | ✅ Ready | ✅ Ready |
+| Some have stock, some don't | 🚫 **Blocked** | ✅ **Ready** + lists missing divisions |
+| Zero divisions have stock | 🚫 Blocked | 🚫 Blocked (still — nothing to ship) |
+
+### Card text examples
+
+- All 20 of 20 → *"20 of 20 divisions have stock for this period."*
+- Bahrain 19 of 20 → *"19 of 20 divisions have stock. Missing: BFL Services."* (Ready)
+- Bahrain 17 of 20 → *"17 of 20 divisions have stock. Missing: BFL Services, LFL, Tech."* (Ready)
+- 0 of 20 → *"0 of 20 divisions have stock for this period."* (Blocked — no point running)
+- Lookup failed (no DataName, etc.) → *"WH Stock lookup failed: …"* (Blocked — unchanged from 1.14.63)
+
+### Why this is safe
+
+The downstream EOM math (Stage 4 of `EomCalculator.CalculateAsync`) is **share-based** — `Pre-Store CAP EOM = (Ini.EOM / Σ Ini.EOM) × PlannedEOM` — it doesn't read WH stock. Divisions with zero WH stock just produce zero **WH Stock** values in their `LPM_EOM_Output` rows; the per-store / per-division Ini.EOM and Tgt EOM math is unaffected. Downstream SIM Generate naturally has nothing to allocate for those divisions (no eligible boxes match), which is correct behaviour — items in those divisions just don't ship.
+
+So the change is purely a **readiness-check loosening**, not a calculation change.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | `whOk` flipped from `activeDivCodes.IsSubsetOf(whStockDivs)` ("all") to `whStockDivs.Any(d => activeDivCodes.Contains(d))` ("any"). Card-text builder gains a `whMissingNames` lookup that loads names for the missing DivCodes (only when there are any; capped at 10 displayed, with a "+N more" suffix). Card text appends `". Missing: <names>."` when the missing list is non-empty. Other readiness checks (Monthly Weights, Planned, Sales/Turns, Grades, Groups, Rules) intentionally left at their previous semantics. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.75 → 1.14.76. |
+
+### What was NOT touched (intentional)
+
+- **No schema change. No migration.**
+- **EOM math unchanged.** Stage 4a–4c run identically; the share-based formula is the same. Divisions with zero WH stock contribute zero to "WH Stock" column on the EOM output and that's correct.
+- **Sales/Turns / Planned / Grades / Volume Groups / SKU Max Rules** readiness checks unchanged. They have their own coverage requirements (e.g. Planned must cover every active division). If you want the same "any" loosening on Planned too, that's a follow-up — but Planned really does need every division (planned EOM totals are part of the math), so I'd argue against loosening it.
+- **WH Stock lookup-failure path** (e.g. missing DataName, like OMAN currently) still surfaces the underlying error and blocks — that's a configuration problem, not a stock-availability problem.
+
+### Operator notes
+
+- After deploy, **Re-check** Bahrain (or any country with partial coverage). The WH Stock card should flip to **Ready** + list the missing divisions by name. **Generate** will be enabled.
+- If a division *should* have stock but doesn't (e.g. genuine ETL failure), the missing-division names in the card are your first clue. Cross-check via:
+  ```sql
+  SELECT DivCode, Division FROM LPMSIM.dbo.Division WHERE IsActive = 1 AND DivCode IN (...the missing codes...);
+  ```
+- The "+N more" suffix kicks in if more than 10 divisions are missing — usually a sign that something larger is wrong (e.g. WHBoxItemsExport is empty for the country). Investigate via the `LoadWhStockDivCodes` SQL pasted in the previous chat.
+
+---
+
 ## 1.14.75 — Nightly Build SKU Max auto-scheduler (2026-05-20)
 
 ### What's new
