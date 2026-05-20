@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.70</Version>
-    <AssemblyVersion>1.14.70.0</AssemblyVersion>
-    <FileVersion>1.14.70.0</FileVersion>
-    <InformationalVersion>1.14.70 (SIM Generate: closed-box exclusion — UAE via USA..upcboxhead.Closed='Y', non-UAE via Exclude_Transfers_Sim + CloseR1Pallet, emitted as CLOSED_BOX in Gap list; SIM Boxes report: fix PLT571291B PalletType bug + add Purchase Dt / GIN No / GIN Date / From-To columns; SIM Reports downloads: LPM / NonLPM tag in filename; all batch timestamps now shown in GCC time — Arabian Standard Time, UTC+4)</InformationalVersion>
+    <Version>1.14.71</Version>
+    <AssemblyVersion>1.14.71.0</AssemblyVersion>
+    <FileVersion>1.14.71.0</FileVersion>
+    <InformationalVersion>1.14.71 (EOM Calculator: filter DataSettings on SIMCountry instead of Country — aligns the EOM grid's store list with the SIM Generate pipeline so a store can't appear in EOM but be invisible to SIM or vice versa)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

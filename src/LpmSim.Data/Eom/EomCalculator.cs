@@ -27,8 +27,15 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         async Task<List<string?>> LoadStoreIds()
         {
             await using var db = await dbFactory.CreateDbContextAsync(ct);
+            // 1.14.71 — Filter on SIMCountry (was Country). SIMCountry is the
+            // canonical "this store is governed by which country's SIM rules"
+            // column; Country is the geographic country and can differ for
+            // a few stores (e.g. a Bahrain-located store managed under KSA's
+            // SIM). WhBoxItemsSource + most of LpmSimGenerator already use
+            // SIMCountry — this change makes EOM Calculator's store filter
+            // agree with the rest of the SIM pipeline.
             return await db.DataSettings.AsNoTracking()
-                .Where(s => s.ActiveStore == "Y" && s.Country == country)
+                .Where(s => s.ActiveStore == "Y" && s.SIMCountry == country)
                 .Select(s => s.StoreID).Distinct().ToListAsync(ct);
         }
         // 1.14.55 — Returns the SET of active DivCodes (not just a count) so the
@@ -286,8 +293,11 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
         async Task<Dictionary<string, string>> LoadStoreNames()
         {
             await using var db = await dbFactory.CreateDbContextAsync(ct);
+            // 1.14.71 — SIMCountry (was Country). Same reasoning as
+            // LoadStoreIds() above — keeps the store-name lookup in step
+            // with the store-list filter used by CalculateAsync.
             var stores = await db.DataSettings.AsNoTracking()
-                .Where(s => s.Country == country && s.StoreID != null)
+                .Where(s => s.SIMCountry == country && s.StoreID != null)
                 .Select(s => new { s.StoreID, s.PBFullname })
                 .Distinct()
                 .ToListAsync(ct);
@@ -585,8 +595,13 @@ public class EomCalculator(IDbContextFactory<LpmDbContext> dbFactory)
             .Where(w => w.Country == country && w.RunYear == year && w.RunMonth == month)
             .OrderBy(w => w.PeriodSeq).ToListAsync(ct);
 
+        // 1.14.71 — SIMCountry (was Country). The authoritative SIM-country
+        // column on DataSettings — same one WhBoxItemsSource + the rest of
+        // LpmSimGenerator use. Switching from Country aligns the EOM grid's
+        // store list with the box / SOH / SkuMax sources downstream so a
+        // store can't appear in EOM but be invisible to SIM (or vice versa).
         var stores = await db.DataSettings.AsNoTracking()
-            .Where(s => s.ActiveStore == "Y" && s.Country == country)
+            .Where(s => s.ActiveStore == "Y" && s.SIMCountry == country)
             .Select(s => new { s.StoreID, s.PBFullname })
             .Distinct()
             .ToListAsync(ct);
@@ -757,8 +772,12 @@ SELECT id.DivCode,
         // persisted on EOM Output so reports / Merch Need don't have to
         // re-aggregate.
         //
-        // Store country scope mirrors the existing EOM convention
-        // (DataSettings.Country == @country).
+        // 1.14.71 — Store country scope now joins on DataSettings.SIMCountry
+        // (was DataSettings.Country). Matches the store-list filter in
+        // CalculateAsync above and the rest of the SIM pipeline. Without
+        // this, the SOH read could pull in stores that don't appear in the
+        // EOM grid (and vice versa), leading to "phantom" Div SOH that
+        // can't be reconciled with the per-store rows above.
         var sohByStoreDiv = new Dictionary<(string Store, int Div), int>();
         {
             var conn = db.Database.GetDbConnection();
@@ -769,7 +788,7 @@ SELECT id.DivCode,
                 SELECT ls.StoreID, ls.DivCode, SUM(CAST(ISNULL(ls.SOH,0) AS bigint)) AS SOH
                   FROM racks.dbo.LPM_LocStock ls
                   INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-                 WHERE ds.Country = @country
+                 WHERE ds.SIMCountry = @country
                    AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
                    AND ls.DivCode IS NOT NULL
                  GROUP BY ls.StoreID, ls.DivCode;";

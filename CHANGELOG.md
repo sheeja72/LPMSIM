@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.71 — EOM Calculator: filter DataSettings on SIMCountry instead of Country (2026-05-20)
+
+### What's new
+
+The four places inside `LpmSim.Data.Eom.EomCalculator` that filter `bfldata.dbo.DataSettings` by country now use the **`SIMCountry`** column instead of `Country`. The other SIM pipeline components (`WhBoxItemsSource.ResolveDataNameAsync`, every SIM Generate / SIM Reports query that joins to DataSettings) already use `SIMCountry`; the EOM Calculator was the lone hold-out on `Country`, which could produce a subtle disagreement for any store whose geographic `Country` differs from its `SIMCountry` (e.g. a Bahrain-located store managed under KSA's SIM rules).
+
+### Why this matters
+
+`DataSettings` carries **two** country-related columns:
+
+| Column | Meaning |
+|---|---|
+| `Country` | Geographic country the store is in. |
+| `SIMCountry` | The country whose SIM rules govern this store. Authoritative for SIM / EOM scope decisions. |
+
+For 99% of stores they match, but a few cross-border-managed stores have them differ. Pre-1.14.71 such a store could appear in the EOM grid (because `EomCalculator` filtered on `Country`) but be invisible to the SIM allocator (which already filters on `SIMCountry`) — or the other way around. The grid would show "EOM = X" for the store but the box-allocator would never look at it, producing an unreconcilable mismatch that planners chased as "missing SIM allocation".
+
+After 1.14.71, every step of the EOM → SIM pipeline filters on the same `SIMCountry` column, so the store-set is identical end-to-end.
+
+### Sites changed
+| Method (EomCalculator.cs) | Filter |
+|---|---|
+| `LoadStoreIds()` (CheckAsync helper) | `s.Country == country` → `s.SIMCountry == country` |
+| `LoadStoreNames()` (CalculateAsync helper) | same |
+| Main store-list query in `CalculateAsync` (line 588) | same |
+| SOH-by-(Store,Div) SQL JOIN to DataSettings | `ds.Country = @country` → `ds.SIMCountry = @country` |
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | 4 DataSettings filters flipped from `Country` to `SIMCountry`. Inline comment at the SOH SQL updated to name the new join column. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | "How this page calculates EOM" → Store row description updated to say `SIMCountry` (was "selected Country"). |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.70 → 1.14.71. |
+
+### What was NOT touched (intentional)
+
+- **UI country dropdowns left on `Country`.** The "Select country" dropdowns on EOM Generate / SIM Generate / SIM Reports / Stores Capacity / etc. iterate `DISTINCT DataSettings.Country` to populate their choices. Changing those to `SIMCountry` is a different operation (which list of countries appears) and would alter the experience app-wide. Flagged as a possible follow-up if you want full Country→SIMCountry consolidation. For now, the dropdown shows `Country` values, but EOM filters on `SIMCountry` — which works as long as your DB has the same value in both columns for most stores (the cross-border-managed handful are the corner case the new filter handles correctly).
+- **`LpmWeeklySalesTargetSplits` filter unchanged.** That entity has its OWN `Country` column (not DataSettings) — orthogonal to this change.
+- **No schema change. No migration.** Both columns already exist on `DataSettings`.
+- **Pre-1.14.71 EOM batches unchanged.** Only EOM runs Generated from 1.14.71 onwards apply the new filter. Existing Approved batches keep their existing rows.
+
+### Operator notes
+
+- **Re-Generate the EOM batch** for any country where a store's `Country` and `SIMCountry` differ — that's where the new filter changes the row set. Stores where the two match are unaffected.
+- Quick check for cross-border-managed stores: `SELECT StoreID, PBFullname, Country, SIMCountry FROM bfldata.dbo.DataSettings WHERE Country <> SIMCountry AND ActiveStore = 'Y';`. If this returns zero rows, 1.14.71 is a no-op for your data set (correctness improvement still applies for future cross-border configurations).
+
+---
+
 ## 1.14.70 — SIM Generate closed-box exclusion + SIM Boxes report PalletType bug + 4 new pallet-purchase columns + GCC time + LPM/NonLPM filename tags (2026-05-20)
 
 ### What's new
