@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.67</Version>
-    <AssemblyVersion>1.14.67.0</AssemblyVersion>
-    <FileVersion>1.14.67.0</FileVersion>
-    <InformationalVersion>1.14.67 (SIM Generate: hide in-flight "Running" batches; drop TableLock from Output/Trace bulk inserts; wrap persist phase in a SQL transaction so a failed Generate leaves zero phantom rows in LPMSIM_Output / *Balance / Diagnostic)</InformationalVersion>
+    <Version>1.14.68</Version>
+    <AssemblyVersion>1.14.68.0</AssemblyVersion>
+    <FileVersion>1.14.68.0</FileVersion>
+    <InformationalVersion>1.14.68 (Sales/Turns upload: fix EF tracking error on duplicate keys; ask for confirmation before deleting + re-inserting existing rows; CreateTS now reflects upload time)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

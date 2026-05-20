@@ -3,6 +3,7 @@
 @inject IDbContextFactory<LpmDbContext> DbFactory
 @inject ICurrentUser CurrentUser
 @inject ISnackbar Snackbar
+@inject IDialogService DialogService
 @inject IJSRuntime JS
 
 <MudGrid Spacing="3">
@@ -39,7 +40,8 @@
                 <li><strong>StoreID</strong> must exist in DataSettings.</li>
                 <li><strong>Division</strong> can be the code (int) or name.</li>
                 <li><strong>Month</strong> must be 1&ndash;12.</li>
-                <li>Existing rows on the same <em>StoreID &times; Division &times; Year &times; Month</em> are replaced.</li>
+                <li>Existing rows on the same <em>StoreID &times; Division &times; Year &times; Month</em> are <strong>deleted and re-inserted</strong> (with confirmation). <code>CreateTS</code> updates to upload time.</li>
+                <li>Duplicate rows in the file (same <em>StoreID &times; Division &times; Year &times; Month</em>) are deduped &mdash; the <strong>last occurrence wins</strong>.</li>
             </ul>
         </div>
     </MudItem>
@@ -257,6 +259,28 @@
                     var (sold,    soldErr)      = CellDecimal(xlRow, 5, "SoldQty");
                     var (turns,   turnsErr)     = CellDecimal(xlRow, 6, "Turns");
 
+                    // 1.14.68 — Silently skip rows where EVERY one of the six
+                    // input cells is blank/null. ClosedXML's CellsUsed() check
+                    // above can return true for rows that have nothing but
+                    // residual formatting (a column-wide fill, a cleared cell
+                    // that still has style info, etc.) — pre-1.14.68 those
+                    // rows surfaced as error rows reading "StoreID is blank;
+                    // Division is blank; Year is blank; Month is blank" and
+                    // inflated the error count. A row that's truly empty
+                    // contributes neither to the valid count nor the error
+                    // count now. Partial rows (e.g. just a StoreID with the
+                    // other columns missing) still surface as errors so the
+                    // planner can fix them in their file.
+                    if (string.IsNullOrWhiteSpace(storeId)
+                        && string.IsNullOrWhiteSpace(divRaw)
+                        && year  is null
+                        && month is null
+                        && sold  is null
+                        && turns is null)
+                    {
+                        continue;
+                    }
+
                     row = new Row
                     {
                         RowNum = r,
@@ -324,35 +348,128 @@
         {
             await using var db = await DbFactory.CreateDbContextAsync();
             var valid = _rows.Where(r => r.Error is null).ToList();
-            var keys = valid.Select(r => new { r.StoreID, DivCode = r.DivCode!.Value, Year1 = r.Year1!.Value, Month1 = r.Month1!.Value }).ToList();
-            var existing = await db.LpmSalesTurns
-                .Where(x => keys.Select(k => k.StoreID).Contains(x.StoreID))
-                .ToDictionaryAsync(x => (x.StoreID, x.DivCode, x.Year1, x.Month1));
 
+            // 1.14.68 — Dedup the upload file BEFORE sending anything to EF.
+            // Without this, two rows in the file with the same composite key
+            // would both reach `db.LpmSalesTurns.Add(...)` and the second
+            // call would throw "another instance with the same key value for
+            // {'StoreID','DivCode','Year1','Month1'} is already being tracked"
+            // — which is the original bug this release fixes.
+            // Policy: last occurrence in the file WINS, so a user who edits a
+            // row near the bottom of their workbook overrides an earlier value
+            // for the same key.
+            var dedupedByKey = new Dictionary<(string StoreID, int DivCode, int Year1, int Month1), Row>();
             foreach (var r in valid)
             {
                 var k = (r.StoreID, r.DivCode!.Value, r.Year1!.Value, r.Month1!.Value);
-                if (existing.TryGetValue(k, out var row))
+                dedupedByKey[k] = r;
+            }
+            var inFileDuplicates = valid.Count - dedupedByKey.Count;
+            var fileKeys = dedupedByKey.Keys;
+
+            // 1.14.68 — Find which of the upload's keys already exist in the
+            // DB. Done with AsNoTracking so these don't enter the change
+            // tracker (the original bug was caused by tracked-entity
+            // collisions when an Add later hit the same key). We pull
+            // candidate rows by StoreID (cheap IN-list), then dedupe in
+            // memory against the file's composite-key set.
+            var storeIdsList = fileKeys.Select(k => k.StoreID).Distinct().ToList();
+            var matchingPks = await db.LpmSalesTurns
+                .AsNoTracking()
+                .Where(x => storeIdsList.Contains(x.StoreID))
+                .Select(x => new { x.StoreID, x.DivCode, x.Year1, x.Month1 })
+                .ToListAsync();
+            var existingKeySet = new HashSet<(string, int, int, int)>();
+            foreach (var x in matchingPks)
+            {
+                var k = (x.StoreID, x.DivCode, x.Year1, x.Month1);
+                if (fileKeys.Contains(k)) existingKeySet.Add(k);
+            }
+
+            // 1.14.68 — If any of the upload's keys already exist in the DB,
+            // ASK the user to confirm "delete and re-insert with fresh
+            // CreateTS" (the new behaviour you requested). Cancel aborts the
+            // whole commit so the planner can review their file. If nothing
+            // overlaps, no dialog appears — straight to insert.
+            if (existingKeySet.Count > 0)
+            {
+                var ok = await DialogService.ShowMessageBox(
+                    "Existing Sales / Turns rows found",
+                    (MarkupString)$"<strong>{existingKeySet.Count:N0}</strong> row(s) in your file match existing records on " +
+                    $"<em>StoreID &times; Division &times; Year &times; Month</em>. " +
+                    $"Continue will <strong>DELETE</strong> the existing rows and <strong>INSERT</strong> the upload's values " +
+                    $"with <code>CreateTS</code> set to <strong>now</strong> ({DateTime.Now:yyyy-MM-dd HH:mm}). " +
+                    $"This cannot be undone &mdash; the previous values for those rows are lost.",
+                    yesText: $"Delete & Re-insert ({existingKeySet.Count:N0})",
+                    cancelText: "Cancel");
+                if (ok != true)
                 {
-                    row.SoldQty = r.SoldQty;
-                    row.TurnsQty = r.TurnsQty;
+                    Snackbar.Add("Commit cancelled — no changes made.", Severity.Info);
+                    return;
                 }
-                else
+            }
+
+            // 1.14.68 — Atomic DELETE + INSERT via a SQL transaction so the
+            // table is never left in a partially-applied state (e.g. existing
+            // rows deleted but new rows not yet inserted).
+            await using var tx = await db.Database.BeginTransactionAsync();
+            try
+            {
+                // 1.14.68 — Stub-entity Remove pattern for the existing
+                // matches: no read needed (we already have the PKs from the
+                // AsNoTracking query above), no tracking conflicts (we never
+                // loaded the real entities into the change tracker). EF
+                // generates one DELETE WHERE PK = ... per stub at SaveChanges.
+                foreach (var k in existingKeySet)
+                {
+                    var stub = new LpmSalesTurns
+                    {
+                        StoreID = k.Item1,
+                        DivCode = k.Item2,
+                        Year1   = k.Item3,
+                        Month1  = k.Item4,
+                    };
+                    db.LpmSalesTurns.Remove(stub);
+                }
+                // Commit the deletes first so the subsequent Add()s don't
+                // collide with their PKs in the tracker (same context).
+                if (existingKeySet.Count > 0)
+                    await db.SaveChangesAsync();
+
+                // 1.14.68 — Now insert every deduped upload row with a fresh
+                // CreateTS. One DateTime.Now captured outside the loop so the
+                // entire batch shares the exact same timestamp (makes it easy
+                // to identify a single upload's rows later).
+                var uploadTs = DateTime.Now;
+                foreach (var r in dedupedByKey.Values)
                 {
                     db.LpmSalesTurns.Add(new LpmSalesTurns
                     {
-                        StoreID = r.StoreID,
-                        DivCode = r.DivCode.Value,
-                        Year1 = r.Year1.Value,
-                        Month1 = r.Month1.Value,
-                        SoldQty = r.SoldQty,
+                        StoreID  = r.StoreID,
+                        DivCode  = r.DivCode!.Value,
+                        Year1    = r.Year1!.Value,
+                        Month1   = r.Month1!.Value,
+                        SoldQty  = r.SoldQty,
                         TurnsQty = r.TurnsQty,
-                        CreateTS = DateTime.Now,
+                        CreateTS = uploadTs,
                     });
                 }
+                await db.SaveChangesAsync();
+                await tx.CommitAsync();
             }
-            await db.SaveChangesAsync();
-            Snackbar.Add($"Committed {valid.Count} Sales/Turns rows.", Severity.Success);
+            catch
+            {
+                try { await tx.RollbackAsync(); } catch { /* already disposed */ }
+                throw;
+            }
+
+            // Success summary — keep the planner informed about both the
+            // existing-row replacement count and any in-file dedup, since
+            // both can change the final row count from what the preview said.
+            var parts = new List<string> { $"Inserted {dedupedByKey.Count:N0} row(s)" };
+            if (existingKeySet.Count > 0) parts.Add($"replaced {existingKeySet.Count:N0} existing");
+            if (inFileDuplicates > 0)    parts.Add($"deduped {inFileDuplicates:N0} in-file duplicate(s) (last value kept)");
+            Snackbar.Add(string.Join(" · ", parts) + ".", Severity.Success);
             _rows.Clear();
             _fileName = null;
             _validCount = _errorCount = 0;

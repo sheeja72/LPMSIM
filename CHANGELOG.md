@@ -23,6 +23,77 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.68 — Sales / Turns upload: fix tracking error on duplicates + explicit Delete-and-Re-insert confirmation + skip empty rows (2026-05-20)
+
+### What's new
+
+Three related fixes to the **Uploads → Sales / Turns** flow.
+
+#### 1) Fix the EF "another instance with the same key value is already being tracked" error
+
+Before 1.14.68, the Commit handler did:
+
+```csharp
+var existing = await db.LpmSalesTurns
+    .Where(x => keys.Select(k => k.StoreID).Contains(x.StoreID))   // ← only StoreID
+    .ToDictionaryAsync(x => (x.StoreID, x.DivCode, x.Year1, x.Month1));
+```
+
+— it loaded **every row for the file's StoreIDs across all Year/Months** into the EF change tracker, then upserted in a loop. Two failure modes:
+
+| Trigger | Result |
+|---|---|
+| File has two rows with the same `(StoreID, DivCode, Year1, Month1)` composite key | First iteration `Add()`s a new entity with that PK → tracker holds it. Second iteration calls `Add()` again → **"another instance with the same key value is already being tracked"**. |
+| File's `StoreID` casing differs from DB casing (e.g. `bfl-moq` vs `BFL-MOQ`) | EF's PK comparer for strings is case-sensitive, but SQL Server's default collation is case-insensitive → C# Add sees no conflict, SQL PK conflict at SaveChanges. |
+
+The new Commit handler **dedupes the upload in memory first** (last occurrence wins — matches typical Excel-editing UX), then uses `AsNoTracking()` to find existing matches by composite key (no entities enter the tracker), then runs the DELETE / INSERT via stub entities so there's no tracker collision.
+
+#### 2) Confirm Delete + Re-insert + fresh `CreateTS` for existing rows
+
+Pre-1.14.68 the upload silently **upserted** — existing rows had their `SoldQty` / `TurnsQty` columns updated in place while `CreateTS` stayed at the original insert date. That made it hard for planners to tell "which rows did I last upload?" because the timestamp didn't move.
+
+1.14.68 changes the semantic to **delete + re-insert with confirmation**:
+
+1. Upload file → preview → click **Commit**.
+2. If any file rows match existing rows on `(StoreID, DivCode, Year1, Month1)`, a MudBlazor dialog appears:
+   > **N row(s)** in your file match existing records on **StoreID × Division × Year × Month**.
+   > Continue will **DELETE** the existing rows and **INSERT** the upload's values with `CreateTS` set to **now** (yyyy-MM-dd HH:mm).
+   > This cannot be undone — the previous values for those rows are lost.
+   >
+   > [Delete & Re-insert (N)] [Cancel]
+3. On **Cancel** → snackbar "Commit cancelled — no changes made." and the upload preview stays.
+4. On **Continue** → DELETE the N existing rows, then INSERT every deduped upload row with a single shared `CreateTS = DateTime.Now`, all inside a SQL transaction so the table is never left half-applied.
+5. If **no** file rows match existing rows, the dialog is skipped (it's a pure INSERT — nothing to delete).
+
+The single shared `uploadTs` per Commit makes it easy to identify "all rows from one upload" later by selecting on the timestamp.
+
+#### 3) Silently skip truly empty rows in the upload file
+
+Pre-1.14.68 the parser used ClosedXML's `xlRow.CellsUsed().Any()` to detect empty rows. That check returns **true** for rows that have nothing but residual formatting — a column-wide fill, a previously-cleared cell that still carries style metadata, etc. — so those rows reached the validation step and surfaced as error rows reading *"StoreID is blank; Division is blank; Year is blank; Month is blank"*, inflating the error count and the "Rows with errors" preview.
+
+The parser now adds a stricter check **after** reading the six cells: if `StoreID` + `Division` are both blank **AND** `Year` / `Month` / `SoldQty` / `Turns` are all null, the row is skipped without adding to either `_validCount` or `_errorCount`. **Partial** rows (e.g. just a StoreID with the other columns missing) still surface as errors so the planner can fix them in their workbook.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Web/Components/Pages/Uploads/SalesTurnsUpload.razor` | Added `@inject IDialogService DialogService`. Rewrote `CommitAsync` to: (a) dedup the file by composite key in memory (last wins), (b) find existing DB matches via `AsNoTracking()` to avoid tracker collisions, (c) show a confirmation dialog naming the existing-row count when overlap exists, (d) perform DELETE-then-INSERT inside a `db.Database.BeginTransactionAsync` so it's atomic, (e) stamp every inserted row with a single shared `DateTime.Now`. `ParseAsync` now silently `continue`s past rows where all six input cells are blank/null (after-`CellsUsed()` second-line defence against residual-formatting empty rows). Rules sidebar updated to document the new delete-and-re-insert + in-file dedup behaviour. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.67 → 1.14.68. |
+
+### What was NOT touched (intentional)
+
+- **No schema change.** `LPM_SalesTurns` already has a composite PK on `(StoreID, DivCode, Year1, Month1)`. No migration in this release.
+- **Other Uploads pages unchanged.** The bug + dialog requirement was specific to Sales / Turns. Monthly Weights, Planned Inputs, Stores Capacity etc. weren't touched.
+- **ParseAsync left intact.** The Excel-reading + validation flow already returns sensible row-level errors (e.g. "Division 'DATA MIGRATION' not found" in your screenshot), and the new Commit handler honours `r.Error is null` exactly as before — invalid rows still get filtered out before the dedup / confirmation runs.
+- **The original "upsert" mode is intentionally retired** — the user explicitly asked for delete-and-re-insert with CreateTS updated. If a UI toggle to switch between the two modes is wanted later, that's a separate change.
+
+### Operator notes
+
+- The shared `CreateTS` per upload makes it trivial to find "everything from yesterday's 14:32 upload": `SELECT * FROM dbo.LPM_SalesTurns WHERE CreateTS >= '2026-05-20 14:32' AND CreateTS < '2026-05-20 14:33'`.
+- If a planner cancels at the dialog, **zero changes happen** — the existing rows remain with their original `CreateTS`. There's no "partial apply" failure mode.
+- Atomic transaction: if the DELETE succeeds but the INSERT subsequently fails (e.g. SQL Server lock issue), the whole thing rolls back. After a failed Commit, the table is byte-identical to its pre-Commit state.
+
+---
+
 ## 1.14.67 — SIM Generate: hide in-flight "Running" batches + transactional persist phase (2026-05-20)
 
 ### What's new
