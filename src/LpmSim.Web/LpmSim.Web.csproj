@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.68</Version>
-    <AssemblyVersion>1.14.68.0</AssemblyVersion>
-    <FileVersion>1.14.68.0</FileVersion>
-    <InformationalVersion>1.14.68 (Sales/Turns upload: fix EF tracking error on duplicate keys; ask for confirmation before deleting + re-inserting existing rows; CreateTS now reflects upload time)</InformationalVersion>
+    <Version>1.14.69</Version>
+    <AssemblyVersion>1.14.69.0</AssemblyVersion>
+    <FileVersion>1.14.69.0</FileVersion>
+    <InformationalVersion>1.14.69 (EOM Generate: Store Capacity now acts as BOTH ceiling AND floor — when a cap is configured, Σ Tgt EOM across divisions reconciles to EomCapacity exactly, distributing proportionally by Pre-Store CAP EOM share)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

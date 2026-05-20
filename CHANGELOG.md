@@ -23,6 +23,61 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.69 — EOM Generate: Store Capacity acts as BOTH ceiling AND floor (2026-05-20)
+
+### What's new
+
+Per-store **EomCapacity** in `LPM_StoreCapacity` is now treated as the planner's authoritative per-store EOM target — `Σ Tgt EOM` across divisions reconciles to `EomCapacity` exactly whenever a cap is configured. Each division gets its proportional share of the cap based on its Pre-Store CAP EOM share within the store.
+
+Previously (1.14.53 → 1.14.68) the cap was a **ceiling only** — when calculated demand was already at or below the cap, the cap was ignored and Tgt EOM stayed at the lower demand value. That surprised planners who set a cap higher than the calculated demand expecting it to uplift the EOM.
+
+### Why this matters
+
+Reproduction (observed for UAE batch this morning):
+
+| Store | Σ Pre-Store CAP EOM (demand) | EomCapacity (saved by planner) | Pre-1.14.69 Σ Tgt EOM | 1.14.69 Σ Tgt EOM |
+|---|---:|---:|---:|---:|
+| **BFL-DXD** (Dubai Outlet Mall 2) | 37,235 | **42,855** | 37,235 (cap ignored) | **42,855** (uplifted, each division × 42855/37235 ≈ 1.151) |
+| Another store with demand 50,000 + cap 42,855 | 50,000 | 42,855 | 42,855 (scaled down) | 42,855 (same — scale-down unchanged) |
+| Store with no cap configured | 30,000 | — | 30,000 (passthrough) | 30,000 (passthrough — unchanged) |
+| Store with explicit cap = 0 | 25,000 | 0 | 25,000 (cap ignored under old logic) | **0** (cap = 0 means "this store gets nothing") |
+
+The new formula is symmetric — one ratio works for all four corners:
+
+```
+Σ PreStoreCapEom[store, all divs] = totalPre
+
+if cap exists for the store AND totalPre > 0:
+    Tgt EOM[div] = PreStoreCapEom[div] × (cap / totalPre)
+else:
+    Tgt EOM[div] = PreStoreCapEom[div]   (passthrough)
+```
+
+`totalPre > 0` is the only guard left — without any demand to distribute, even a non-zero cap can't be allocated across divisions (no share basis), so it falls through to the passthrough branch (which leaves zeros). A cap explicitly set to **0** now correctly zeros every division for that store.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/Eom/EomCalculator.cs` | Stage 4c — the `if (totalPre > cap && totalPre > 0m)` ceiling-only check is replaced by a single `if (totalPre > 0m)` proportional scale that runs whenever a cap is configured. Comments in the waterfall doc block + the per-stage comment updated to document the new ceiling-AND-floor semantic. |
+| `src/LpmSim.Web/Components/Pages/LPM/EomGenerate.razor` | "How this page calculates EOM" formula box updated (the `if cap > totalPre` clause is gone; reads `if cap exists AND totalPre > 0` instead). Added a callout naming BFL-DXD as the worked example for cap-uplift. Tgt EOM column tooltip updated to mention the new semantic. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.68 → 1.14.69. |
+
+### What was NOT touched (intentional)
+
+- **No schema change.** `LPM_StoreCapacity.EomCapacity` still stores the same `int` value — only the way the calculator interprets it changed.
+- **No migration.** Existing rows in `LpmEomOutputs` from pre-1.14.69 batches retain whatever `TargetEOM` the old logic produced; the new logic only takes effect when a new EOM batch is generated.
+- **No change to SIM Generate.** It still reads `TargetEOM` from `LpmEomOutputs` as the per-(Store × Div) ceiling. The values that column carries are now higher (when cap > demand) but the consumer behaviour is identical.
+- **No change to Pre-Store CAP EOM.** Stage 4b is byte-identical — `PreStoreCapEom` still equals `(IniEom / Σ IniEom) × PlannedEOM` per division, with no cap awareness. Only Stage 4c (Tgt EOM) flips semantics.
+- **Stores without a cap entry are unaffected.** Their Tgt EOM is still a straight passthrough of Pre-Store CAP EOM.
+
+### Operator notes
+
+- **Re-Generate EOM** after upgrading. The persisted `LpmEomOutputs.TargetEOM` for existing Approved batches is from the old logic — only a fresh Generate run after deploying 1.14.69 will reflect the ceiling+floor semantic.
+- A cap = 0 row now zeros that store's EOM entirely. If you have any test/legacy rows with `EomCapacity = 0` and `IsActive = 1` that you didn't intend as "zero this store", inactivate them before re-Generating.
+- When you set cap > calculated demand, the division's Σ Tgt EOM no longer reconciles to PlannedEOM — that's expected. Treat per-store cap as the authoritative number; PlannedEOM remains the input for the no-cap stores in that same division.
+
+---
+
 ## 1.14.68 — Sales / Turns upload: fix tracking error on duplicates + explicit Delete-and-Re-insert confirmation + skip empty rows (2026-05-20)
 
 ### What's new

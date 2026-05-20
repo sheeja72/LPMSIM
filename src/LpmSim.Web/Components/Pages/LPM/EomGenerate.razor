@@ -208,14 +208,19 @@
                             <code>LPM_StoreCapacity.EomCapacity</code> applied on top of Pre-Store CAP EOM:
                             <br/>
                             <code>Σ PreStoreCapEom[store, all divs] = totalPre</code><br/>
-                            <code>if cap exists AND totalPre &gt; cap:&nbsp;&nbsp;TgtEOM[div] = PreStoreCapEom[div] × (cap ÷ totalPre)</code><br/>
-                            <code>else:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;TgtEOM[div] = PreStoreCapEom[div]   (passthrough)</code>
+                            <code>if cap exists AND totalPre &gt; 0:&nbsp;&nbsp;TgtEOM[div] = PreStoreCapEom[div] × (cap ÷ totalPre)</code><br/>
+                            <code>else:&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;TgtEOM[div] = PreStoreCapEom[div]   (passthrough)</code>
                             <br/>
                             <span style="color:#64748b;font-size:.8rem;">
+                                <strong>1.14.69 — cap is now BOTH ceiling AND floor.</strong> Whenever a cap is configured, the
+                                store's <code>Σ Tgt EOM</code> reconciles to <code>EomCapacity</code> exactly: cap &gt; demand
+                                <em>uplifts</em> each division (e.g. BFL-DXD demand 37,235 + cap 42,855 → Σ Tgt EOM 42,855),
+                                cap &lt; demand <em>scales down</em> (unchanged from 1.14.53), cap = 0 zeroes the whole store.
+                                <br/>
                                 Cap source: <strong>Planning Config → Stores Capacity EOM</strong> (and the matching Excel upload).
-                                A missing row = no cap = passthrough. An explicit cap of 0 means the store gets 0
-                                Tgt EOM across all divisions. When the cap binds, the division's <code>Σ Tgt EOM</code>
-                                falls short of <code>PlannedEOM</code> by the capped delta — that's the cap's whole point.
+                                A missing row = no cap = passthrough (Tgt EOM = Pre-Store CAP EOM).
+                                When a cap is configured, the division's <code>Σ Tgt EOM</code> drifts from
+                                <code>PlannedEOM</code> by the cap-vs-demand delta — that's the cap's whole point.
                                 <br/>
                                 <strong>Note on Grade markup:</strong> markup affects Tgt Turn (premium grades
                                 turn slower) → which now also affects Tgt EOM via Ini.EOM. (Pre-1.14.53 the
@@ -605,7 +610,7 @@
                 <MudTh Style="width:110px;min-width:110px;"><div class="th-total">@totalPreCapEom.ToString("N0")</div><span title="PreStoreCapEOM = Apportion Planned EOM Qty to all stores based on % of Ini.EOM over Total Ini.EOM for that Division. Cap-agnostic — store cap is applied in the next column (Tgt EOM). Σ within a Division reconciles to PlannedEOM.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.PreStoreCapEom">Pre-Store<br />CAP EOM</MudTableSortLabel></span></MudTh>
 
-                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM (1.14.53 — formula changed): if LPM_StoreCapacity.EomCapacity exists for this store AND Σ Pre-Store CAP EOM across divisions > EomCapacity, each division is scaled by EomCapacity / Σ Pre-Store CAP EOM. Otherwise TargetEOM = Pre-Store CAP EOM (passthrough). SIM Generate uses this as the per-(Store × Div) ceiling.">
+                <MudTh Style="width:95px;min-width:95px;"><div class="th-total">@totalTgtEom.ToString("N0")</div><span title="TargetEOM (1.14.69 — cap is both ceiling AND floor): if LPM_StoreCapacity.EomCapacity exists for this store AND Σ Pre-Store CAP EOM > 0, each division is scaled by EomCapacity / Σ Pre-Store CAP EOM (Σ Tgt EOM reconciles to cap exactly — uplift when cap > demand, scale-down when cap < demand). Otherwise TargetEOM = Pre-Store CAP EOM (passthrough). SIM Generate uses this as the per-(Store × Div) ceiling.">
                     <MudTableSortLabel T="EomRow" SortBy="r => r.TargetEOM">Tgt<br />EOM</MudTableSortLabel></span></MudTh>
 
                 <MudTh Style="width:80px;min-width:80px;"><div class="th-total">@totalSoh.ToString("N0")</div><span title="SOH = Sum of LPM_LocStock.SOH across all items for this (Store, Division). Source: racks.dbo.LPM_LocStock joined to active stores in DataSettings.">

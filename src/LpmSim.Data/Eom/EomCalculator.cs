@@ -957,17 +957,27 @@ SELECT id.DivCode,
         //
         //   4c. TargetEOM[store, div]      = if LPM_StoreCapacity.EomCapacity
         //                                      EXISTS for the store AND
-        //                                      Σ PreStoreCapEom across divisions
-        //                                      > EomCapacity:
+        //                                      Σ PreStoreCapEom > 0:
         //                                        PreStoreCapEom[div]
         //                                        × (EomCapacity / Σ PreStoreCapEom)
         //                                    else:
         //                                        PreStoreCapEom[div]   (passthrough)
         //
+        // 1.14.69 — Cap is now BOTH a ceiling AND a floor. Whenever a cap is
+        // configured for a store, Σ TargetEOM(store) reconciles to EomCapacity
+        // exactly (each division scaled by EomCapacity / Σ PreStoreCapEom).
+        // Pre-1.14.69 the cap was a ceiling only — when demand < cap, the cap
+        // was ignored and TargetEOM stayed at the lower demand value. That
+        // surprised planners who set cap > calculated demand expecting the
+        // store's EOM to uplift to the cap (e.g. BFL-DXD with demand 37,235
+        // and cap 42,855 stayed at 37,235). The new rule treats the cap as
+        // the planner's explicit per-store target — distributed across
+        // divisions by Pre-Store CAP EOM share.
+        //
         // Σ TargetEOM(Division) only reconciles to PlannedEOM(Division) when
-        // no store's cap binds in that division. When a cap binds, the division
-        // falls short by the capped delta — that's intentional (the cap is a
-        // ceiling, accepting less stock is the whole point).
+        // NO store in that division has a cap configured. Once a cap exists,
+        // the division total drifts by the cap-vs-demand delta — that's
+        // intentional (the cap is now an authoritative per-store EOM).
         //
         // Stage 4a — Ini.EOM per row. 1.14.56: divided by 4.
         foreach (var r in rows)
@@ -998,7 +1008,13 @@ SELECT id.DivCode,
             // the decisive check, not the value.
             if (storeCapByStore.TryGetValue(grp.Key, out var cap))
             {
-                if (totalPre > cap && totalPre > 0m)
+                // 1.14.69 — Cap is now BOTH ceiling AND floor. As long as the
+                // store has some PreStoreCapEom demand to scale, distribute the
+                // cap proportionally so Σ TargetEOM(store) == cap exactly. This
+                // is symmetric: cap > demand uplifts (each div × cap/demand),
+                // cap < demand scales down (same formula, ratio < 1), cap == 0
+                // zeroes out all divisions (ratio = 0).
+                if (totalPre > 0m)
                 {
                     var ratio = (decimal)cap / totalPre;
                     foreach (var r in grp)
@@ -1006,11 +1022,12 @@ SELECT id.DivCode,
                 }
                 else
                 {
-                    // Cap not binding (totalPre <= cap, or totalPre == 0):
-                    // pass through. Cap = 0 with totalPre = 0 also lands here
-                    // with TargetEOM = 0 naturally.
+                    // No demand to scale — every division's PreStoreCapEom is
+                    // zero (e.g. nothing planned for the period, or every store
+                    // unranked so TgtTurn = 0 everywhere). Cap can't be
+                    // distributed without a share basis; passthrough zeros.
                     foreach (var r in grp)
-                        r.TargetEOM = r.PreStoreCapEom;
+                        r.TargetEOM = r.PreStoreCapEom;   // = 0
                 }
             }
             else
