@@ -73,16 +73,13 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
             // others use [<DataName>].dbo.WHBoxItemsExport.
             var whSrc      = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
-            // 1.14.70 — Resolve the bare DataName too so we can build the
-            // closed-box exclusion expression for the segment-count query.
-            // Null for UAE (uses the fixed USA.dbo.upcboxhead path inside
-            // BuildIsClosedExpression).
-            var dataName   = await WhBoxItemsSource.ResolveDataNameAsync(conn, country, ct);
-            // 1.14.70 — Match SIM Generate's box exclusion so the readiness
-            // counts reflect what Generate will actually allocate. Without
-            // this, a planner sees "100 LPM Summer boxes available" but
-            // Generate only processes 95 (because 5 were closed).
-            var closedExpr = WhBoxItemsSource.BuildIsClosedExpression(country, dataName);
+            // 1.14.74 — The closed-box exclusion (1.14.70) is now applied
+            // ONLY in the allocator (ReadBoxesAsync) and surfaced in the
+            // Allocation Gap diagnostic. The Input Readiness counts grid
+            // shows the FULL whboxitems totals — operator preference: the
+            // grid is a "what's in the warehouse" view, not a "what will
+            // ship" view. So the closed-box predicate is intentionally
+            // NOT applied to the SELECT below.
             using var cmd = conn.CreateCommand();
             // Build a parameterised IN-list for warehouses (empty = no filter, all warehouses).
             var (whClause, whParams)         = BuildWarehouseClause(warehouses);
@@ -179,11 +176,13 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                  WHERE 1 = 1
                    {palletClause}
                    {lpmDtClause}
-                   {whClause}
-                   -- 1.14.70 — Exclude closed boxes from the readiness counts so they
-                   -- reconcile with what Generate actually allocates (Generate applies
-                   -- the same exclusion in ReadBoxesAsync).
-                   AND NOT {closedExpr};";
+                   {whClause};";
+            // 1.14.74 — Closed-box exclusion REMOVED from this readiness
+            // count (was added in 1.14.70). The grid now shows the
+            // unfiltered whboxitems counts — operator preference. Closed
+            // boxes still get filtered out in ReadBoxesAsync (the
+            // allocator never sees them) and they appear as CLOSED_BOX
+            // entries in the Allocation Gap tab.
             // First day of the month AFTER the run period — half-open
             // interval excludes future-dated LPM boxes.
             cmd.Parameters.Add(new SqlParameter("@endExclusive",

@@ -23,6 +23,49 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.74 — SIM Generate: closed-box exclusion now allocator-only; Input Readiness counts show full whboxitems totals (2026-05-20)
+
+### What's new
+
+1.14.70 added the closed-box exclusion (UAE → `USA..upcboxhead.Closed='Y'`; non-UAE → `Exclude_Transfers_Sim` + `CloseR1Pallet`) in **two** places:
+
+1. `ReadBoxesAsync` — the box stream the allocator iterates. Closed boxes never reach the allocator.
+2. `CheckAsync`'s per-segment count query — the Input Readiness grid at the top of SIM Generate. The grid showed counts **after** filtering closed boxes.
+
+Per operator preference, 1.14.74 keeps (1) but **removes** (2). The Input Readiness grid is now a pure "**what's in the warehouse**" view — it sums the full `whboxitems` rows that satisfy the pallet-category / season / warehouse / LPM-month filters, with **no closed-box subtraction**. Closed boxes still:
+
+- Get filtered out of the allocator (the SIM batch's `LPMSIM_Output` doesn't include them).
+- Always show up in the **Allocation Gap** tab with `TopReason = CLOSED_BOX`, naming the source table (UAE: `USA.dbo.upcboxhead`; non-UAE: `Exclude_Transfers_Sim` / `CloseR1Pallet`).
+
+So the grid + the Gap tab together give the planner the complete picture: "how many boxes are physically in the warehouse" (grid) vs "how many shipped + which were held back and why" (allocation result + Gap).
+
+### Why this matters
+
+A planner glancing at "8,272 LPM Summer boxes available" used to see this number drop to (say) 8,210 if 62 of those boxes were closed. That was confusing — the warehouse hasn't lost any boxes, they're just held back. Now the grid stays at 8,272 (matches a raw SSMS `COUNT(DISTINCT BoxNo)`), the allocator runs against 8,210, and the Gap tab shows the 62 closed boxes with reason.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | `CheckAsync`'s per-segment counts SQL: the `AND NOT {closedExpr}` predicate (added in 1.14.70) is removed. The `dataName` + `closedExpr` locals built specifically for that predicate are removed too — no longer needed since `ReadBoxesAsync` resolves DataName independently. Inline comment updated to document the new "grid = unfiltered totals" intent. **No change to `ReadBoxesAsync`** — closed boxes still filtered there. **No change to `BuildAndInsertUnallocatedDiagnosticAsync`** — CLOSED_BOX rows still emitted. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.73 → 1.14.74 + new InformationalVersion. |
+
+### What was NOT touched (intentional)
+
+- **`ReadBoxesAsync`** — closed-box filter stays. Allocator never sees closed boxes; their meta is captured in `closedBoxesDest` for the Gap entry.
+- **`BuildAndInsertUnallocatedDiagnosticAsync`** — CLOSED_BOX rows still appear in `LPMSIM_UnallocatedDiagnostic` for every closed box that the SIM filters would otherwise have considered.
+- **`WhBoxItemsSource.BuildIsClosedExpression`** — kept as a public helper. Still used by `ReadBoxesAsync`. Could become unused elsewhere later but no harm leaving it.
+- **No schema change. No migration.**
+- **WH Stock Position report** — unrelated; not touched.
+- **Existing batches' Gap rows unchanged.** Only future Generate runs (from 1.14.74 onward) decide which boxes are "closed at the moment Generate ran" and emit CLOSED_BOX rows accordingly.
+
+### Operator notes
+
+- After deploy, click **Re-check** on SIM Generate — the Input Readiness counts may rise slightly (by the number of currently-closed boxes that previously got excluded). Same numbers as a raw `SELECT COUNT(DISTINCT BoxNo) FROM racks..whboxitems WHERE …` query (with whatever filters match your page selection).
+- The **Allocation Gap** tab still shows closed boxes — re-Generate any batch to populate the diagnostic with CLOSED_BOX entries for that batch's filter set.
+- If a planner ever wants the old "what will actually ship" grid behaviour back (subtracting closed boxes from the counts), it's a 1-line revert — `AND NOT {closedExpr}` back into the WHERE.
+
+---
+
 ## 1.14.73 — WH Stock Position perf: hoist universal rule into WHERE, simplify SUM CASEs, conditional #WhRptItemSeason build (2026-05-20)
 
 ### What's new

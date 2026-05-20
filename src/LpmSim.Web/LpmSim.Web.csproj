@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.73</Version>
-    <AssemblyVersion>1.14.73.0</AssemblyVersion>
-    <FileVersion>1.14.73.0</FileVersion>
-    <InformationalVersion>1.14.73 (WH Stock Position perf: hoist universal WH eligibility rule into WHByDiv WHERE clause, simplify the 11 SUM CASEs, skip building #WhRptItemSeason when Season=All, replace @season OR-chains with inline conditional SQL — typical 3-10x speedup on large whboxitems sources)</InformationalVersion>
+    <Version>1.14.74</Version>
+    <AssemblyVersion>1.14.74.0</AssemblyVersion>
+    <FileVersion>1.14.74.0</FileVersion>
+    <InformationalVersion>1.14.74 (SIM Generate: closed-box exclusion now applies ONLY in the allocator + Gap diagnostic; the Input Readiness counts grid shows the full unfiltered whboxitems totals — operator preference for the grid as a "what's in the warehouse" view rather than a "what will ship" view)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
