@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.88</Version>
-    <AssemblyVersion>1.14.88.0</AssemblyVersion>
-    <FileVersion>1.14.88.0</FileVersion>
-    <InformationalVersion>1.14.88 hotfix (Country-linkage regression in 1.14.87 RR rewrite — the new grade-tier sort in 1b/2b only used MerchNeedMonth Balance DESC, which mixed parent and child countries inside the same grade. A UAE batch with OMAN linkage could pick an OMAN Diamond store before a UAE Diamond store when OMAN's MNM Balance was higher, violating the "OMAN after UAE" planner rule. Fix: CountryPriority ASC is now the PRIMARY within-tier sort key, MNM Balance DESC the secondary — same shape as the 1a/2a sort. Single-country runs unaffected because every store has CountryPriority = 0 in that case.)</InformationalVersion>
+    <Version>1.14.90</Version>
+    <AssemblyVersion>1.14.90.0</AssemblyVersion>
+    <FileVersion>1.14.90.0</FileVersion>
+    <InformationalVersion>1.14.90 (SIM Generate concurrency gate — when one user (or a same-user double-click) starts SIM Generate for a (Country, RunDate), any second Generate for the same period within the 30-minute stale window is blocked with a friendly Warning Snackbar naming the conflicting user, the batch number, and the GST start time. Implemented via a new SimBatchAlreadyRunningException thrown at the very start of GenerateAsync before any expensive work. Uses the existing 1.14.67 Status='Running' marker on LPM_SimBatch + the existing 30-minute stale-row safety window — no new schema, no migration. Stale Running rows (crashed mid-flight, older than 30 min) don't block new runs.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

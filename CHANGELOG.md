@@ -23,6 +23,94 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.90 — SIM Generate: concurrency gate (block while another user is running for the same period) (2026-05-21)
+
+### What's new
+
+When one user (say Ajmal) is mid-way through a SIM Generate for `UAE 2026-05-21`, any second Generate click for the **same (Country, RunDate)** — by another user OR by Ajmal himself double-clicking — is now blocked with a friendly Warning Snackbar:
+
+> *Ajmal@bflgroup.ae is currently running SIM Generate for UAE 2026-05-21 (batch #92, started 21-May 14:38 GST). Please wait for that run to finish before starting a new one.*
+
+For a self-collision (Ajmal double-clicks) the message is reworded to second-person:
+
+> *You already have a SIM Generate running for UAE 2026-05-21 (batch #92, started 21-May 14:38 GST). Wait for that run to finish before starting another.*
+
+The message includes the conflicting user's name, the in-flight batch number, and the GST start time so the planner knows exactly who/what to wait for.
+
+### How it works
+
+- **Detection:** `GenerateAsync` now starts with `EnsureNoConcurrentGenerateAsync`, which queries `LPM_SimBatch` for any row with `Status='Running' AND Country = @c AND RunDate = @d AND CreateTS >= now-30min`. If a row matches, throw `SimBatchAlreadyRunningException`.
+- **Marker source:** Uses the existing 1.14.67 `Status='Running'` marker (set when GenerateAsync inserts the batch row, flipped to `Draft` after the persist phase commits). No schema change.
+- **Stale-row safety:** The 30-minute cutoff matches the existing window used by `CheckAsync` — a crashed mid-flight Generate (rare; would have happened with a server reboot or process kill mid-allocation) won't block new runs forever. After 30 minutes the stale `Running` row stops being a barrier.
+- **Fail fast:** The check runs before the SKU Max gate / EOM read / allocation, so a blocked user gets the message in <1 second instead of waiting for a heavy operation to start.
+- **Both cross-user and same-user collisions are blocked.** Matches the precedent set by `SkuMaxBuildJobManager.Start` which has the same "any concurrent run is a conflict" rule.
+
+### Scope
+
+- The block is per `(Country, RunDate)` — the natural batch grain. User A running UAE 2026-05-21 does NOT block User B running UAE 2026-04-21 (different period) or KSA 2026-05-21 (different country).
+- The same rule applies regardless of Box Source / Season / Run Option / scope — any second batch for the same period is treated as a collision.
+
+### Implementation notes
+
+- New exception type: `LpmSim.Data.LpmSim.SimBatchAlreadyRunningException` — extends `InvalidOperationException`, carries `ConflictingUser`, `ConflictingBatchNo`, `ConflictingStartTS` for future programmatic consumers.
+- Same shape as the existing `SkuMaxStaleException`. The UI catches both side by side in `GenerateAsync`'s exception handler chain.
+- The Snackbar uses `Severity.Warning` (not Error) — this is expected behaviour, not a failure. `RequireInteraction = true` so the planner has to dismiss it (won't auto-fade) and the message stays visible while they figure out what to do next.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimModels.cs` — new `SimBatchAlreadyRunningException` class.
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — new `EnsureNoConcurrentGenerateAsync` helper; `GenerateAsync` calls it at line 1 of its body, before the SKU Max gate.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — new `catch (SimBatchAlreadyRunningException busy)` block in the page's `GenerateAsync` method, alongside the existing `SkuMaxStaleException` catch.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.89 → 1.14.90.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar footer shows `1.14.90`.
+2. Open SIM Generate as User A → click Generate on a large period (UAE current month works).
+3. While the run is still in progress (the page should show progress + scope counters), open SIM Generate as User B in another browser/incognito session → set the same Country + RunDate → click Generate.
+4. User B should see the Warning Snackbar within 1 second naming User A + batch number + start time. No new batch row should be created for User B.
+5. After User A's batch finishes (Status flips Running → Draft), User B's next Generate click should succeed normally.
+
+### What this does NOT block
+
+- A user navigating away mid-run and coming back. The existing logic re-attaches them to their own in-flight batch via `CheckAsync` — that path stays untouched.
+- Approve / Delete / View actions on other Draft/Approved batches for the same period. The block is strictly on the *new Generate* path.
+- Concurrent SIM Generate for *different* (Country, RunDate) pairs. The lock is per-period.
+
+---
+
+## 1.14.89 — SIM Generate: "Run Option" dropdown replaces the SKU Max only checkbox (2026-05-21)
+
+### What's new
+
+On the SIM Generate filter bar, the **"SKU Max only"** checkbox is replaced with a **"Run Option"** dropdown that surfaces both cap-set choices side by side:
+
+| Run Option | What the allocator does |
+|---|---|
+| **MerchNeed (Month) Balance + SKU Max Balance** *(default)* | Phase 1a/2a use both caps. Standard behaviour — matches 1.14.87/88 default. |
+| **SKU Max Balance only** | Bypasses MerchNeedMonth in 1a/2a. SKU Max becomes the only cap. EqualFillRate fill strategy switches its denominator from MerchNeedMonth to SkuMax. |
+
+### Why
+
+The old checkbox was named **"SKU Max only"** with a "when ON it bypasses Merch Need" tooltip — a negative-sense label that was easy to misread. The dropdown lists both choices explicitly so the planner can see exactly which cap set they're picking before clicking Generate.
+
+### Implementation
+
+- Pure UX change. The underlying `LpmSimGenerateRequest.IgnoreMerchNeed` bool is unchanged, so the persistence layer, the allocator code, and any historical batch records continue to work without modification.
+- Mapping:
+  - "MerchNeed (Month) Balance + SKU Max Balance" → `_ignoreMerchNeed = false`
+  - "SKU Max Balance only" → `_ignoreMerchNeed = true`
+- Allocator behaviour identical to 1.14.88 for both options.
+
+### Files changed
+
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — `MudCheckBox` "SKU Max only" → `MudSelect` "Run Option" with two options, both bound to the existing `_ignoreMerchNeed` bool.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.88 → 1.14.89.
+- `CHANGELOG.md` — this section.
+
+---
+
 ## 1.14.88 — Hotfix: country-linkage regression in 1.14.87 RR sort (UAE → OMAN ordering) (2026-05-21)
 
 ### What's wrong

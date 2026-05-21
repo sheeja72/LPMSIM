@@ -430,14 +430,20 @@
             </div>
         </MudItem>
         <MudItem xs="12" sm="6" md="5" Class="d-flex flex-wrap align-center gap-2">
-            @* 1.14.87 — toggle still works; the cap it bypasses is now
-               MerchNeedMonth (not the legacy MerchNeedWeek). *@
-            <MudTooltip Text="When ON, the allocator bypasses Merch Need (Month) and uses SKU Max as the only cap. EqualFillRate switches its denominator from MerchNeedMonth to SkuMax."
+            @* 1.14.89 — Run option dropdown replaces the "SKU Max only" checkbox.
+               Same underlying _ignoreMerchNeed bool, just clearer UX:
+                 * "MerchNeed (Month) Balance + SKU Max Balance"  → _ignoreMerchNeed = false  (default)
+                 * "SKU Max Balance only"                          → _ignoreMerchNeed = true
+               Behaviour at the allocator layer is unchanged from 1.14.88. *@
+            <MudTooltip Text="Pick the cap set used in Phase 1a/2a. 'MerchNeed (Month) + SKU Max' is the standard cap. 'SKU Max only' bypasses the monthly demand cap and lets allocation push past MerchNeedMonth — use when you want SKUMax to be the sole ceiling (EqualFillRate also switches its denominator to SkuMax)."
                         Placement="Placement.Top">
-                <MudCheckBox T="bool" Value="_ignoreMerchNeed"
-                             ValueChanged="(bool v) => _ignoreMerchNeed = v"
-                             Color="Color.Warning" Size="Size.Small" Dense="true"
-                             Label="SKU Max only" />
+                <MudSelect T="bool" Value="_ignoreMerchNeed"
+                           ValueChanged="(bool v) => _ignoreMerchNeed = v"
+                           Label="Run Option" Dense="true" Margin="Margin.Dense"
+                           Variant="Variant.Outlined" Style="min-width:300px;">
+                    <MudSelectItem T="bool" Value="false">MerchNeed (Month) Balance + SKU Max Balance</MudSelectItem>
+                    <MudSelectItem T="bool" Value="true">SKU Max Balance only</MudSelectItem>
+                </MudSelect>
             </MudTooltip>
             <MudTooltip Text="When ON, drops the ShopEligible <> 'E' filter so already-shopped boxes (ShopEligible='E') are also pulled into SIM."
                         Placement="Placement.Top">
@@ -3736,6 +3742,16 @@
             sw.Stop();
             _skuMaxStatus = sse.Status;
             Snackbar.Add(sse.Message, Severity.Warning,
+                cfg => { cfg.RequireInteraction = true; cfg.VisibleStateDuration = 15000; });
+        }
+        catch (SimBatchAlreadyRunningException busy)
+        {
+            // 1.14.90 — Another generate is in flight for this (Country, RunDate).
+            // Not an error condition — show a friendly Warning Snackbar with the
+            // conflicting user's name + batch number + start time so the planner
+            // knows who/what to wait for.
+            sw.Stop();
+            Snackbar.Add(busy.Message, Severity.Warning,
                 cfg => { cfg.RequireInteraction = true; cfg.VisibleStateDuration = 15000; });
         }
         catch (Exception ex)

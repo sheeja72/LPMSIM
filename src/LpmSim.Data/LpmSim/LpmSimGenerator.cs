@@ -538,6 +538,46 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
     }
 
     /// <summary>
+    /// 1.14.90 — Concurrency gate for SIM Generate. Throws
+    /// <see cref="SimBatchAlreadyRunningException"/> when another generate is
+    /// already in flight for the same (Country, RunDate). "In flight" =
+    /// LPM_SimBatch row with Status='Running' whose CreateTS is within the
+    /// last 30 minutes (matches the stale-row safety window used by
+    /// CheckAsync). Blocks BOTH cross-user races and same-user double-clicks.
+    /// </summary>
+    private async Task EnsureNoConcurrentGenerateAsync(LpmSimGenerateRequest req, CancellationToken ct)
+    {
+        var staleCutoff = DateTime.Now.AddMinutes(-30);
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var inFlight = await db.LpmSimBatches.AsNoTracking()
+            .Where(b => b.Country  == req.Country
+                     && b.RunDate  == req.RunDate.Date
+                     && b.Status   == "Running"
+                     && b.CreateTS >= staleCutoff)
+            .OrderByDescending(b => b.LPMBatchNo)
+            .FirstOrDefaultAsync(ct);
+        if (inFlight is null) return;
+
+        // Human-friendly time stamp in GST so the message matches what the
+        // user sees on the batch-pill list.
+        var when = TimeFormatting.ToGccString(inFlight.CreateTS, "dd-MMM HH:mm");
+        var conflictingUser = string.IsNullOrWhiteSpace(inFlight.CreatedBy)
+                              ? "another user"
+                              : inFlight.CreatedBy;
+        var isSelf = !string.IsNullOrEmpty(inFlight.CreatedBy)
+                     && string.Equals(inFlight.CreatedBy, req.User, StringComparison.OrdinalIgnoreCase);
+        var msg = isSelf
+            ? $"You already have a SIM Generate running for {req.Country} {req.RunDate:yyyy-MM-dd} "
+              + $"(batch #{inFlight.LPMBatchNo}, started {when} GST). "
+              + "Wait for that run to finish before starting another."
+            : $"{conflictingUser} is currently running SIM Generate for {req.Country} {req.RunDate:yyyy-MM-dd} "
+              + $"(batch #{inFlight.LPMBatchNo}, started {when} GST). "
+              + "Please wait for that run to finish before starting a new one.";
+        throw new SimBatchAlreadyRunningException(
+            msg, inFlight.CreatedBy ?? "", inFlight.LPMBatchNo, inFlight.CreateTS);
+    }
+
+    /// <summary>
     /// Runs the two-phase allocation. Behaviour with existing batches for the
     /// same (Country, RunDate):
     ///   • Existing DRAFT      → replaced (its rows are deleted first).
@@ -549,6 +589,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
     ///     impact). A schedule attached to an Approved batch does NOT block
     ///     a brand-new Draft — the Approved batch + its schedule are
     ///     untouched.
+    ///   • 1.14.90 — An in-flight Running batch for the same (Country,
+    ///     RunDate) blocks the new run (cross-user or same-user double-click).
+    ///     See <see cref="EnsureNoConcurrentGenerateAsync"/>.
     /// </summary>
     public async Task<LpmSimGenerateResult> GenerateAsync(LpmSimGenerateRequest req, CancellationToken ct = default)
     {
@@ -556,6 +599,16 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             throw new InvalidOperationException("Pick at least one Box Source (LPM and/or Non-LPM).");
         if (req.Seasons == LpmSimSeasonFlags.None)
             throw new InvalidOperationException("Pick at least one Season (Summer and/or Winter).");
+
+        // ---- 1.14.90 — Concurrency gate --------------------------------------
+        // Block any concurrent SIM Generate for the same (Country, RunDate).
+        // Uses the 1.14.67 Status="Running" marker on LPM_SimBatch + the same
+        // 30-minute stale-row safety window that CheckAsync uses, so a
+        // crashed mid-flight batch doesn't block new runs forever. The check
+        // catches BOTH cross-user races (User B clicks Generate while User
+        // A's run is still going) AND same-user double-clicks. Fails fast
+        // before paying for the SKU Max gate / EOM read / allocation.
+        await EnsureNoConcurrentGenerateAsync(req, ct);
 
         // ---- SKU Max existence gate ------------------------------------------
         // SKU Max is a separate user-driven build (decoupled from SIM Generate

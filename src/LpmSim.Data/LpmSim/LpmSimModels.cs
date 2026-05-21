@@ -436,3 +436,30 @@ public sealed class SkuMaxStaleException : InvalidOperationException
         Status = status;
     }
 }
+
+/// <summary>
+/// 1.14.90 — Thrown by <c>GenerateAsync</c> at its very start when another
+/// SIM Generate is already in flight for the same <c>(Country, RunDate)</c>.
+/// Two-user collisions (or a same-user double-click) on the same period
+/// would otherwise race on <c>LPM_SimBatch</c> writes; this exception lets
+/// the caller (the UI) surface a friendly warning naming the conflicting
+/// user instead of producing a generic error.
+///
+/// Carries the conflicting batch's metadata so the UI can render a
+/// targeted message (who started the run, when, batch number).
+/// </summary>
+public sealed class SimBatchAlreadyRunningException : InvalidOperationException
+{
+    public string   ConflictingUser    { get; }
+    public long     ConflictingBatchNo { get; }
+    public DateTime ConflictingStartTS { get; }
+
+    public SimBatchAlreadyRunningException(
+        string message, string conflictingUser, long conflictingBatchNo, DateTime conflictingStartTS)
+        : base(message)
+    {
+        ConflictingUser    = conflictingUser;
+        ConflictingBatchNo = conflictingBatchNo;
+        ConflictingStartTS = conflictingStartTS;
+    }
+}
