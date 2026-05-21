@@ -233,12 +233,24 @@ public sealed class WhItemsReportService
             --    planner flagged on the screenshot.
             -- 1.14.82: HoPrice (MAX) + SlashedQty (SUM) projected alongside WhQty.
             -- Both come from the same {whSrc} grain so they ride the same scan +
-            -- WHERE filter — no extra cost. MAX(HOPrice) keeps the result
-            -- deterministic when an item has pallets at different prices (rare).
+            -- WHERE filter — no extra cost.
+            --
+            -- 1.14.85 hotfix: HOPrice and Slashed are stored as varchar in
+            -- whboxitems / WHBoxItemsExport (not numeric), so:
+            --   * The original SUM(CAST(ISNULL(w.Slashed, 0) AS bigint))
+            --     fails with ''Error converting data type varchar to bigint''
+            --     whenever a row has a non-numeric Slashed value (blank, ''N'',
+            --     etc.) -- SQL Server resolves ISNULL(varchar, 0) by
+            --     converting the varchar to int first (int has higher type
+            --     precedence) and fails on the first bad value.
+            --   * MAX(w.HOPrice) on a varchar returns a lexicographic max,
+            --     which is wrong for prices (''9'' > ''100'').
+            -- TRY_CAST returns NULL on conversion failure instead of erroring;
+            -- ISNULL(...,0) collapses the NULLs back to 0 for the SUM.
             SELECT w.itemcode,
-                   WhQty      = SUM(CAST(ISNULL(w.Qty, 0)     AS bigint)),
-                   HoPrice    = MAX(w.HOPrice),
-                   SlashedQty = SUM(CAST(ISNULL(w.Slashed, 0) AS bigint))
+                   WhQty      = SUM(CAST(ISNULL(w.Qty, 0) AS bigint)),
+                   HoPrice    = MAX(TRY_CAST(w.HOPrice AS decimal(18, 2))),
+                   SlashedQty = SUM(ISNULL(TRY_CAST(w.Slashed AS bigint), 0))
               INTO #WhItemsAgg
               FROM {whSrc} w
              WHERE w.itemcode IS NOT NULL AND w.itemcode <> ''

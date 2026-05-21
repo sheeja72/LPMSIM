@@ -23,6 +23,46 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.85 — Hotfix: WH SKU Investigation "Error converting data type varchar to bigint" (2026-05-21)
+
+### What's wrong
+
+1.14.82 added two new aggregates to the `#WhItemsAgg` rollup in the WH SKU Investigation report — `HoPrice = MAX(w.HOPrice)` and `SlashedQty = SUM(CAST(ISNULL(w.Slashed, 0) AS bigint))`. As soon as 1.14.82 went live, **Load failed** with:
+
+> *Error converting data type varchar to bigint.*
+
+### Root cause
+
+Both `whboxitems.Slashed` and `whboxitems.HOPrice` are stored as **varchar**, not numeric. SQL Server's data-type precedence puts `int` above `varchar`, so my `ISNULL(w.Slashed, 0)` resolved by trying to convert the varchar to int **first** — and any non-numeric value in the column (blank string, `'N'`, etc.) blew the whole query up. The SUM never got a chance to run.
+
+A second, latent bug for `HOPrice`: `MAX(w.HOPrice)` on a varchar returns the lexicographic max, not the numeric max. `'9'` sorts *higher* than `'100'` lexically — so the displayed "max price" would have been wrong on items whose price strings differ in length, even on rows where the query didn't error.
+
+### Fix
+
+Both aggregates now use `TRY_CAST` (returns NULL on conversion failure instead of erroring) with the result coerced to numeric **before** the aggregate runs:
+
+```sql
+HoPrice    = MAX(TRY_CAST(w.HOPrice AS decimal(18, 2))),
+SlashedQty = SUM(ISNULL(TRY_CAST(w.Slashed AS bigint), 0))
+```
+
+- **Slashed** — non-numeric or NULL values fall through as `NULL`, which `ISNULL(...,0)` collapses to `0` for the SUM. Numeric strings (`'123'`) convert correctly.
+- **HOPrice** — non-numeric / NULL values fall through as `NULL` and are excluded from the MAX (`MAX` ignores NULLs). Numeric strings (`'12.50'`) convert to decimal and sort numerically.
+
+### Implementation notes
+
+- Single-line SQL change in `#WhItemsAgg` — no downstream consumers needed updating because the projected column types stayed the same (`decimal(18,2)` and `bigint`).
+- `TRY_CAST` has been in SQL Server since 2012 — available on every supported version.
+- The `#WhItemsBlocked` rollup that I also added in 1.14.82 was **not** affected: it reads `PriorSKUMax` from `dbo.LPM_SimItemSkuMaxExcluded`, which is declared `int NOT NULL` in migration 034 (no varchar-to-bigint risk).
+
+### Files changed
+
+- `src/LpmSim.Data/Reports/WhItemsReportService.cs` — the two new aggregates in `#WhItemsAgg` switched to `TRY_CAST`.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.84 → 1.14.85.
+- `CHANGELOG.md` — this section.
+
+---
+
 ## 1.14.84 — "Season" filter labels clarified on two pages (2026-05-21)
 
 ### What's new
