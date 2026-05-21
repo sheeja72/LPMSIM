@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.88 — Hotfix: country-linkage regression in 1.14.87 RR sort (UAE → OMAN ordering) (2026-05-21)
+
+### What's wrong
+
+1.14.87's `AllocateLineRoundRobin` rewrite sorted each grade tier by **MerchNeedMonth Balance DESC only**. That ignored `CountryPriority`, so for a UAE batch with the OMAN linkage active:
+
+- UAE Diamond store with MNM Balance = 50
+- OMAN Diamond store with MNM Balance = 80
+
+→ The OMAN store was picked **first** inside the Diamond tier (higher balance), even though the planner spec is **"OMAN should be after UAE stores"**.
+
+The 1a/2a sort was unaffected — it had been `CountryPriority ASC → PriorityRank ASC → WtAvgSold DESC` all along (preserved correctly through the 1.14.87 rewrite). The bug was confined to the new 1b/2b RR within-tier sort.
+
+### Fix
+
+`CountryPriority` is restored as the **primary** within-tier sort key in `AllocateLineRoundRobin`. The within-tier order is now:
+
+```
+OrderBy(CountryPriority)             ← parent country first (UAE before OMAN)
+  .ThenByDescending(MNM Balance)     ← within country, most-undersupplied first
+```
+
+Result inside each grade tier:
+
+1. UAE Diamond stores, sorted by MNM Balance DESC
+2. *then* OMAN Diamond stores, sorted by MNM Balance DESC
+3. *then* the same pattern in Platinum, then Gold, then Silver
+
+This matches the 1a/2a sort behaviour and the planner spec.
+
+### Impact
+
+- **Country-linked runs** (UAE+OMAN today, any future parent/child setup): RR now correctly drains the parent's stores first inside each grade.
+- **Single-country runs**: zero behavioural change. Every store has `CountryPriority = 0` for these runs, so the secondary sort key (MNM Balance) drives the order entirely — identical to 1.14.87.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `AllocateLineRoundRobin`: `OrderByDescending(MNM Balance)` → `OrderBy(CountryPriority).ThenByDescending(MNM Balance)`.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.87 → 1.14.88.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar footer shows `1.14.88`.
+2. Run a UAE batch (with the OMAN linkage active). On the Allocation Trace tab for any item with both UAE and OMAN graded stores in the same Division, confirm 1b/2b RR rows appear with UAE store IDs **before** OMAN store IDs within the same grade tier.
+
+---
+
 ## 1.14.87 — SIM allocator refactor: drop Week, use MerchNeedMonth + Grade tiers in RR (2026-05-21)
 
 ### What's new

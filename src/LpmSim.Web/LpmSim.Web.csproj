@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.87</Version>
-    <AssemblyVersion>1.14.87.0</AssemblyVersion>
-    <FileVersion>1.14.87.0</FileVersion>
-    <InformationalVersion>1.14.87 (SIM allocator refactor per planner Option 1 spec — drop Week machinery, use MerchNeedMonth + Grade tiers. Phase 1a/2a caps: SKUMax + MerchNeedMonth (was MerchNeedWeek); legacy EOM Balance entry gate REMOVED (MNM subsumes it). Phase 1b/2b RR: stores grouped by Grade tier (Diamond → Platinum → Gold → Silver), within each tier sorted by MerchNeedMonth Balance DESC (sort key only — most-undersupplied first), per-store quantum varies by tier — 2 units for Diamond+Platinum, 1 unit for Gold+Silver. SKUMax honoured in all 4 phases; MerchNeedMonth is a cap in 1a/2a only (bypassed in 1b/2b — override deliberately lets partial boxes push past monthly demand). Stores without one of the four recognised grades are excluded from RR entirely. Week dropdown removed from SIM Generate page; IgnoreMerchNeed toggle stays (now means ignore MerchNeedMonth in 1a/2a). Report columns labelled "Merch Need (Week)" left as-is for now (informational; allocator no longer reads them).)</InformationalVersion>
+    <Version>1.14.88</Version>
+    <AssemblyVersion>1.14.88.0</AssemblyVersion>
+    <FileVersion>1.14.88.0</FileVersion>
+    <InformationalVersion>1.14.88 hotfix (Country-linkage regression in 1.14.87 RR rewrite — the new grade-tier sort in 1b/2b only used MerchNeedMonth Balance DESC, which mixed parent and child countries inside the same grade. A UAE batch with OMAN linkage could pick an OMAN Diamond store before a UAE Diamond store when OMAN's MNM Balance was higher, violating the "OMAN after UAE" planner rule. Fix: CountryPriority ASC is now the PRIMARY within-tier sort key, MNM Balance DESC the secondary — same shape as the 1a/2a sort. Single-country runs unaffected because every store has CountryPriority = 0 in that case.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

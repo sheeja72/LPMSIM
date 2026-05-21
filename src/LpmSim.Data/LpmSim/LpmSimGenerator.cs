@@ -2089,15 +2089,24 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 LineQty: line.Qty, Take: 0, Decision: "SKIP_NO_GRADE"));
             return 0;
         }
-        // Pre-sort each tier by MerchNeedMonth Balance DESC, once. Balance
-        // computed against the CURRENT cumDiv (which already reflects
-        // 1a/2a allocations). Stores with the most monthly headroom left
-        // are picked first within their tier.
+        // Pre-sort each tier by (CountryPriority ASC, MerchNeedMonth Balance DESC).
+        // 1.14.88 — CountryPriority added as the PRIMARY within-tier sort key
+        // (1.14.87 originally sorted by MNM Balance only — that mixed parent
+        // and child countries inside the same grade tier, so an OMAN Diamond
+        // store with higher MNM could be picked before a UAE Diamond store
+        // with lower MNM). Now the parent country's stores come first inside
+        // each grade tier (UAE Diamond → OMAN Diamond → UAE Platinum → OMAN
+        // Platinum → ...), matching the 1a/2a sort behaviour and the planner
+        // spec "OMAN should be after UAE stores".
+        // For single-country runs (no LPM_CountryLink rows for the parent),
+        // every store has CountryPriority = 0 so the secondary MNM-Balance
+        // sort drives the order entirely — no behaviour change.
         foreach (var g in GradeOrder)
         {
             if (!byGrade.TryGetValue(g, out var gStores)) continue;
             byGrade[g] = gStores
-                .OrderByDescending(s =>
+                .OrderBy(s => s.CountryPriority)        // 1.14.88 — parent country first
+                .ThenByDescending(s =>
                     s.MerchNeedMonth
                     - allocStoreDiv.GetValueOrDefault((s.StoreID, divCode), 0))
                 .ToList();
