@@ -201,6 +201,36 @@ public record BatchAggregates(int Lines, int Stores, int Boxes, long TotalQty)
 }
 
 /// <summary>
+/// 1.14.93 — One row of the per-UPC Allocation Gap report (new tab next to
+/// the existing per-box Allocation Gap tab). Grain = one ItemCode for the
+/// chosen batch. Lists items where the SIM didn't fully drain the eligible
+/// warehouse qty, along with the dominant SKIP reason from
+/// <c>LPMSIM_AllocTrace</c> so the planner can see why per item.
+/// </summary>
+/// <param name="EligibleWhQty">Qty in eligible whboxitems that ENTERED the
+///   SIM box pool for this item — sum of <c>MAX(LineQty)</c> per
+///   <c>(BoxNo, ItemCode)</c> in <c>LPMSIM_AllocTrace</c> for the batch.
+///   Matches what the allocator actually considered (after every filter:
+///   ShopEligible, PalletCategory, Season, LPM/Non-LPM, LPM Months,
+///   Warehouses, closed-box exclusion).</param>
+/// <param name="SimQty">Qty actually placed — <c>SUM(Qty)</c> from
+///   <c>LPMSIM_Output</c> for the batch grouped by ItemCode.</param>
+/// <param name="RemainingQty"><c>EligibleWhQty − SimQty</c>. The "gap".</param>
+/// <param name="TopReason">The most-frequent <c>SKIP_*</c> Decision in the
+///   AllocTrace for this item — the dominant reason a candidate store was
+///   skipped. Empty string when no SKIP rows exist for the item (rare —
+///   usually means the allocator simply ran out of candidate stores rather
+///   than hitting an explicit skip rule).</param>
+public record ItemAllocationGapRow(
+    string ItemCode,
+    string ItemName,
+    string Division,
+    long   EligibleWhQty,
+    long   SimQty,
+    long   RemainingQty,
+    string TopReason);
+
+/// <summary>
 /// One row of the "Allocation Result" matrix at the top of the SIM Generate
 /// preview. Grain = (Kind, Warehouse). Each row shows how many distinct items
 /// / boxes flowed from a particular source-kind × warehouse pair, the
@@ -2265,6 +2295,123 @@ SELECT {string.Join(", ", selectParts)}
                           d.TopReason,
                           d.Reasons))
                       .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// 1.14.93 — Per-UPC Allocation Gap for the given batch. One row per
+    /// ItemCode where <c>EligibleWhQty − SimQty &gt; 0</c>, with the dominant
+    /// SKIP reason from <c>LPMSIM_AllocTrace</c>.
+    ///
+    /// <para>Definitions (matches the planner's mental model):</para>
+    /// <list type="bullet">
+    ///   <item><c>EligibleWhQty</c> = qty in eligible whboxitems that ENTERED
+    ///         the SIM box pool for the item. Source: <c>SUM(MAX(LineQty))</c>
+    ///         per <c>(BoxNo, ItemCode)</c> in <c>LPMSIM_AllocTrace</c> for
+    ///         the batch. LineQty is the same across all store-decisions for
+    ///         the same box-line, so MAX dedupes correctly.</item>
+    ///   <item><c>SimQty</c> = SUM(Qty) from <c>LPMSIM_Output</c> for the
+    ///         batch grouped by Itemcode.</item>
+    ///   <item><c>RemainingQty</c> = <c>EligibleWhQty − SimQty</c>.</item>
+    ///   <item><c>TopReason</c> = most-frequent <c>SKIP_*</c> Decision in
+    ///         the AllocTrace for the item (e.g. SKIP_SKUMAX, SKIP_MNM,
+    ///         SKIP_NO_GRADE, SKIP_NO_DIV, SKIP_NO_EOM, SKIP_EOM_BALANCE).
+    ///         Tie-broken alphabetically. Empty string when no SKIP rows
+    ///         exist for the item (rare).</item>
+    /// </list>
+    ///
+    /// <para>Item description from <c>HODATA.dbo.Itemmaster</c> and Division
+    /// from <c>upc_subclass × subclassmaster × LPMSIM.dbo.Division</c> —
+    /// same lookup shape used by WH SKU Investigation.</para>
+    /// </summary>
+    public async Task<List<ItemAllocationGapRow>> GetItemAllocationGapAsync(
+        long batchNo, CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
+
+        const string sql = @"
+            ;WITH BoxLineEligible AS (
+                -- 1 row per (BoxNo, ItemCode). LineQty is identical across
+                -- store decisions for the same box-line, so MAX is fine.
+                SELECT BoxNo, ItemCode, LineQty = MAX(LineQty)
+                  FROM dbo.LPMSIM_AllocTrace
+                 WHERE LPMBatchNo = @batchNo
+                 GROUP BY BoxNo, ItemCode
+            ),
+            ItemEligible AS (
+                SELECT ItemCode, EligibleWhQty = SUM(CAST(LineQty AS bigint))
+                  FROM BoxLineEligible
+                 GROUP BY ItemCode
+            ),
+            ItemAllocated AS (
+                SELECT Itemcode AS ItemCode,
+                       SimQty = SUM(CAST(Qty AS bigint))
+                  FROM dbo.LPMSIM_Output
+                 WHERE LPMBatchNo = @batchNo
+                 GROUP BY Itemcode
+            ),
+            ItemReasons AS (
+                -- Count of SKIP rows per (Item, Decision). Used to pick the
+                -- dominant skip reason per item.
+                SELECT ItemCode, Decision, Cnt = COUNT_BIG(*)
+                  FROM dbo.LPMSIM_AllocTrace
+                 WHERE LPMBatchNo = @batchNo
+                   AND Decision LIKE 'SKIP_%'
+                 GROUP BY ItemCode, Decision
+            ),
+            ItemTopReason AS (
+                SELECT ItemCode, TopReason = Decision,
+                       rn = ROW_NUMBER() OVER
+                            (PARTITION BY ItemCode ORDER BY Cnt DESC, Decision)
+                  FROM ItemReasons
+            ),
+            ItemDiv AS (
+                -- Same shape as the WH SKU Investigation Division lookup.
+                SELECT u.itemcode, DivisionName = MIN(d.Division)
+                  FROM Datareporting.dbo.upc_subclass    u
+                  INNER JOIN Datareporting.dbo.subclassmaster sm ON sm.MH4ID = u.MH4ID
+                  INNER JOIN LPMSIM.dbo.Division               d
+                          ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
+                         AND d.IsActive = 1
+                 GROUP BY u.itemcode
+            )
+            SELECT  ie.ItemCode,
+                    ItemName     = ISNULL(im.description, ''),
+                    Division     = ISNULL(idv.DivisionName, ''),
+                    EligibleWhQty = ie.EligibleWhQty,
+                    SimQty        = ISNULL(ia.SimQty, 0),
+                    RemainingQty  = ie.EligibleWhQty - ISNULL(ia.SimQty, 0),
+                    TopReason     = ISNULL(itr.TopReason, '')
+              FROM  ItemEligible ie
+              LEFT  JOIN ItemAllocated ia       ON ia.ItemCode = ie.ItemCode
+              LEFT  JOIN ItemTopReason itr      ON itr.ItemCode = ie.ItemCode AND itr.rn = 1
+              LEFT  JOIN ItemDiv idv            ON idv.itemcode = ie.ItemCode
+              LEFT  JOIN HODATA.dbo.Itemmaster im
+                      ON CAST(im.Itemcode AS nvarchar(64)) = ie.ItemCode
+             WHERE (ie.EligibleWhQty - ISNULL(ia.SimQty, 0)) > 0
+             ORDER BY RemainingQty DESC, ie.ItemCode;";
+
+        using var cmd = (SqlCommand)conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
+        cmd.CommandTimeout = 180;
+
+        var rows = new List<ItemAllocationGapRow>();
+        using var rdr = await cmd.ExecuteReaderAsync(ct);
+        while (await rdr.ReadAsync(ct))
+        {
+            rows.Add(new ItemAllocationGapRow(
+                ItemCode:      rdr.IsDBNull(0) ? "" : rdr.GetString(0),
+                ItemName:      rdr.IsDBNull(1) ? "" : rdr.GetString(1),
+                Division:      rdr.IsDBNull(2) ? "" : rdr.GetString(2),
+                EligibleWhQty: rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3),
+                SimQty:        rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4),
+                RemainingQty:  rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5),
+                TopReason:     rdr.IsDBNull(6) ? "" : rdr.GetString(6)));
+        }
+        return rows;
     }
 }
 

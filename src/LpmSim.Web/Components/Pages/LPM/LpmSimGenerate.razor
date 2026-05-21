@@ -1636,6 +1636,139 @@
             }
         </MudTabPanel>
 
+        @* ─────────────────────────────────────────────────────────────────
+           1.14.93 — Allocation Gap (per UPC) tab. Same idea as the per-box
+           tab above but rolled up by ItemCode: for each item the SIM didn't
+           fully drain, show how much entered SIM, how much placed, what's
+           left, and the dominant SKIP reason from LPMSIM_AllocTrace.
+           ───────────────────────────────────────────────────────────── *@
+        <MudTabPanel Text="Gap by UPC" Icon="@Icons.Material.Filled.QrCode2" OnClick="LoadItemGapAsync">
+            <MudText Typo="Typo.subtitle2" Class="mb-1">Per-UPC view: which items didn't fully ship and why</MudText>
+            <MudText Typo="Typo.caption" Color="Color.Secondary" Class="d-block mb-3">
+                <strong>Eligible WH Qty</strong> = qty in eligible whboxitems that entered the SIM box pool for this item.
+                <strong>SIM Qty</strong> = qty actually placed by the allocator.
+                <strong>Remaining</strong> = <code>Eligible − SIM</code>.
+                <strong>Top Reason</strong> = most-frequent <code>SKIP_*</code> Decision in the AllocTrace for the item.
+                Only items where <code>Remaining &gt; 0</code> are listed; the Trace tab has the per-(Box, Item, Store) detail.
+            </MudText>
+
+            <MudGrid Spacing="2" Class="mb-2">
+                <MudItem xs="12" md="3">
+                    <MudTextField T="string" Label="Itemcode / name / division (contains)" @bind-Value="_itemGapFilter"
+                                  Variant="Variant.Outlined" Margin="Margin.Dense"
+                                  Clearable Immediate="true" DebounceInterval="300" />
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudSelect T="string" Label="Top Reason" @bind-Value="_itemGapReasonFilter"
+                               Variant="Variant.Outlined" Margin="Margin.Dense" Clearable>
+                        <MudSelectItem T="string" Value="@string.Empty">All</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_SKUMAX")">SKIP_SKUMAX</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_MNM")">SKIP_MNM</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_GRADE")">SKIP_NO_GRADE</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_DIV")">SKIP_NO_DIV</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_NO_EOM")">SKIP_NO_EOM</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_EOM_BALANCE")">SKIP_EOM_BALANCE (legacy)</MudSelectItem>
+                        <MudSelectItem T="string" Value="@("SKIP_TARGET")">SKIP_TARGET (legacy)</MudSelectItem>
+                    </MudSelect>
+                </MudItem>
+                <MudItem xs="6" md="2">
+                    <MudNumericField T="long?" Label="Min Remaining"
+                                     Value="_itemGapMinRemaining"
+                                     ValueChanged="(long? v) => { _itemGapMinRemaining = v; StateHasChanged(); }"
+                                     Variant="Variant.Outlined" Margin="Margin.Dense" Min="0" Step="10" Clearable />
+                </MudItem>
+                <MudItem xs="12" md="5" Class="d-flex align-end gap-2">
+                    <MudButton Color="Color.Primary" Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.PlayArrow"
+                               Disabled="_loadingItemGap" OnClick="LoadItemGapAsync">
+                        Load
+                    </MudButton>
+                    <MudButton Variant="Variant.Text" Size="Size.Small" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.FilterAltOff"
+                               OnClick="ClearItemGapFilters">
+                        Clear filters
+                    </MudButton>
+                    <MudButton Variant="Variant.Outlined" Size="Size.Small" Color="Color.Success" DropShadow="false"
+                               StartIcon="@Icons.Material.Filled.Download"
+                               Disabled="@(_itemGapRows.Count == 0)" OnClick="ExportItemGapAsync">
+                        Excel
+                    </MudButton>
+                </MudItem>
+            </MudGrid>
+
+            @if (_loadingItemGap)
+            {
+                <MudProgressLinear Color="Color.Primary" Indeterminate="true" Class="mb-2" />
+            }
+
+            @if (FilteredItemGap.Any())
+            {
+                var fig = FilteredItemGap.ToList();
+                var igTotalElig      = fig.Sum(r => r.EligibleWhQty);
+                var igTotalSim       = fig.Sum(r => r.SimQty);
+                var igTotalRemaining = fig.Sum(r => r.RemainingQty);
+
+                <MudTable T="ItemAllocationGapRow" Items="fig" Hover Striped Dense
+                          FixedHeader Height="55vh" AllowUnsorted="false">
+                    <HeaderContent>
+                        <MudTh><div class="th-total">@fig.Count.ToString("N0") items</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.ItemCode">Itemcode</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.ItemName">Item Name</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.Division">Division</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total">@igTotalElig.ToString("N0")</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.EligibleWhQty">Eligible<br />WH Qty</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total">@igTotalSim.ToString("N0")</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total" style="background:#fef9c3;">@igTotalRemaining.ToString("N0")</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" InitialDirection="SortDirection.Descending"
+                                               SortBy="r => r.RemainingQty">Remaining<br />Qty</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.TopReason">Top Reason</MudTableSortLabel></MudTh>
+                    </HeaderContent>
+                    <RowTemplate>
+                        <MudTd><code>@context.ItemCode</code></MudTd>
+                        <MudTd>@context.ItemName</MudTd>
+                        <MudTd>@context.Division</MudTd>
+                        <MudTd Style="text-align:right;">@context.EligibleWhQty.ToString("N0")</MudTd>
+                        <MudTd Style="text-align:right;">@context.SimQty.ToString("N0")</MudTd>
+                        <MudTd Style="text-align:right;font-weight:600;background:#fffbeb;">@context.RemainingQty.ToString("N0")</MudTd>
+                        <MudTd>
+                            @if (!string.IsNullOrEmpty(context.TopReason))
+                            {
+                                <MudTooltip Text="@GapReasonTooltip(context.TopReason)" Placement="Placement.Left">
+                                    @{
+                                        var (chipColor, chipLabel) = GapReasonChip(context.TopReason);
+                                    }
+                                    <MudChip T="string" Size="Size.Small" Color="@chipColor">@chipLabel</MudChip>
+                                </MudTooltip>
+                            }
+                            else
+                            {
+                                <span style="color:#94a3b8;">—</span>
+                            }
+                        </MudTd>
+                    </RowTemplate>
+                    <PagerContent>
+                        <MudTablePager PageSizeOptions="new[] { 50, 100, 200, 500 }" />
+                    </PagerContent>
+                </MudTable>
+            }
+            else if (_itemGapLoadedOnce && !_loadingItemGap)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    No per-UPC gap rows for this batch (every eligible item was fully allocated, OR the batch was generated before 1.14.26 so no AllocTrace exists).
+                </MudAlert>
+            }
+            else if (!_itemGapLoadedOnce)
+            {
+                <MudAlert Severity="Severity.Info" Variant="Variant.Outlined">
+                    Click <strong>Load</strong> to fetch the per-UPC allocation gap for batch #@_readiness?.CurrentBatchNo.
+                </MudAlert>
+            }
+        </MudTabPanel>
+
         <MudTabPanel Text="Item Details" Icon="@Icons.Material.Filled.ListAlt">
             @if (_loadingItems)
             {
@@ -2659,6 +2792,16 @@
     private string _gapKindFilter    = "";
     private string _gapReasonFilter  = "";
     private long?  _gapMinRemaining;
+
+    // 1.14.93 — Per-UPC Allocation Gap tab state. Same shape as the per-box
+    // Allocation Gap above; the data comes from
+    // LpmSimReportService.GetItemAllocationGapAsync.
+    private List<ItemAllocationGapRow> _itemGapRows = new();
+    private bool   _loadingItemGap;
+    private bool   _itemGapLoadedOnce;
+    private string _itemGapFilter        = "";   // contains-match: itemcode / name / division
+    private string _itemGapReasonFilter  = "";   // exact TopReason match (empty = all)
+    private long?  _itemGapMinRemaining;
     private BatchAggregates? _aggregates;
     // (Kind × Warehouse) breakdown for the new "Allocation Result" table.
     // Loaded alongside _aggregates whenever a batch is opened/refreshed.
@@ -3000,6 +3143,15 @@
         "EXCLUDED_BY_RULE" => "Every item in this box has SKUMax = 0 at every store eligible for its division. Explicit exclusion set by SKU Max Rules 1-7 (ExcludeExport_Planning / ExcludeSubclass / RemoveItemsFromTransfer / ExcludeItemsMFCS / DeptPriceMaxQty_MH4 with maxqty=0 / LPM_StoreDivAccess deactivation / LPM_StoreDeptAccess deactivation). Distinct from CAP — this is a business rule blocking allocation, not a capacity limit.",
         "CAP"              => "Box reached the allocator but every eligible store hit either the SKU Max cap or the EOM Merch Need (Week) cap. Enable Verbose Trace on the run and use the Allocation Trace tab to see the SKU vs Target split.",
         "UNKNOWN"          => "Defensive fallback — diagnostic couldn't classify this box. Should never appear in practice; please report.",
+        // 1.14.93 — Specific SKIP_* reasons surfaced by the per-UPC Gap tab
+        // (which reads LPMSIM_AllocTrace directly rather than the rolled-up
+        // per-box diagnostic). These are the raw Decision values written by
+        // AllocateLineNormal / AllocateLineRoundRobin.
+        "SKIP_SKUMAX"      => "Per-(Store, Item) SKU Max ceiling was already hit — the allocator can't push more units to any candidate store for this item without exceeding the cap. Often caused by stores already carrying close to SKU Max in SOH, plus prior phases already filling the rest.",
+        "SKIP_MNM"         => "MerchNeed (Month) cap was hit for the (Store, Division) — the store is already at or above its monthly demand for the item's division. (Pre-1.14.87 trace rows say SKIP_TARGET — same meaning, was the Week cap.)",
+        "SKIP_TARGET"      => "Legacy SKIP_MNM (pre-1.14.87 — back when the cap was MerchNeedWeek). Same meaning: the store's monthly/weekly demand was already met.",
+        "SKIP_EOM_BALANCE" => "Legacy entry gate (removed in 1.14.87): the (Store, Div) was already at or above its TargetEOM, so the allocator wouldn't ship anything more to that division. Subsumed by SKIP_MNM in 1.14.87+.",
+        "SKIP_NO_GRADE"    => "Store has no recognised grade (Diamond / Platinum / Gold / Silver) in LPM_EOM_Output. Only appears in 1b/2b RR rows — Phase 1a/2a use PriorityRank ordering and don't require a grade.",
         _                  => code,
     };
 
@@ -3012,6 +3164,13 @@
         "EXCLUDED_BY_RULE" => (Color.Secondary, "Excluded by Rule"),
         "CAP"              => (Color.Error,     "Cap hit"),
         "UNKNOWN"          => (Color.Default,   "Unknown"),
+        // 1.14.93 — raw SKIP_* Decision values from LPMSIM_AllocTrace,
+        // surfaced by the per-UPC Gap tab.
+        "SKIP_SKUMAX"      => (Color.Error,     "SKU Max"),
+        "SKIP_MNM"         => (Color.Error,     "MerchNeed Month"),
+        "SKIP_TARGET"      => (Color.Error,     "MerchNeed (legacy)"),
+        "SKIP_EOM_BALANCE" => (Color.Warning,   "EOM Balance (legacy)"),
+        "SKIP_NO_GRADE"    => (Color.Warning,   "No Grade"),
         _                  => (Color.Default,   code),
     };
 
@@ -3060,6 +3219,134 @@
             var fileName = $"{CurrentBatchTag()}AllocationGap_Batch{_readiness?.CurrentBatchNo}_{DateTime.Now:yyyy-MM-dd_HHmm}.xlsx";
             await JS.InvokeVoidAsync("lpmDownload", url, fileName);
             Snackbar.Add($"Downloaded {_gapRows.Count:N0} row(s) to {fileName}.", Severity.Success);
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Export failed: {ex.Message}", Severity.Error);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // 1.14.93 — Per-UPC Allocation Gap tab helpers
+    // ─────────────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Loads the per-UPC allocation-gap rows for the current batch. Server
+    /// returns one row per Item with EligibleWhQty / SimQty / RemainingQty /
+    /// TopReason; the UI applies the in-memory contains-filter on top.
+    /// </summary>
+    private async Task LoadItemGapAsync()
+    {
+        if (_readiness?.CurrentBatchNo is not long batchNo) return;
+        _loadingItemGap = true; StateHasChanged();
+        try
+        {
+            _itemGapRows = await Reports.GetItemAllocationGapAsync(batchNo);
+            _itemGapLoadedOnce = true;
+        }
+        catch (Exception ex)
+        {
+            Snackbar.Add($"Load per-UPC gap failed: {ex.Message}", Severity.Error,
+                cfg => cfg.VisibleStateDuration = 8000);
+            _itemGapRows = new();
+        }
+        finally
+        {
+            _loadingItemGap = false; StateHasChanged();
+        }
+    }
+
+    private void ClearItemGapFilters()
+    {
+        _itemGapFilter        = "";
+        _itemGapReasonFilter  = "";
+        _itemGapMinRemaining  = null;
+        StateHasChanged();
+    }
+
+    /// <summary>
+    /// Client-side filter for the per-UPC gap table. Three predicates:
+    ///   (1) contains-match on Itemcode / ItemName / Division
+    ///   (2) exact match on TopReason (when set)
+    ///   (3) RemainingQty >= MinRemaining (when set)
+    /// </summary>
+    private IEnumerable<ItemAllocationGapRow> FilteredItemGap
+    {
+        get
+        {
+            IEnumerable<ItemAllocationGapRow> rows = _itemGapRows;
+            if (!string.IsNullOrWhiteSpace(_itemGapFilter))
+            {
+                var f = _itemGapFilter.Trim();
+                rows = rows.Where(r =>
+                    (r.ItemCode != null && r.ItemCode.Contains(f, StringComparison.OrdinalIgnoreCase)) ||
+                    (r.ItemName != null && r.ItemName.Contains(f, StringComparison.OrdinalIgnoreCase)) ||
+                    (r.Division != null && r.Division.Contains(f, StringComparison.OrdinalIgnoreCase)));
+            }
+            if (!string.IsNullOrEmpty(_itemGapReasonFilter))
+            {
+                rows = rows.Where(r => string.Equals(r.TopReason, _itemGapReasonFilter, StringComparison.OrdinalIgnoreCase));
+            }
+            if (_itemGapMinRemaining is long min)
+            {
+                rows = rows.Where(r => r.RemainingQty >= min);
+            }
+            return rows;
+        }
+    }
+
+    private async Task ExportItemGapAsync()
+    {
+        if (_itemGapRows.Count == 0)
+        {
+            Snackbar.Add("Nothing to export — Load the per-UPC gap first.", Severity.Info);
+            return;
+        }
+        try
+        {
+            var rows = FilteredItemGap.ToList();
+            using var wb = new XLWorkbook();
+            var ws = wb.Worksheets.Add("Gap by UPC");
+            string[] headers = { "Itemcode", "Item Name", "Division",
+                                 "Eligible WH Qty", "SIM Qty", "Remaining Qty", "Top Reason" };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                ws.Cell(1, i + 1).Value = headers[i];
+                ws.Cell(1, i + 1).Style.Font.Bold = true;
+                ws.Cell(1, i + 1).Style.Fill.BackgroundColor = XLColor.FromHtml("#0f172a");
+                ws.Cell(1, i + 1).Style.Font.FontColor = XLColor.White;
+            }
+            int row = 2;
+            foreach (var r in rows)
+            {
+                ws.Cell(row, 1).Value = r.ItemCode;
+                ws.Cell(row, 2).Value = r.ItemName;
+                ws.Cell(row, 3).Value = r.Division;
+                ws.Cell(row, 4).Value = r.EligibleWhQty;
+                ws.Cell(row, 5).Value = r.SimQty;
+                ws.Cell(row, 6).Value = r.RemainingQty;
+                ws.Cell(row, 7).Value = r.TopReason;
+                row++;
+            }
+            // TOTAL row.
+            var totalRow = rows.Count + 2;
+            ws.Cell(totalRow, 1).Value = $"TOTAL ({rows.Count:N0} items)";
+            ws.Cell(totalRow, 1).Style.Font.Bold = true;
+            ws.Cell(totalRow, 4).Value = rows.Sum(r => r.EligibleWhQty);
+            ws.Cell(totalRow, 5).Value = rows.Sum(r => r.SimQty);
+            ws.Cell(totalRow, 6).Value = rows.Sum(r => r.RemainingQty);
+            for (int c = 4; c <= 6; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
+            ws.Range(2, 4, totalRow, 6).Style.NumberFormat.Format = "#,##0";
+            ws.Columns().AdjustToContents();
+
+            using var ms = new MemoryStream();
+            wb.SaveAs(ms);
+            var bytes = ms.ToArray();
+            var b64 = Convert.ToBase64String(bytes);
+            var url = $"data:application/octet-stream;base64,{b64}";
+            var fileName = $"{CurrentBatchTag()}AllocationGap_ByUPC_Batch{_readiness?.CurrentBatchNo}_{DateTime.Now:yyyy-MM-dd_HHmm}.xlsx";
+            await JS.InvokeVoidAsync("lpmDownload", url, fileName);
+            Snackbar.Add($"Downloaded {rows.Count:N0} row(s) to {fileName}.", Severity.Success);
         }
         catch (Exception ex)
         {

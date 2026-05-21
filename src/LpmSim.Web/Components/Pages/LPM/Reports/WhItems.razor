@@ -139,8 +139,10 @@
     var totFill  = _rows.Sum(r => r.ToFillQty);
     // 1.14.82 — Totals for the four new columns. HO Price is averaged
     // (not summed — adding prices across items is meaningless); the
-    // three Qty/Count columns are summed.
-    var totSlash = _rows.Sum(r => r.SlashedQty);
+    // two Qty/Count columns are summed.
+    // 1.14.86 — Slashed is a per-item Y/N flag now (was misread as Qty).
+    // Footer shows the count of items where the flag is Y.
+    var totSlashedItems = _rows.Count(r => r.IsSlashed);
     var totBlk   = _rows.Sum(r => r.BlockedQty);
     var totBlkSt = _rows.Sum(r => r.BlockedStores);
     var avgPrice = _rows.Count > 0 ? _rows.Average(r => r.HoPrice) : 0m;
@@ -195,19 +197,25 @@
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.WhQty">WH Qty</MudTableSortLabel>
             </MudTh>
-            @* 1.14.82 — Slashed Qty (SUM(whboxitems.Slashed)) right after WH Qty,
-               grouping the warehouse-source quantity columns together. *@
-            <MudTh Style="text-align:right;">
-                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SlashedQty">Slashed Qty</MudTableSortLabel>
+            @* 1.14.82 — Slashed flag (MAX(whboxitems.Slashed = 'Y') per item)
+               right after WH Qty. 1.14.86 — column is a Y/N flag, not a qty
+               (the source column is Y/N text). Y = at least one in-scope
+               pallet for this item has Slashed = 'Y'; N = none. *@
+            <MudTh Style="text-align:center;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.IsSlashed">Slashed</MudTableSortLabel>
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.StoresSoh">Stores SOH</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
-                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SkuMax">Total SKU Max</MudTableSortLabel>
+            @* 1.14.92 — Explicit <br /> so the 3-word labels wrap consistently
+               at the qualifier (Total / Avg) instead of inheriting a
+               browser-arbitrary break that hid the "Total" and "Avg" prefixes
+               and made both columns read as just "SKU Max". *@
+            <MudTh Style="text-align:right;min-width:80px;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SkuMax">Total<br />SKU Max</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
-                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.AvgSkuMax">Avg SKU Max</MudTableSortLabel>
+            <MudTh Style="text-align:right;min-width:80px;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.AvgSkuMax">Avg<br />SKU Max</MudTableSortLabel>
             </MudTh>
             @* 1.14.82 — Blocked Qty + Blocked Stores from LPM_SimItemSkuMaxExcluded
                (selected country, latest period). Sits next to the SKU Max columns
@@ -232,7 +240,19 @@
                doesn't masquerade as a real 0.00 reading. *@
             <MudTd Style="text-align:right;">@(context.HoPrice > 0 ? context.HoPrice.ToString("N2") : "—")</MudTd>
             <MudTd Style="text-align:right;">@context.WhQty.ToString("N0")</MudTd>
-            <MudTd Style="text-align:right;">@context.SlashedQty.ToString("N0")</MudTd>
+            @* 1.14.86 — Slashed Y/N badge. Y in red to draw the eye (slashed
+               stock is the exception, not the norm); N in muted grey so it
+               recedes. *@
+            <MudTd Style="text-align:center;">
+                @if (context.IsSlashed)
+                {
+                    <span style="color:#dc2626;font-weight:600;">Y</span>
+                }
+                else
+                {
+                    <span style="color:#94a3b8;">N</span>
+                }
+            </MudTd>
             <MudTd Style="text-align:right;">@context.StoresSoh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.SkuMax.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.AvgSkuMax.ToString("N1")</MudTd>
@@ -251,7 +271,9 @@
                zero-priced. *@
             <MudTd Style="text-align:right;font-weight:600;">@(avgPrice > 0 ? avgPrice.ToString("N2") + " avg" : "—")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totWh.ToString("N0")</MudTd>
-            <MudTd Style="text-align:right;font-weight:600;">@totSlash.ToString("N0")</MudTd>
+            @* 1.14.86 — Slashed footer = count of items where the flag is Y
+               (the column is Y/N, not a quantity, so SUM doesn't apply). *@
+            <MudTd Style="text-align:center;font-weight:600;">@totSlashedItems.ToString("N0") Y</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totSoh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totSku.ToString("N0")</MudTd>
             @* Avg-of-averages across loaded rows — equal weight per item.
@@ -403,11 +425,12 @@ else
             using var wb = new XLWorkbook();
             var ws = wb.Worksheets.Add("WH SKU Investigation");
             // 1.14.82 — Four new columns inserted to match the on-screen order:
-            //   HO Price after Brand (col 6); Slashed Qty after WH Qty (col 8);
+            //   HO Price after Brand (col 6); Slashed flag after WH Qty (col 8);
             //   Blocked Qty + Blocked Stores after Avg SKU Max (cols 12-13).
             // To Fill Qty shifts from col 10 → col 14.
+            // 1.14.86 — column 8 is now "Slashed" (Y/N text), not "Slashed Qty".
             string[] headers = { "Itemcode", "Item Name", "Division", "Department", "Brand",
-                                 "HO Price", "WH Qty", "Slashed Qty", "Stores SOH",
+                                 "HO Price", "WH Qty", "Slashed", "Stores SOH",
                                  "Total SKU Max", "Avg SKU Max", "Blocked Qty", "Blocked Stores",
                                  "To Fill Qty" };
             for (int i = 0; i < headers.Length; i++)
@@ -426,7 +449,7 @@ else
                 ws.Cell(row, 5).Value  = r.Brand;
                 ws.Cell(row, 6).Value  = r.HoPrice;        // 1.14.82
                 ws.Cell(row, 7).Value  = r.WhQty;
-                ws.Cell(row, 8).Value  = r.SlashedQty;     // 1.14.82
+                ws.Cell(row, 8).Value  = r.IsSlashed ? "Y" : "N";  // 1.14.86 — Y/N flag, was misread as Qty in 1.14.82
                 ws.Cell(row, 9).Value  = r.StoresSoh;
                 ws.Cell(row, 10).Value = r.SkuMax;
                 ws.Cell(row, 11).Value = r.AvgSkuMax;
@@ -442,7 +465,9 @@ else
             ws.Cell(totalRow, 1).Style.Font.Bold = true;
             ws.Cell(totalRow, 6).Value  = _rows.Count > 0 ? _rows.Average(r => r.HoPrice) : 0m;
             ws.Cell(totalRow, 7).Value  = _rows.Sum(r => r.WhQty);
-            ws.Cell(totalRow, 8).Value  = _rows.Sum(r => r.SlashedQty);
+            // 1.14.86 — Slashed total is "<N> Y" (count of slashed-flag items),
+            // not a sum. Written as text so Excel doesn't try to coerce it.
+            ws.Cell(totalRow, 8).Value  = $"{_rows.Count(r => r.IsSlashed):N0} Y";
             ws.Cell(totalRow, 9).Value  = _rows.Sum(r => r.StoresSoh);
             ws.Cell(totalRow, 10).Value = _rows.Sum(r => r.SkuMax);
             ws.Cell(totalRow, 11).Value = _rows.Count > 0 ? _rows.Average(r => r.AvgSkuMax) : 0m;
@@ -452,10 +477,15 @@ else
             for (int c = 6; c <= 14; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
             // Number formats:
             //   HO Price (6)             → currency-style 2dp
-            //   Integer cols (7-10, 12-14) → #,##0
+            //   WH Qty (7), Stores SOH (9), Total SKU Max (10) → #,##0
+            //   Slashed (8)              → text (Y/N) — no format applied
             //   Avg SKU Max (11)         → 1dp
+            //   Blocked Qty / Stores / To Fill (12-14) → #,##0
+            // 1.14.86 — col 8 split out of the numeric range because the
+            // Slashed column is now Y/N text, not a quantity.
             ws.Range(2,  6, totalRow,  6).Style.NumberFormat.Format = "#,##0.00";
-            ws.Range(2,  7, totalRow, 10).Style.NumberFormat.Format = "#,##0";
+            ws.Range(2,  7, totalRow,  7).Style.NumberFormat.Format = "#,##0";
+            ws.Range(2,  9, totalRow, 10).Style.NumberFormat.Format = "#,##0";
             ws.Range(2, 11, totalRow, 11).Style.NumberFormat.Format = "#,##0.0";
             ws.Range(2, 12, totalRow, 14).Style.NumberFormat.Format = "#,##0";
             ws.Columns().AdjustToContents();

@@ -23,6 +23,103 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.93 — SIM Generate: new "Gap by UPC" tab on the Result preview (2026-05-21)
+
+### What's new
+
+A new **Gap by UPC** tab on SIM Generate → Result preview, sitting between the existing per-box "Allocation Gap" tab and "Item Details". Same idea as the per-box gap, rolled up by **ItemCode**: for each item the SIM didn't fully drain, the planner now sees Eligible WH Qty / SIM Qty / Remaining Qty / dominant SKIP reason in one row.
+
+Columns:
+
+| Column | Source |
+|---|---|
+| Itemcode | `LPMSIM_AllocTrace.ItemCode` |
+| Item Name | `HODATA.dbo.Itemmaster.description` |
+| Division | `upc_subclass × subclassmaster × LPMSIM.dbo.Division` (TOP-1 reduction, same as WH SKU Investigation) |
+| **Eligible WH Qty** | `SUM(MAX(LineQty))` per `(BoxNo, ItemCode)` in `LPMSIM_AllocTrace` — qty in eligible whboxitems that ENTERED the SIM box pool. Matches what the allocator actually considered (after all filters: ShopEligible, PalletCategory, Season, LPM/Non-LPM, LPM Months, Warehouses, closed-box exclusion). |
+| **SIM Qty** | `SUM(Qty)` from `LPMSIM_Output` for the batch grouped by Itemcode — qty actually placed. |
+| **Remaining Qty** | `EligibleWhQty − SimQty` — "the gap". |
+| **Top Reason** | Most-frequent `SKIP_*` Decision in the AllocTrace for the item (e.g. `SKIP_SKUMAX`, `SKIP_MNM`, `SKIP_NO_GRADE`, `SKIP_NO_DIV`, `SKIP_NO_EOM`, `SKIP_EOM_BALANCE`, `SKIP_TARGET`). Tie-broken alphabetically. Renders as a colored chip with a tooltip explaining what the code means. |
+
+Only items where `Remaining Qty > 0` are listed.
+
+### Filters
+
+Client-side filters (same shape as the per-box gap tab):
+- **Itemcode / name / division contains** — text search across all three columns.
+- **Top Reason** — exact match dropdown with all known SKIP codes (including the legacy `SKIP_TARGET` / `SKIP_EOM_BALANCE` for batches generated before 1.14.87).
+- **Min Remaining** — numeric filter (e.g. "only show items missing ≥ 50 units").
+
+### Excel export
+
+Standard Excel button — exports the currently-filtered rows with a TOTAL row at the bottom summing Eligible / SIM / Remaining. Filename carries the LPM/NONLPM prefix introduced in 1.14.81:
+
+`{LPM_ | NONLPM_ | …}AllocationGap_ByUPC_Batch{n}_{yyyy-MM-dd_HHmm}.xlsx`
+
+### Trace tooltip extensions
+
+The `GapReasonTooltip` and `GapReasonChip` helpers used by both gap tabs now cover the raw `SKIP_*` codes that the per-UPC tab surfaces directly (the per-box tab rolls these up into broader buckets like `CAP`):
+
+| Code | Chip | Tooltip |
+|---|---|---|
+| `SKIP_SKUMAX` | red "SKU Max" | per-(Store, Item) SKU Max ceiling hit |
+| `SKIP_MNM` | red "MerchNeed Month" | (Store, Div) at/above monthly demand (post-1.14.87) |
+| `SKIP_TARGET` | red "MerchNeed (legacy)" | legacy form of `SKIP_MNM` (pre-1.14.87, was the Week cap) |
+| `SKIP_EOM_BALANCE` | amber "EOM Balance (legacy)" | legacy entry gate, removed in 1.14.87 |
+| `SKIP_NO_GRADE` | amber "No Grade" | RR-only: store has no Diamond/Platinum/Gold/Silver grade |
+
+### Implementation notes
+
+- **SQL:** Single round-trip query against `LPMSIM_AllocTrace` + `LPMSIM_Output` + `HODATA.dbo.Itemmaster` + the standard Division lookup. Five CTEs (`BoxLineEligible`, `ItemEligible`, `ItemAllocated`, `ItemReasons`, `ItemTopReason`, `ItemDiv`). Streamed via `SqlDataReader`. Server-side `ORDER BY RemainingQty DESC, ItemCode`.
+- **AllocTrace dedupe:** `LineQty` is repeated across all store-decisions for the same `(BoxNo, ItemCode)`, so the eligibility CTE does `MAX(LineQty)` per `(BoxNo, ItemCode)` before summing per ItemCode. Avoids double-counting box-line qty across candidate stores.
+- **Top Reason ranking:** count rows per `(ItemCode, Decision)` for SKIP_* decisions; pick highest count; tie-break alphabetically. Empty string when an item has no SKIP rows (rare — usually means the allocator simply ran out of candidate stores rather than hitting an explicit skip).
+- **Excel:** standard `XLWorkbook`, dark-header style matching the existing per-box gap export.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — new `ItemAllocationGapRow` record; new `GetItemAllocationGapAsync(batchNo, ct)` method on `LpmSimReportService`.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — new `<MudTabPanel Text="Gap by UPC">`; backing fields (`_itemGapRows`, `_loadingItemGap`, `_itemGapLoadedOnce`, `_itemGapFilter`, `_itemGapReasonFilter`, `_itemGapMinRemaining`); `LoadItemGapAsync` / `ClearItemGapFilters` / `FilteredItemGap` / `ExportItemGapAsync` methods; extended `GapReasonTooltip` and `GapReasonChip` switches to cover the raw `SKIP_*` Decision codes.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.92 → 1.14.93.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar footer shows `1.14.93`.
+2. SIM Generate → open any recent batch → click the new **Gap by UPC** tab → click **Load**. You should see one row per item that didn't fully ship, sorted by Remaining Qty DESC, with a coloured Top Reason chip.
+3. Cross-check: pick an item with `RemainingQty = N` and confirm `SELECT SUM(Take) FROM LPMSIM_AllocTrace WHERE LPMBatchNo = @bn AND ItemCode = '...'` matches the SIM Qty column; raw eligible WH qty matches the original whboxitems totals for that item in eligible boxes.
+4. Excel export downloads with the `LPM_` or `NONLPM_` filename prefix and a TOTAL row.
+
+---
+
+## 1.14.92 — WH SKU Investigation: header label fix ("Total SKU Max" / "Avg SKU Max") (2026-05-21)
+
+### What's wrong
+
+On narrow viewports, the **WH SKU Investigation** table's `Total SKU Max` and `Avg SKU Max` column headers wrapped at an unpredictable break point — the "Total" and "Avg" prefixes ended up clipped off, so both columns read as just **"SKU Max"**, making the table look like it had two identical columns. The data underneath was always correct (left column = SUM, right column = per-store mean) but the labels were misleading.
+
+### Fix
+
+Inserted explicit `<br />` tags so the headers wrap as a clean 2-line label:
+
+| Before (browser-arbitrary wrap) | After |
+|---|---|
+| `SKU Max` (Total clipped) | `Total` *<br />* `SKU Max` |
+| `SKU Max` (Avg clipped) | `Avg` *<br />* `SKU Max` |
+
+Also added `min-width: 80px` to both `<MudTh>` elements so the column width is wide enough for the 2-line label to fit cleanly. Matches the existing 2-line header convention used elsewhere in the app (e.g. SIM Generate's `Merch Need<br />(Week)` and `Merch Need<br />(Day)` columns).
+
+### Files changed
+
+- `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` — 2 `<MudTh>` blocks updated with `<br />` + `min-width`.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.91 → 1.14.92.
+- `CHANGELOG.md` — this section.
+
+### Not changed
+
+- Underlying data, sort, Excel export — all identical to 1.14.91. Pure visual fix.
+
+---
+
 ## 1.14.91 — SIM Generate: "Containers Purchased Today" panel (2026-05-21)
 
 ### What's new
