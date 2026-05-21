@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.90</Version>
-    <AssemblyVersion>1.14.90.0</AssemblyVersion>
-    <FileVersion>1.14.90.0</FileVersion>
-    <InformationalVersion>1.14.90 (SIM Generate concurrency gate — when one user (or a same-user double-click) starts SIM Generate for a (Country, RunDate), any second Generate for the same period within the 30-minute stale window is blocked with a friendly Warning Snackbar naming the conflicting user, the batch number, and the GST start time. Implemented via a new SimBatchAlreadyRunningException thrown at the very start of GenerateAsync before any expensive work. Uses the existing 1.14.67 Status='Running' marker on LPM_SimBatch + the existing 30-minute stale-row safety window — no new schema, no migration. Stale Running rows (crashed mid-flight, older than 30 min) don't block new runs.)</InformationalVersion>
+    <Version>1.14.91</Version>
+    <AssemblyVersion>1.14.91.0</AssemblyVersion>
+    <FileVersion>1.14.91.0</FileVersion>
+    <InformationalVersion>1.14.91 (SIM Generate — new "Containers Purchased Today" panel inside the Input Readiness expansion. Shows distinct ContNo values from usa.dbo.USAPurchase WHERE Trndate = server-local today, rendered as a row of monospace chips with a count badge. One-shot query at page init (global, not country-scoped). Empty list shows a muted "No containers purchased today yet." message; query failure shows an error hint instead of silently rendering as empty.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

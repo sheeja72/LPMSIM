@@ -1650,6 +1650,57 @@ SELECT s.LPMBatchNo,
     }
 
     /// <summary>
+    /// 1.14.91 — Distinct container numbers purchased on the current server-
+    /// local date, sourced from <c>usa.dbo.USAPurchase.ContNo</c>. Drives the
+    /// "Containers Purchased Today" panel near the Input Readiness grid on
+    /// SIM Generate so the planner can spot which containers landed in
+    /// today's purchase run before kicking off SIM.
+    ///
+    /// <para>
+    /// The reference SQL the planner gave:
+    /// <code>SELECT DISTINCT ContNo FROM usa..USAPurchase WHERE Trndate = todays date</code>
+    /// </para>
+    ///
+    /// <para>
+    /// Implementation uses a half-open <c>[today, tomorrow)</c> range
+    /// instead of equality so the query works whether <c>Trndate</c> is
+    /// stored as <c>date</c> or <c>datetime</c> (avoids the
+    /// "datetime with a non-midnight time" trap). NULL / blank ContNo
+    /// rows are skipped. Order: ContNo ASC (stable list for the UI).
+    /// </para>
+    ///
+    /// <para>
+    /// "Today" = server-local date (<c>DateTime.Today</c>) per the planner's
+    /// pick — could drift from GST by a few hours around midnight if the
+    /// server is on UTC, but matches the literal raw SQL the planner runs.
+    /// </para>
+    /// </summary>
+    public async Task<List<string>> GetContainersPurchasedTodayAsync(CancellationToken ct = default)
+    {
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        var conn = db.Database.GetDbConnection();
+        if (conn.State != System.Data.ConnectionState.Open)
+            await db.Database.OpenConnectionAsync(ct);
+        using var cmd = (SqlCommand)conn.CreateCommand();
+        cmd.CommandText = @"
+            SELECT DISTINCT ContNo
+              FROM usa.dbo.USAPurchase
+             WHERE Trndate >= @today AND Trndate < @tomorrow
+               AND ContNo IS NOT NULL
+               AND LTRIM(RTRIM(ContNo)) <> ''
+             ORDER BY ContNo;";
+        var today = DateTime.Today;
+        cmd.Parameters.Add(new SqlParameter("@today",    today));
+        cmd.Parameters.Add(new SqlParameter("@tomorrow", today.AddDays(1)));
+        cmd.CommandTimeout = 30;
+        var list = new List<string>();
+        using var rdr = await cmd.ExecuteReaderAsync(ct);
+        while (await rdr.ReadAsync(ct))
+            if (!rdr.IsDBNull(0)) list.Add(rdr.GetString(0).Trim());
+        return list;
+    }
+
+    /// <summary>
     /// Distinct PalletCategory values from <c>bfldata.dbo.pallettype</c> —
     /// fed into the SIM Generate "Pallet Categories" multi-select so the
     /// planner can pick which categories enter SIM. Default selection on

@@ -772,6 +772,48 @@
                 </MudItem>
             </MudGrid>
 
+            @* 1.14.91 — Containers Purchased Today panel. Sourced from
+               usa.dbo.USAPurchase WHERE Trndate = server-local today. Loaded
+               once at page init (global, not country-scoped). Renders the
+               distinct ContNo list with a count badge; muted message when the
+               list is empty; error hint when the load failed. *@
+            <div class="lpm-section mb-3" style="padding:0.6rem 1rem;">
+                <div class="d-flex align-center" style="gap:.5rem;">
+                    <MudIcon Icon="@Icons.Material.Filled.LocalShipping" Size="Size.Small" Style="color:#475569;" />
+                    <MudText Typo="Typo.caption" Style="font-weight:600;color:#475569;letter-spacing:.05em;text-transform:uppercase;">
+                        Containers Purchased Today
+                    </MudText>
+                    <MudChip T="string" Size="Size.Small" Color="Color.Info" Variant="Variant.Filled" Class="ml-1">
+                        @_containersPurchasedToday.Count.ToString("N0")
+                    </MudChip>
+                    <MudText Typo="Typo.caption" Style="color:#94a3b8;font-size:0.72rem;">
+                        (<code>usa.dbo.USAPurchase</code> · Trndate = @DateTime.Today.ToString("yyyy-MM-dd"))
+                    </MudText>
+                </div>
+                @if (_containersTodayLoadError)
+                {
+                    <MudText Typo="Typo.caption" Style="color:#dc2626;display:block;margin-top:.3rem;">
+                        Could not load today's purchased containers. Check that <code>usa.dbo.USAPurchase</code> is reachable.
+                    </MudText>
+                }
+                else if (_containersPurchasedToday.Count == 0)
+                {
+                    <MudText Typo="Typo.caption" Style="color:#64748b;display:block;margin-top:.3rem;">
+                        No containers purchased today yet.
+                    </MudText>
+                }
+                else
+                {
+                    <div class="d-flex flex-wrap" style="gap:.3rem;margin-top:.4rem;">
+                        @foreach (var cn in _containersPurchasedToday)
+                        {
+                            <MudChip T="string" Size="Size.Small" Variant="Variant.Outlined" Color="Color.Default"
+                                     Style="font-family:monospace;font-size:0.72rem;">@cn</MudChip>
+                        }
+                    </div>
+                }
+            </div>
+
             @if (_readiness.BoxSegments is BoxSegmentCounts seg)
     {
         <div class="lpm-section mb-3" style="padding:0.6rem 1rem;">
@@ -2350,6 +2392,19 @@
     private List<string> _allPalletCategories = new();
 
     /// <summary>
+    /// 1.14.91 — Distinct ContNo values from <c>usa.dbo.USAPurchase</c> with
+    /// <c>Trndate</c> matching today (server-local date). Loaded once at page
+    /// init by <c>OnInitializedAsync</c> and rendered as a small panel inside
+    /// the Input Readiness expansion. Empty list = nothing purchased today (or
+    /// the load errored — see <c>_containersTodayLoadError</c>).
+    /// </summary>
+    private List<string> _containersPurchasedToday = new();
+    /// <summary>1.14.91 — True when <c>GetContainersPurchasedTodayAsync</c> threw
+    /// during the init load (e.g. table unreachable). Lets the UI show a short
+    /// "could not load" hint instead of pretending the list is just empty.</summary>
+    private bool _containersTodayLoadError;
+
+    /// <summary>
     /// Specific LPM months the planner has picked for this run. Empty = use
     /// the legacy behaviour (all months with LPMDt &lt; first of next month
     /// after RunDate). Stored as month-start <see cref="DateTime"/> values
@@ -3431,6 +3486,12 @@
         // master is shared across countries, so no country parameter.
         try { _allPalletCategories = await Reports.GetDistinctPalletCategoriesAsync(); }
         catch { _allPalletCategories = new(); }
+        // 1.14.91 — Pre-load the "Containers Purchased Today" list. Global
+        // query (not country-specific), one-shot at page init. If the
+        // usa.dbo.USAPurchase table is unreachable / errors, swallow so it
+        // doesn't break the rest of the page.
+        try { _containersPurchasedToday = await Reports.GetContainersPurchasedTodayAsync(); }
+        catch { _containersPurchasedToday = new(); _containersTodayLoadError = true; }
         await LoadStoresForCountryAsync();
         if (!string.IsNullOrEmpty(_country)) await CheckAsync();
     }

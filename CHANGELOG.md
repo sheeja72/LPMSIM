@@ -23,6 +23,61 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.91 — SIM Generate: "Containers Purchased Today" panel (2026-05-21)
+
+### What's new
+
+A new small panel inside the **Input Readiness** expansion on SIM Generate shows the list of distinct container numbers purchased on today's date. The planner can see at a glance which containers landed in the day's purchase run before kicking off SIM.
+
+The panel displays:
+- An icon + heading ("Containers Purchased Today")
+- A blue count badge (e.g. `5`)
+- The source citation (`usa.dbo.USAPurchase · Trndate = 2026-05-21`)
+- A row of monospace chips, one per distinct `ContNo`
+- A muted "No containers purchased today yet." message when the list is empty
+- A red error hint when the source table is unreachable
+
+### Data source
+
+```sql
+SELECT DISTINCT ContNo
+  FROM usa.dbo.USAPurchase
+ WHERE Trndate >= @today AND Trndate < @tomorrow
+   AND ContNo IS NOT NULL AND LTRIM(RTRIM(ContNo)) <> ''
+ ORDER BY ContNo;
+```
+
+The query is a half-open `[today, tomorrow)` range on `Trndate` rather than a literal `Trndate = @today` equality so it works regardless of whether the source column is stored as `date` or `datetime`. Blank `ContNo` rows are filtered out.
+
+### Implementation notes
+
+- **Method:** `LpmSimReportService.GetContainersPurchasedTodayAsync(ct)` — returns `List<string>`. One round-trip; 30-second command timeout.
+- **Page wiring:** `OnInitializedAsync` calls it once at page init (after the pallet categories load), so the panel reflects today's purchases without forcing a re-query on every filter change. Caught exceptions set `_containersTodayLoadError` so the UI shows a real error instead of an empty list.
+- **Today =** `DateTime.Today` (server-local date — Azure App Service runs UTC). Per planner pick, matches the raw SQL the planner uses to verify.
+- **Placement:** Inside the Input Readiness `MudExpansionPanel`, between the 3 readiness cards (EOM / SOH / Eligible Boxes) and the existing Eligible Boxes segment table. Hidden by default with the rest of the panel until expanded.
+- **Scope:** Global query — not country-scoped (matches the planner's raw SQL which has no country filter; `usa.dbo.USAPurchase` is the shared purchase ledger).
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — new `GetContainersPurchasedTodayAsync` method.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — new `_containersPurchasedToday` field + `_containersTodayLoadError` flag; load in `OnInitializedAsync`; render block inside the Input Readiness expansion.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.90 → 1.14.91.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar footer shows `1.14.91`.
+2. SIM Generate → expand "Input Readiness". You should see a "Containers Purchased Today" row above the existing Eligible Boxes segment table.
+3. The chip list should match `SELECT DISTINCT ContNo FROM usa.dbo.USAPurchase WHERE Trndate = CAST(GETDATE() AS date)`.
+
+### Optional follow-up (not in this release)
+
+- Per-container detail (line count, total qty, distinct items) — easy upgrade if planners want richer numbers per chip.
+- Date picker so planners can look back on prior days.
+- Refresh button so the list updates without a full page reload.
+
+---
+
 ## 1.14.90 — SIM Generate: concurrency gate (block while another user is running for the same period) (2026-05-21)
 
 ### What's new
