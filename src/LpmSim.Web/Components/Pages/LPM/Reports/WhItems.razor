@@ -133,6 +133,13 @@
     var totSoh   = _rows.Sum(r => r.StoresSoh);
     var totSku   = _rows.Sum(r => r.SkuMax);
     var totFill  = _rows.Sum(r => r.ToFillQty);
+    // 1.14.82 — Totals for the four new columns. HO Price is averaged
+    // (not summed — adding prices across items is meaningless); the
+    // three Qty/Count columns are summed.
+    var totSlash = _rows.Sum(r => r.SlashedQty);
+    var totBlk   = _rows.Sum(r => r.BlockedQty);
+    var totBlkSt = _rows.Sum(r => r.BlockedStores);
+    var avgPrice = _rows.Count > 0 ? _rows.Average(r => r.HoPrice) : 0m;
 
     <MudGrid Spacing="2" Class="mb-3">
         <MudItem xs="6" md="3"><div class="lpm-metric-card lpm-accent-blue">
@@ -176,8 +183,18 @@
                                        SortBy="r => r.Department">Department</MudTableSortLabel></MudTh>
             <MudTh><MudTableSortLabel T="WhItemsReportRow"
                                        SortBy="r => r.Brand">Brand</MudTableSortLabel></MudTh>
+            @* 1.14.82 — HO Price (from whboxitems.HOPrice) right after Brand
+               so the per-item identifiers stay grouped before the qty columns. *@
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.HoPrice">HO Price</MudTableSortLabel>
+            </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.WhQty">WH Qty</MudTableSortLabel>
+            </MudTh>
+            @* 1.14.82 — Slashed Qty (SUM(whboxitems.Slashed)) right after WH Qty,
+               grouping the warehouse-source quantity columns together. *@
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SlashedQty">Slashed Qty</MudTableSortLabel>
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.StoresSoh">Stores SOH</MudTableSortLabel>
@@ -187,6 +204,15 @@
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.AvgSkuMax">Avg SKU Max</MudTableSortLabel>
+            </MudTh>
+            @* 1.14.82 — Blocked Qty + Blocked Stores from LPM_SimItemSkuMaxExcluded
+               (selected country, latest period). Sits next to the SKU Max columns
+               because the values explain *why* the SKU Max is reduced for stores. *@
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.BlockedQty">Blocked Qty</MudTableSortLabel>
+            </MudTh>
+            <MudTh Style="text-align:right;">
+                <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.BlockedStores">Blocked Stores</MudTableSortLabel>
             </MudTh>
             <MudTh Style="text-align:right;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.ToFillQty">To Fill Qty</MudTableSortLabel>
@@ -198,10 +224,17 @@
             <MudTd>@context.Division</MudTd>
             <MudTd>@context.Department</MudTd>
             <MudTd>@context.Brand</MudTd>
+            @* 1.14.82 — HO Price cell. Shows "—" when zero so a blank price
+               doesn't masquerade as a real 0.00 reading. *@
+            <MudTd Style="text-align:right;">@(context.HoPrice > 0 ? context.HoPrice.ToString("N2") : "—")</MudTd>
             <MudTd Style="text-align:right;">@context.WhQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.SlashedQty.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.StoresSoh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.SkuMax.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.AvgSkuMax.ToString("N1")</MudTd>
+            @* 1.14.82 — Blocked Qty + Blocked Stores cells. *@
+            <MudTd Style="text-align:right;">@context.BlockedQty.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;">@context.BlockedStores.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.ToFillQty.ToString("N0")</MudTd>
         </RowTemplate>
         <PagerContent>
@@ -209,13 +242,21 @@
         </PagerContent>
         <FooterContent>
             <MudTd Style="font-weight:600;" colspan="5">TOTAL (@_rows.Count.ToString("N0") rows)</MudTd>
+            @* 1.14.82 — HO Price footer = average across loaded items (summing
+               prices is meaningless). Shows "—" when the loaded set is all
+               zero-priced. *@
+            <MudTd Style="text-align:right;font-weight:600;">@(avgPrice > 0 ? avgPrice.ToString("N2") + " avg" : "—")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totWh.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:600;">@totSlash.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totSoh.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totSku.ToString("N0")</MudTd>
             @* Avg-of-averages across loaded rows — equal weight per item.
                Not a SUM (the per-row metric is already an average) so the
                footer column shows the typical per-store ceiling, not a total. *@
             <MudTd Style="text-align:right;font-weight:600;">@(_rows.Count > 0 ? _rows.Average(r => r.AvgSkuMax).ToString("N1") : "0.0")</MudTd>
+            @* 1.14.82 — Blocked Qty + Blocked Stores totals. *@
+            <MudTd Style="text-align:right;font-weight:600;">@totBlk.ToString("N0")</MudTd>
+            <MudTd Style="text-align:right;font-weight:600;">@totBlkSt.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;font-weight:600;">@totFill.ToString("N0")</MudTd>
         </FooterContent>
     </MudTable>
@@ -357,8 +398,14 @@ else
         {
             using var wb = new XLWorkbook();
             var ws = wb.Worksheets.Add("WH SKU Investigation");
+            // 1.14.82 — Four new columns inserted to match the on-screen order:
+            //   HO Price after Brand (col 6); Slashed Qty after WH Qty (col 8);
+            //   Blocked Qty + Blocked Stores after Avg SKU Max (cols 12-13).
+            // To Fill Qty shifts from col 10 → col 14.
             string[] headers = { "Itemcode", "Item Name", "Division", "Department", "Brand",
-                                 "WH Qty", "Stores SOH", "Total SKU Max", "Avg SKU Max", "To Fill Qty" };
+                                 "HO Price", "WH Qty", "Slashed Qty", "Stores SOH",
+                                 "Total SKU Max", "Avg SKU Max", "Blocked Qty", "Blocked Stores",
+                                 "To Fill Qty" };
             for (int i = 0; i < headers.Length; i++)
             {
                 ws.Cell(1, i + 1).Value = headers[i];
@@ -368,32 +415,45 @@ else
             for (int i = 0; i < _rows.Count; i++)
             {
                 var r = _rows[i]; var row = i + 2;
-                ws.Cell(row, 1).Value = r.ItemCode;
-                ws.Cell(row, 2).Value = r.ItemName;
-                ws.Cell(row, 3).Value = r.Division;
-                ws.Cell(row, 4).Value = r.Department;
-                ws.Cell(row, 5).Value = r.Brand;
-                ws.Cell(row, 6).Value = r.WhQty;
-                ws.Cell(row, 7).Value = r.StoresSoh;
-                ws.Cell(row, 8).Value = r.SkuMax;
-                ws.Cell(row, 9).Value = r.AvgSkuMax;
-                ws.Cell(row, 10).Value = r.ToFillQty;
+                ws.Cell(row, 1).Value  = r.ItemCode;
+                ws.Cell(row, 2).Value  = r.ItemName;
+                ws.Cell(row, 3).Value  = r.Division;
+                ws.Cell(row, 4).Value  = r.Department;
+                ws.Cell(row, 5).Value  = r.Brand;
+                ws.Cell(row, 6).Value  = r.HoPrice;        // 1.14.82
+                ws.Cell(row, 7).Value  = r.WhQty;
+                ws.Cell(row, 8).Value  = r.SlashedQty;     // 1.14.82
+                ws.Cell(row, 9).Value  = r.StoresSoh;
+                ws.Cell(row, 10).Value = r.SkuMax;
+                ws.Cell(row, 11).Value = r.AvgSkuMax;
+                ws.Cell(row, 12).Value = r.BlockedQty;     // 1.14.82
+                ws.Cell(row, 13).Value = r.BlockedStores;  // 1.14.82
+                ws.Cell(row, 14).Value = r.ToFillQty;
             }
-            // TOTAL row. Avg column shows the average of the row averages
-            // (equal weight per item) — same as the on-screen footer.
+            // TOTAL row. Avg cols (HO Price + Avg SKU Max) show the average of
+            // the row values (equal weight per item) — same as the on-screen
+            // footer. The other Qty / Count cols are summed.
             var totalRow = _rows.Count + 2;
-            ws.Cell(totalRow, 1).Value = $"TOTAL ({_rows.Count:N0} items)";
+            ws.Cell(totalRow, 1).Value  = $"TOTAL ({_rows.Count:N0} items)";
             ws.Cell(totalRow, 1).Style.Font.Bold = true;
-            ws.Cell(totalRow, 6).Value = _rows.Sum(r => r.WhQty);
-            ws.Cell(totalRow, 7).Value = _rows.Sum(r => r.StoresSoh);
-            ws.Cell(totalRow, 8).Value = _rows.Sum(r => r.SkuMax);
-            ws.Cell(totalRow, 9).Value = _rows.Count > 0 ? _rows.Average(r => r.AvgSkuMax) : 0m;
-            ws.Cell(totalRow, 10).Value = _rows.Sum(r => r.ToFillQty);
-            for (int c = 6; c <= 10; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
-            // Number formats: integer cols / Avg col with 1 decimal.
-            ws.Range(2, 6, totalRow, 8).Style.NumberFormat.Format  = "#,##0";
-            ws.Range(2, 9, totalRow, 9).Style.NumberFormat.Format  = "#,##0.0";
-            ws.Range(2, 10, totalRow, 10).Style.NumberFormat.Format = "#,##0";
+            ws.Cell(totalRow, 6).Value  = _rows.Count > 0 ? _rows.Average(r => r.HoPrice) : 0m;
+            ws.Cell(totalRow, 7).Value  = _rows.Sum(r => r.WhQty);
+            ws.Cell(totalRow, 8).Value  = _rows.Sum(r => r.SlashedQty);
+            ws.Cell(totalRow, 9).Value  = _rows.Sum(r => r.StoresSoh);
+            ws.Cell(totalRow, 10).Value = _rows.Sum(r => r.SkuMax);
+            ws.Cell(totalRow, 11).Value = _rows.Count > 0 ? _rows.Average(r => r.AvgSkuMax) : 0m;
+            ws.Cell(totalRow, 12).Value = _rows.Sum(r => r.BlockedQty);
+            ws.Cell(totalRow, 13).Value = _rows.Sum(r => r.BlockedStores);
+            ws.Cell(totalRow, 14).Value = _rows.Sum(r => r.ToFillQty);
+            for (int c = 6; c <= 14; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
+            // Number formats:
+            //   HO Price (6)             → currency-style 2dp
+            //   Integer cols (7-10, 12-14) → #,##0
+            //   Avg SKU Max (11)         → 1dp
+            ws.Range(2,  6, totalRow,  6).Style.NumberFormat.Format = "#,##0.00";
+            ws.Range(2,  7, totalRow, 10).Style.NumberFormat.Format = "#,##0";
+            ws.Range(2, 11, totalRow, 11).Style.NumberFormat.Format = "#,##0.0";
+            ws.Range(2, 12, totalRow, 14).Style.NumberFormat.Format = "#,##0";
             ws.Columns().AdjustToContents();
 
             var fileName = $"WhItems_{_country}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";

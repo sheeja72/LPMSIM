@@ -67,7 +67,24 @@ public record WhItemsReportRow(
     long    StoresSoh,
     long    SkuMax,
     decimal AvgSkuMax,
-    long    ToFillQty);
+    long    ToFillQty,
+    // 1.14.82 — Four new columns surfaced from whboxitems / WHBoxItemsExport
+    // (HOPrice, Slashed) and from the SKU Max exclusion audit table
+    // (LPM_SimItemSkuMaxExcluded) for the selected country, latest period.
+    /// <summary>HO price for the item — MAX(HOPrice) across the in-scope whboxitems
+    /// rows. Per-pallet value; MAX keeps the result deterministic when pallets
+    /// of the same item have differing prices (rare but possible).</summary>
+    decimal HoPrice,
+    /// <summary>Sum of whboxitems.Slashed across the in-scope rows for the item.</summary>
+    long    SlashedQty,
+    /// <summary>SUM of PriorSKUMax from LPM_SimItemSkuMaxExcluded for the
+    /// selected country, latest (Year1, Month1). Deduped to one row per
+    /// (Store, Item) before summing so items matching multiple exclusion
+    /// rules aren't double-counted.</summary>
+    long    BlockedQty,
+    /// <summary>COUNT(DISTINCT StoreID) from LPM_SimItemSkuMaxExcluded for the
+    /// selected country, latest period.</summary>
+    int     BlockedStores);
 
 /// <summary>
 /// Data access for Reports → WH SKU Investigation (renamed from "WH Items" in
@@ -197,13 +214,14 @@ public sealed class WhItemsReportService
             SET NOCOUNT ON;
 
             -- Drop any prior temp-table residue from this session.
-            IF OBJECT_ID('tempdb..#WhItemsAgg')   IS NOT NULL DROP TABLE #WhItemsAgg;
-            IF OBJECT_ID('tempdb..#WhItemsCodes') IS NOT NULL DROP TABLE #WhItemsCodes;
-            IF OBJECT_ID('tempdb..#WhItemsSoh')   IS NOT NULL DROP TABLE #WhItemsSoh;
-            IF OBJECT_ID('tempdb..#WhItemsSkuMax')IS NOT NULL DROP TABLE #WhItemsSkuMax;
-            IF OBJECT_ID('tempdb..#WhItemsDesc')  IS NOT NULL DROP TABLE #WhItemsDesc;
-            IF OBJECT_ID('tempdb..#WhItemsDiv')   IS NOT NULL DROP TABLE #WhItemsDiv;
-            IF OBJECT_ID('tempdb..#WhItemsBrand') IS NOT NULL DROP TABLE #WhItemsBrand;
+            IF OBJECT_ID('tempdb..#WhItemsAgg')     IS NOT NULL DROP TABLE #WhItemsAgg;
+            IF OBJECT_ID('tempdb..#WhItemsCodes')   IS NOT NULL DROP TABLE #WhItemsCodes;
+            IF OBJECT_ID('tempdb..#WhItemsSoh')     IS NOT NULL DROP TABLE #WhItemsSoh;
+            IF OBJECT_ID('tempdb..#WhItemsSkuMax')  IS NOT NULL DROP TABLE #WhItemsSkuMax;
+            IF OBJECT_ID('tempdb..#WhItemsDesc')    IS NOT NULL DROP TABLE #WhItemsDesc;
+            IF OBJECT_ID('tempdb..#WhItemsDiv')     IS NOT NULL DROP TABLE #WhItemsDiv;
+            IF OBJECT_ID('tempdb..#WhItemsBrand')   IS NOT NULL DROP TABLE #WhItemsBrand;
+            IF OBJECT_ID('tempdb..#WhItemsBlocked') IS NOT NULL DROP TABLE #WhItemsBlocked;  -- 1.14.82
 
             -- 1) WH Qty per itemcode. This defines the row universe — any
             --    itemcode in the country's warehouse, filtered by pallet
@@ -213,8 +231,14 @@ public sealed class WhItemsReportService
             --    reconcile with WH Stock Position. 1.14.52 — also excludes
             --    PalletCategory = 'NON-PURCHASED' to drop the rows the
             --    planner flagged on the screenshot.
+            -- 1.14.82: HoPrice (MAX) + SlashedQty (SUM) projected alongside WhQty.
+            -- Both come from the same {whSrc} grain so they ride the same scan +
+            -- WHERE filter — no extra cost. MAX(HOPrice) keeps the result
+            -- deterministic when an item has pallets at different prices (rare).
             SELECT w.itemcode,
-                   WhQty = SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
+                   WhQty      = SUM(CAST(ISNULL(w.Qty, 0)     AS bigint)),
+                   HoPrice    = MAX(w.HOPrice),
+                   SlashedQty = SUM(CAST(ISNULL(w.Slashed, 0) AS bigint))
               INTO #WhItemsAgg
               FROM {whSrc} w
              WHERE w.itemcode IS NOT NULL AND w.itemcode <> ''
@@ -334,6 +358,45 @@ public sealed class WhItemsReportService
              WHERE rn = 1;
             CREATE CLUSTERED INDEX IX_WhItemsBrand ON #WhItemsBrand (itemcode);
 
+            -- 7b) 1.14.82 — Per-itemcode rollup of the SKU Max exclusion audit
+            --     table (LPM_SimItemSkuMaxExcluded) for the selected country
+            --     at the latest (Year1, Month1) — matches the period rule used
+            --     by the existing SkuMax / ToFillQty columns above so all three
+            --     reflect the same monthly snapshot.
+            --
+            --     The audit table can hold MULTIPLE rows per (Store, Item) when
+            --     more than one exclusion rule fires for the same combination
+            --     (e.g. both ExcludeExport_Planning and RemoveItemsFromTransfer
+            --     match). Without deduping, SUM(PriorSKUMax) would double-count.
+            --     Dedupe to one row per (Store, Item) first (PriorSKUMax is
+            --     identical across rules for the same Store/Item — it's the
+            --     original SKUMax value before zeroing — so MAX is correct).
+            IF OBJECT_ID('tempdb..#WhItemsBlocked') IS NOT NULL DROP TABLE #WhItemsBlocked;
+
+            DECLARE @y_excl int, @m_excl int;
+            SELECT TOP 1 @y_excl = Year1, @m_excl = Month1
+              FROM LPMSIM.dbo.LPM_SimItemSkuMaxExcluded
+             WHERE Country = @country
+             ORDER BY Year1 DESC, Month1 DESC;
+
+            ;WITH ExclDedupe AS (
+                SELECT e.ItemCode, e.StoreID,
+                       PriorSKUMax = MAX(e.PriorSKUMax)
+                  FROM LPMSIM.dbo.LPM_SimItemSkuMaxExcluded e
+                  INNER JOIN #WhItemsCodes wc ON wc.itemcode = e.ItemCode
+                 WHERE e.Country = @country
+                   AND e.Year1   = @y_excl
+                   AND e.Month1  = @m_excl
+                 GROUP BY e.ItemCode, e.StoreID
+            )
+            SELECT ItemCode,
+                   BlockedQty    = SUM(CAST(ISNULL(PriorSKUMax, 0) AS bigint)),
+                   BlockedStores = COUNT(DISTINCT StoreID)
+              INTO #WhItemsBlocked
+              FROM ExclDedupe
+             GROUP BY ItemCode;
+            CREATE CLUSTERED INDEX IX_WhItemsBlocked ON #WhItemsBlocked (ItemCode);
+
             -- 8) Final result. LEFT JOIN every enrichment so items missing
             --    from the lookup tables still produce a row (with empty
             --    metadata / zero quantity for the missing dimension).
@@ -357,13 +420,21 @@ public sealed class WhItemsReportService
                                   WHEN ISNULL(wsm.ToFillQty, 0) > wa.WhQty
                                        THEN wa.WhQty
                                   ELSE ISNULL(wsm.ToFillQty, 0)
-                                END
+                                END,
+                    -- 1.14.82 — HoPrice / SlashedQty come from #WhItemsAgg
+                    -- (computed alongside WhQty against {whSrc}); BlockedQty +
+                    -- BlockedStores come from the exclusion audit table rollup.
+                    HoPrice       = ISNULL(wa.HoPrice,       CAST(0 AS decimal(18,2))),
+                    SlashedQty    = ISNULL(wa.SlashedQty,    0),
+                    BlockedQty    = ISNULL(wblk.BlockedQty,  0),
+                    BlockedStores = ISNULL(wblk.BlockedStores, 0)
               FROM  #WhItemsAgg   wa
               LEFT  JOIN #WhItemsDesc   wd   ON wd.Itemcode  = wa.itemcode
               LEFT  JOIN #WhItemsDiv    wdiv ON wdiv.itemcode= wa.itemcode
               LEFT  JOIN #WhItemsBrand  wb   ON wb.itemcode  = wa.itemcode
               LEFT  JOIN #WhItemsSoh    ws   ON ws.Itemcode  = wa.itemcode
               LEFT  JOIN #WhItemsSkuMax wsm  ON wsm.ItemCode = wa.itemcode
+              LEFT  JOIN #WhItemsBlocked wblk ON wblk.ItemCode = wa.itemcode    -- 1.14.82
               {divFrag}
               ORDER BY Division, ItemCode;
         ";
@@ -381,16 +452,21 @@ public sealed class WhItemsReportService
         while (await rdr.ReadAsync(ct))
         {
             rows.Add(new WhItemsReportRow(
-                ItemCode:   rdr.IsDBNull(0) ? "" : rdr.GetString(0),
-                ItemName:   rdr.IsDBNull(1) ? "" : rdr.GetString(1),
-                Division:   rdr.IsDBNull(2) ? "" : rdr.GetString(2),
-                Department: rdr.IsDBNull(3) ? "" : rdr.GetString(3),
-                Brand:      rdr.IsDBNull(4) ? "" : rdr.GetString(4),
-                WhQty:      rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5),
-                StoresSoh:  rdr.IsDBNull(6) ? 0L : rdr.GetInt64(6),
-                SkuMax:     rdr.IsDBNull(7) ? 0L : rdr.GetInt64(7),
-                AvgSkuMax:  rdr.IsDBNull(8) ? 0m : rdr.GetDecimal(8),
-                ToFillQty:  rdr.IsDBNull(9) ? 0L : rdr.GetInt64(9)));
+                ItemCode:      rdr.IsDBNull(0)  ? "" : rdr.GetString(0),
+                ItemName:      rdr.IsDBNull(1)  ? "" : rdr.GetString(1),
+                Division:      rdr.IsDBNull(2)  ? "" : rdr.GetString(2),
+                Department:    rdr.IsDBNull(3)  ? "" : rdr.GetString(3),
+                Brand:         rdr.IsDBNull(4)  ? "" : rdr.GetString(4),
+                WhQty:         rdr.IsDBNull(5)  ? 0L : rdr.GetInt64(5),
+                StoresSoh:     rdr.IsDBNull(6)  ? 0L : rdr.GetInt64(6),
+                SkuMax:        rdr.IsDBNull(7)  ? 0L : rdr.GetInt64(7),
+                AvgSkuMax:     rdr.IsDBNull(8)  ? 0m : rdr.GetDecimal(8),
+                ToFillQty:     rdr.IsDBNull(9)  ? 0L : rdr.GetInt64(9),
+                // 1.14.82 — HoPrice (10), SlashedQty (11), BlockedQty (12), BlockedStores (13).
+                HoPrice:       rdr.IsDBNull(10) ? 0m : Convert.ToDecimal(rdr.GetValue(10)),
+                SlashedQty:    rdr.IsDBNull(11) ? 0L : rdr.GetInt64(11),
+                BlockedQty:    rdr.IsDBNull(12) ? 0L : rdr.GetInt64(12),
+                BlockedStores: rdr.IsDBNull(13) ? 0  : rdr.GetInt32(13)));
         }
         return rows;
     }

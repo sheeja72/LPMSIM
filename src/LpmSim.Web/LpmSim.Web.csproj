@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.81</Version>
-    <AssemblyVersion>1.14.81.0</AssemblyVersion>
-    <FileVersion>1.14.81.0</FileVersion>
-    <InformationalVersion>1.14.81 (Two changes bundled: (1) SIM Boxes — LPM tag columns: Kind (LPM/Non-LPM badge) added to Reports SIM Boxes tab (Generate-preview already had it; also fixed pre-existing placeholder bug where Reports non-rollup hard-coded BoxKind to NULL); LPM Date (raw whboxitems.LPMDt) added to both Reports SIM Boxes and Generate-preview Boxes tabs plus both Excel exports. (2) Excel filename prefix — every batch-level Excel download (8 in Generate + 3 in Reports) now leads with the LPM/NONLPM tag (was a trailing _LPM/_NonLPM suffix; Non-LPM form is now all-caps NONLPM so it can't be misread as LPM at a glance, and Generate-side exports that were untagged previously now carry the prefix too).)</InformationalVersion>
+    <Version>1.14.83</Version>
+    <AssemblyVersion>1.14.83.0</AssemblyVersion>
+    <FileVersion>1.14.83.0</FileVersion>
+    <InformationalVersion>1.14.83 (SKU Max "Built by" bug — the panel showed the prior builder's name (e.g. sheeja) alongside the new build's timestamp because the apply-phase UPDATE statement bumped CreateTS but never updated CreatedBy. Fix: display now reads BuiltBy from the per-period LPM_SimItemSkuMaxBuild header (which is MERGE-updated correctly on every build) instead of the per-row LPM_SimItemSkuMax.CreatedBy; the apply-phase UPDATE also now writes CreatedBy = @user so the per-row audit trail stops drifting.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

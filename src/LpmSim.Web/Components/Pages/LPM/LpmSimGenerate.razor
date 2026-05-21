@@ -903,11 +903,21 @@
                 var statusCol = b.Status == "Approved" ? "Color.Success"
                               : b.Status == "Draft"    ? "Color.Warning"
                               : "Color.Default";
+                @* 1.14.82 — Kind label (LPM / NONLPM / LPM+NONLPM) inserted
+                   between the batch # and the status so the planner can tell
+                   the kind apart without clicking. Indigo tint differentiates
+                   it from the status colour. *@
+                var kindLabel = BatchKindLabel(b.Sources);
                 <MudButton Variant="@(isCurrent ? Variant.Filled : Variant.Outlined)"
                            Color="@(b.Status == "Approved" ? Color.Success : (b.Status == "Draft" ? Color.Warning : Color.Default))"
                            Size="Size.Small" DropShadow="false"
                            OnClick="@(() => ViewBatchAsync(b.LPMBatchNo))">
-                    #@b.LPMBatchNo @b.Status
+                    #@b.LPMBatchNo
+                    @if (!string.IsNullOrEmpty(kindLabel))
+                    {
+                        <span style="margin-left:.35rem;padding:0 .35rem;border-radius:.25rem;background:#eef2ff;color:#4338ca;font-weight:600;font-size:0.72rem;letter-spacing:.02em;">@kindLabel</span>
+                    }
+                    <span style="margin-left:.35rem;">@b.Status</span>
                     <span style="margin-left:.4rem;color:#94a3b8;font-weight:400;">@TimeFormatting.ToGccString(b.CreateTS, "dd-MMM HH:mm")</span>
                 </MudButton>
             }
@@ -2242,6 +2252,29 @@
                    .Replace("-", "")
                    .ToUpperInvariant();
         return string.IsNullOrEmpty(s) ? "" : s + "_";
+    }
+
+    /// <summary>
+    /// 1.14.82 — Short uppercase label for the batch-pill list ("All batches
+    /// for &lt;Country&gt; &lt;date&gt;") so the planner can tell an LPM
+    /// batch from a Non-LPM batch without clicking. Uses "+" as the joiner
+    /// (rather than the filename helper's "_") because it reads better as a
+    /// human-facing chip label.
+    /// <list type="bullet">
+    ///   <item><c>"LPM"</c> → <c>"LPM"</c></item>
+    ///   <item><c>"Non-LPM"</c> / <c>"Non-LPM*"</c> → <c>"NONLPM"</c></item>
+    ///   <item><c>"LPM,Non-LPM"</c> → <c>"LPM+NONLPM"</c></item>
+    ///   <item>NULL / empty → <c>""</c> (no label rendered)</item>
+    /// </list>
+    /// </summary>
+    private static string BatchKindLabel(string? rawSources)
+    {
+        if (string.IsNullOrWhiteSpace(rawSources)) return "";
+        return rawSources.TrimEnd('*').Trim()
+                         .Replace(" ", "")
+                         .Replace(",", "+")
+                         .Replace("-", "")
+                         .ToUpperInvariant();
     }
 
     private List<string> _countries = new();

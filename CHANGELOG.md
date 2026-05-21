@@ -23,6 +23,115 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.83 — SKU Max "Built by" bug fix — was showing the prior builder's name (2026-05-21)
+
+### What's wrong
+
+The SKU Max status panel on SIM Generate was showing the wrong user's name. Example: a build run by Ajmal was being displayed as:
+
+> *SKU MAX (UAE 2026-05) · ✓ Built 21-May 08:10 GST · **sheeja@bflgroup.ae** · 14,020,461 rows · in 10m 38s*
+
+Sheeja had built the same period earlier in the day; Ajmal's later rebuild kept the panel reading her name.
+
+### Root cause
+
+Two paths conspire:
+
+1. **Display query reads from the wrong source.** `GetLastSkuMaxBuildAsync` was reading the displayed user from the per-row `LPM_SimItemSkuMax.CreatedBy` column via `TOP (1) CreatedBy ORDER BY CreateTS DESC`.
+2. **Apply-phase UPDATE leaves `CreatedBy` stale.** The atomic DELETE / UPDATE / INSERT block in `BuildItemSkuMaxAsync` updates `CreateTS = @now` on rows whose data differs from staging, but does **not** update `CreatedBy` — only INSERTed rows get the new builder's name written. So when Sheeja's earlier rows are simply UPDATEd by Ajmal's rebuild, they retain `CreatedBy = sheeja@…` while their `CreateTS` jumps to Ajmal's `@now`. The `TOP 1 … ORDER BY CreateTS DESC` then happily returns Sheeja's name alongside Ajmal's timestamp.
+
+### Fix
+
+Two changes — primary + defensive:
+
+#### A) Switch the display source (primary fix)
+
+`GetLastSkuMaxBuildAsync` now reads `BuiltBy` from `dbo.LPM_SimItemSkuMaxBuild` — a **per-period header row** that's `MERGE`-updated with `BuiltBy = @user` on every build, so it always reflects who actually ran the most recent build for that (Country, Year, Month). Falls back to the old per-row `CreatedBy` lookup only when:
+
+- the header table doesn't exist (migration 032 not applied yet), or
+- no header row exists yet (pre-1.14.83 builds with no MERGE, or builds that aborted before reaching the MERGE step)
+
+This change is what makes the bug disappear immediately on deploy — even for prod data already corrupted by the prior bug, the displayed name will be correct because `LPM_SimItemSkuMaxBuild.BuiltBy` has been recorded correctly all along.
+
+#### B) Stop the per-row `CreatedBy` drift (defensive fix)
+
+The apply-phase UPDATE in `BuildItemSkuMaxAsync` now also writes `tgt.CreatedBy = @user`. Stops the `LPM_SimItemSkuMax.CreatedBy` column from carrying stale user names going forward, so downstream audit queries that read that column directly stay accurate too.
+
+### Implementation notes
+
+- The new query is still one round-trip — three result sets (`(MaxTS, RowCnt)`, `(BuiltBy, DurationMs)`, `(fallback CreatedBy)`) — DurationMs was already in the second result set; only `BuiltBy` was added alongside.
+- When migration 032 isn't applied, the `IF OBJECT_ID(...)` branch returns `(NULL, NULL)` instead of an empty result set, so the C# reader's `ReadAsync` still succeeds and the code falls through to the per-row fallback automatically. No new error paths.
+- No DB migration required. The fix works against the existing schema.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `GetLastSkuMaxBuildAsync` SQL + reader updated (Fix A); apply-phase UPDATE adds `CreatedBy = @user` (Fix B).
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.82 → 1.14.83.
+- `CHANGELOG.md` — this section.
+
+### Verification after deploy
+
+Open the SIM Generate page for any (Country, RunDate) where you know there have been multiple recent builds by different users. The "Built …" line should show the **most recent** builder's name, regardless of how many builds preceded it. Cross-check against `SELECT BuiltBy, BuildEnd FROM dbo.LPM_SimItemSkuMaxBuild WHERE Country = '…' AND Year1 = … AND Month1 = …;`.
+
+---
+
+## 1.14.82 — WH SKU Investigation: HO Price + Slashed + Blocked columns; SIM Generate batch-pill kind label (2026-05-21)
+
+### What's new
+
+Two changes bundled:
+
+#### A) WH SKU Investigation — four new columns
+
+So a planner can answer "why is this item's SKU Max so low?" without leaving the page:
+
+#### 1) **HO Price** — `MAX(whboxitems.HOPrice)`
+
+Per-item HO price taken as the maximum across the in-scope `racks.dbo.whboxitems` (UAE) / `[<DataName>].dbo.WHBoxItemsExport` (non-UAE) rows. MAX (rather than AVG) keeps the displayed value deterministic when an item has pallets at different prices (rare but possible). Renders as `—` when the source is NULL / zero so a missing price isn't shown as a real `0.00`. Footer shows the average price across loaded items (summing prices is meaningless).
+
+#### 2) **Slashed Qty** — `SUM(whboxitems.Slashed)`
+
+Total slashed quantity for the item across in-scope warehouse rows. Sits next to **WH Qty** on the table so the two warehouse-source quantity columns are visually grouped.
+
+#### 3) **Blocked Qty** — `SUM(PriorSKUMax)` from `LPM_SimItemSkuMaxExcluded`
+
+For the selected country at the **latest** (Year1, Month1) — matches the period rule the existing `Total SKU Max` / `Avg SKU Max` / `To Fill Qty` columns already use, so all SKU-Max-related columns reflect the same monthly snapshot.
+
+The exclusion audit table can carry **multiple rows per (Store, Item)** when more than one exclusion rule fires for the same combination (e.g. both `ExcludeExport_Planning` and `RemoveItemsFromTransfer` match). Without deduping, `SUM(PriorSKUMax)` would double-count. The query deduplicates to one row per (Store, Item) first (`MAX(PriorSKUMax)` per pair — the prior-SkuMax value is identical across rules because it's the original value before zeroing).
+
+#### 4) **Blocked Stores** — `COUNT(DISTINCT StoreID)` from `LPM_SimItemSkuMaxExcluded`
+
+Same filter as Blocked Qty. Counts how many stores have this item excluded for the selected country / latest period.
+
+### Implementation notes
+
+- **No migration required** — `HOPrice` and `Slashed` already exist on both whboxitems schemas (per the operator); `LPM_SimItemSkuMaxExcluded` was created by migration 034 and extended by 048.
+- **Inline in `#WhItemsAgg`** — `HoPrice = MAX(w.HOPrice)` and `SlashedQty = SUM(w.Slashed)` are computed in the same `GROUP BY w.itemcode` aggregation that already builds `WhQty`, so no additional scan of the warehouse source.
+- **New temp table `#WhItemsBlocked`** — pre-aggregates the exclusion table per item with the dedupe CTE described above, then LEFT-joined into the final SELECT alongside the existing enrichment tables. Indexed on ItemCode.
+- **UI placement** — *HO Price* slots after *Brand* (item-level metadata); *Slashed Qty* sits next to *WH Qty* (warehouse-source qtys); *Blocked Qty* + *Blocked Stores* sit after *Avg SKU Max* (SKU-Max-related). *To Fill Qty* stays as the rightmost qty column.
+- **Excel** — column layout mirrors the on-screen ordering; *To Fill Qty* shifts from column 10 to column 14. HO Price formatted as `#,##0.00`; the other new cols are integer `#,##0`. Total row averages HO Price and sums the rest.
+
+> ⚠️ The implementation assumes `HOPrice` and `Slashed` columns exist on both `racks.dbo.whboxitems` (UAE) and the non-UAE `[<DataName>].dbo.WHBoxItemsExport` mirror. Verify by running the report for both UAE and a non-UAE country after deploy; a column-not-found SQL error would surface as a Load failure with a clear message.
+
+#### B) SIM Generate — kind label on each batch pill
+
+The "All batches for &lt;Country&gt; &lt;date&gt;" chip list at the top of the SIM Generate result preview now shows the batch kind inline next to the batch number, so a planner can see whether `#72` is an LPM batch or a Non-LPM batch without having to click each one to find out:
+
+- **Before:** `#72 Approved 21-May 10:03 GST`
+- **After:** `#72 [LPM] Approved 21-May 10:03 GST` *(or `[NONLPM]` or `[LPM+NONLPM]`)*
+
+The label is rendered as a small indigo-tinted badge between the batch number and the status colour so it doesn't compete with the green/amber status indicator. Derived from `BatchListEntry.Sources` (which was already on the record — no DB change needed) using the same uppercase-and-strip-dashes rule as the 1.14.81 Excel-filename helper, but with `+` as the joiner (`LPM+NONLPM` reads better in a chip than `LPM_NONLPM`). Batches with NULL/empty `Sources` (legacy / very old rows) simply omit the badge.
+
+### Files changed
+
+- `src/LpmSim.Data/Reports/WhItemsReportService.cs` — `WhItemsReportRow` extended with 4 fields (`HoPrice`, `SlashedQty`, `BlockedQty`, `BlockedStores`); `#WhItemsAgg` adds `MAX(HOPrice)` + `SUM(Slashed)`; new `#WhItemsBlocked` temp table from `LPM_SimItemSkuMaxExcluded`; final SELECT projects 4 new columns and LEFT JOINs the blocked rollup; reader maps indices 10-13.
+- `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` — table header / row / footer cells for the 4 new columns; per-page total calculations for Slashed / BlockedQty / BlockedStores / avg HO Price; Excel export adjusted (14 cols, To Fill Qty shifted to col 14, numeric-format ranges updated).
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — new `BatchKindLabel(string?)` helper (sibling of the 1.14.81 `CurrentBatchTag()`); batch-pill `MudButton` now renders the kind badge between `#N` and the status.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.81 → 1.14.82.
+- `CHANGELOG.md` — this section.
+
+---
+
 ## 1.14.81 — SIM Boxes: Kind + LPM Date columns; Excel filename LPM/NONLPM prefix (2026-05-21)
 
 ### What's new

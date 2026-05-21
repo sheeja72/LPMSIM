@@ -2522,44 +2522,84 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             // + per-period duration (from LPM_SimItemSkuMaxBuild — added in
             // migration 032; left-join keeps this method working when the
             // migration hasn't been applied yet).
+            //
+            // 1.14.83 — Display-user source switched from per-row
+            // LPM_SimItemSkuMax.CreatedBy to the per-period header
+            // LPM_SimItemSkuMaxBuild.BuiltBy.
+            //
+            // Why: the apply phase's UPDATE statement bumps CreateTS = @now
+            // when a row's data differs from staging, but does NOT update
+            // CreatedBy (only INSERTs set it). So when user X built earlier
+            // and user Y rebuilds, the UPDATEd rows end up with X's stale
+            // CreatedBy alongside Y's fresh CreateTS — and the
+            // "TOP 1 CreatedBy ORDER BY CreateTS DESC" query was therefore
+            // returning X's name even though Y did the latest build.
+            //
+            // LPM_SimItemSkuMaxBuild is a per-period header table whose
+            // BuiltBy column is MERGE-updated on every build with the
+            // current @user value — always correct. We read BuiltBy from
+            // it instead and only fall back to the per-row CreatedBy when
+            // the header table doesn't exist (migration 032 not applied)
+            // or doesn't have a row (build aborted before the MERGE).
             cmd.CommandText = @"
                 SELECT MAX(CreateTS) AS MaxTS,
                        CAST(COUNT_BIG(*) AS bigint) AS RowCnt
                   FROM dbo.LPM_SimItemSkuMax
                  WHERE Country = @c AND Year1 = @y AND Month1 = @m;
 
-                SELECT TOP (1) CreatedBy
-                  FROM dbo.LPM_SimItemSkuMax
-                 WHERE Country = @c AND Year1 = @y AND Month1 = @m
-                 ORDER BY CreateTS DESC;
-
+                -- 1.14.83 — Primary source for the displayed user: per-period
+                -- header. Returns (BuiltBy, DurationMs) — combined here so
+                -- the round-trip count stays at one. Empty result set when
+                -- migration 032 hasn't been applied yet.
                 IF OBJECT_ID('dbo.LPM_SimItemSkuMaxBuild', 'U') IS NOT NULL
                 BEGIN
-                    SELECT DurationMs
+                    SELECT BuiltBy, DurationMs
                       FROM dbo.LPM_SimItemSkuMaxBuild
                      WHERE Country = @c AND Year1 = @y AND Month1 = @m;
                 END
                 ELSE
-                    SELECT CAST(NULL AS bigint);";
+                    SELECT CAST(NULL AS varchar(80)) AS BuiltBy,
+                           CAST(NULL AS bigint)      AS DurationMs;
+
+                -- 1.14.83 — Fallback per-row CreatedBy. Used only when the
+                -- per-period header above didn't return a BuiltBy (migration
+                -- 032 missing or pre-1.14.83 builds with no header row).
+                SELECT TOP (1) CreatedBy
+                  FROM dbo.LPM_SimItemSkuMax
+                 WHERE Country = @c AND Year1 = @y AND Month1 = @m
+                 ORDER BY CreateTS DESC;";
             cmd.Parameters.Add(new SqlParameter("@c", country));
             cmd.Parameters.Add(new SqlParameter("@y", year));
             cmd.Parameters.Add(new SqlParameter("@m", month));
             cmd.CommandTimeout = 60;
 
+            // 1.14.83 — Result set order is now:
+            //   #1: MAX(CreateTS), COUNT_BIG(*)
+            //   #2: BuiltBy, DurationMs  (per-period header — primary user source)
+            //   #3: TOP 1 CreatedBy      (per-row fallback — used only when #2's BuiltBy is NULL)
             using var rdr = await cmd.ExecuteReaderAsync(ct);
             if (await rdr.ReadAsync(ct))
             {
                 if (!rdr.IsDBNull(0)) maxTs = rdr.GetDateTime(0);
                 cnt = rdr.IsDBNull(1) ? 0L : rdr.GetInt64(1);
             }
+            // Per-period header — when migration 032 hasn't been applied, the
+            // SQL returns one row of (NULL, NULL) rather than an empty result
+            // set, so the ReadAsync still succeeds and BuiltBy stays null.
+            string? builtBy = null;
             if (await rdr.NextResultAsync(ct) && await rdr.ReadAsync(ct))
             {
-                if (!rdr.IsDBNull(0)) user = rdr.GetString(0);
+                if (!rdr.IsDBNull(0)) builtBy = rdr.GetString(0);
+                if (!rdr.IsDBNull(1)) durationMs = rdr.GetInt64(1);
             }
+            // Per-row fallback CreatedBy — only consulted when the header
+            // didn't give us a name.
+            string? fallbackBy = null;
             if (await rdr.NextResultAsync(ct) && await rdr.ReadAsync(ct))
             {
-                if (!rdr.IsDBNull(0)) durationMs = rdr.GetInt64(0);
+                if (!rdr.IsDBNull(0)) fallbackBy = rdr.GetString(0);
             }
+            user = !string.IsNullOrEmpty(builtBy) ? builtBy : fallbackBy;
         }
 
         var fresh = maxTs.HasValue && maxTs.Value.Date >= DateTime.Today;
@@ -4193,13 +4233,26 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
 
                         -- UPDATE rows where any of the 4 cols differ.
                         -- (Skip-if-everything-unchanged — option b.)
+                        --
+                        -- 1.14.83 — Added `tgt.CreatedBy = @user`. Previously
+                        -- this UPDATE bumped CreateTS to the current build's
+                        -- timestamp but left CreatedBy carrying the PREVIOUS
+                        -- builder's name. The ''TOP 1 CreatedBy ORDER BY
+                        -- CreateTS DESC'' lookup in GetLastSkuMaxBuildAsync
+                        -- therefore returned the prior user's name alongside
+                        -- the new build's timestamp — a real bug. The primary
+                        -- display now reads BuiltBy from
+                        -- LPM_SimItemSkuMaxBuild (per-period header), but
+                        -- keeping the per-row CreatedBy in sync stops the
+                        -- audit trail from also drifting.
                         UPDATE tgt
                            SET tgt.SKUMax      = s.SKUMax,
                                tgt.WHBoxQty    = s.WHBoxQty,
                                tgt.VolumeGroup = s.VolumeGroup,
                                tgt.DivCode     = s.DivCode,
                                tgt.SOH         = s.SOH,            -- 1.14.35
-                               tgt.CreateTS    = @now
+                               tgt.CreateTS    = @now,
+                               tgt.CreatedBy   = @user             -- 1.14.83
                           FROM dbo.LPM_SimItemSkuMax tgt
                           INNER JOIN dbo.LPM_SimItemSkuMax_Staging s
                                   ON s.Country  = @country
