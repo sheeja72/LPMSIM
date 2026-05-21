@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.99</Version>
-    <AssemblyVersion>1.14.99.0</AssemblyVersion>
-    <FileVersion>1.14.99.0</FileVersion>
-    <InformationalVersion>1.14.99 (Eligible Boxes table — new "Closed (excluded from SIM)" row showing closed-box Box / Qty separately for LPM and Non-LPM. Same closed-box predicate the allocator uses (WhBoxItemsSource.BuildIsClosedExpression — UAE: USA..upcboxhead.Closed='Y'; non-UAE: Exclude_Transfers_Sim + CloseR1Pallet). Row is a SUBSET of the LPM / Non-LPM totals above (they include closed boxes per the 1.14.74 operator preference). BoxSegmentCounts record gains 4 new fields with default zero so old call sites compile unchanged.)</InformationalVersion>
+    <Version>1.14.100</Version>
+    <AssemblyVersion>1.14.100.0</AssemblyVersion>
+    <FileVersion>1.14.100.0</FileVersion>
+    <InformationalVersion>1.14.100 (Gap by UPC — three new context columns added after Remaining Qty: SOH (SUM LPM_LocStock.SOH across active stores), SKU Max (SUM LPM_SimItemSkuMax.SKUMax for batch's country/period), MAX Balance (= SKUMax − SOH; red when negative — stores already at/above SKU Max ceiling). Same lookup shape as WH SKU Investigation. ItemAllocationGapRow record gains SOH + SkuMax fields with computed MaxBalance property. Excel export updated with 3 new columns + total row.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

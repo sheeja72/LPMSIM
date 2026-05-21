@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.100 — Gap by UPC: SOH + SKU Max + MAX Balance columns added (2026-05-21)
+
+### What's new
+
+The **Gap by UPC** tab gets three new context columns after Remaining Qty:
+
+| Column | Formula | Source |
+|---|---|---|
+| **SOH** | `SUM(LPM_LocStock.SOH)` | Active stores in the batch's country (negative SOH clamped to 0, same rule as WH SKU Investigation) |
+| **SKU Max** | `SUM(LPM_SimItemSkuMax.SKUMax)` | Latest period for the batch's country |
+| **MAX Balance** | `SKUMax − SOH` | Computed in the record. Red when negative (stores already at/above SKU Max ceiling) |
+
+Mirrors the **WH SKU Investigation** layout shape so numbers reconcile byte-for-byte for the same item. Also mirrors the **Merch Need Balance** pattern from Store/Division Summary (Balance = ceiling − stock).
+
+### Why these columns
+
+Lets the planner answer "why is this item's allocation low?" without leaving the Gap by UPC tab:
+
+- High **SOH** vs low **SKU Max** → stores are already saturated; no room to ship more (negative MAX Balance).
+- Low **SOH** AND positive **MAX Balance** but big **Remaining** → some other cap (Merch Need Month, no-grade, etc.) is the blocker; check the Top Reason.
+
+### Excel export
+
+Three new columns appended (cols 7-9: SOH / SKU Max / MAX Balance); Top Reason shifts from col 7 to col 10. Total row sums all three new columns. Filename pattern unchanged: `{LPM_|NONLPM_}AllocationGap_ByUPC_Batch{n}_{date}.xlsx`.
+
+### Implementation notes
+
+- `ItemAllocationGapRow` record gains `SOH (long)` + `SkuMax (long)` fields with default `0` (back-compat with any direct constructors), plus computed `MaxBalance => SkuMax - SOH`.
+- SQL gains two new CTEs (`ItemSoh`, `ItemSkuMaxAgg`) reading from `racks.dbo.LPM_LocStock × bfldata.dbo.DataSettings` (active stores in country) and `LPMSIM.dbo.LPM_SimItemSkuMax` (batch country/period). Both LEFT-joined into the final SELECT.
+- Parameters `@country / @y / @m` added to the command (previously the SQL only used `@batchNo`).
+- Reader maps SOH at index 7, SkuMax at index 8 (TopReason stays at 6); uses `FieldCount > N` guards so old call sites (if any) don't break.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `ItemAllocationGapRow` extended; SQL gains `ItemSoh` + `ItemSkuMaxAgg` CTEs and projects new columns; reader maps indices 7 + 8; new parameters added.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — table gets 3 new headers/cells; footer totals; row cell renders MAX Balance in red when negative; Excel export adds 3 new cols + extends the total row.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.99 → 1.14.100.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar version `1.14.100`.
+2. Open Gap by UPC → click Load. Three new columns visible: **SOH | SKU Max | MAX Balance**.
+3. Cross-check SOH / SKU Max for any item against WH SKU Investigation's `Stores SOH` / `Total SKU Max` — should match.
+4. Items where the planner expects "stores are full" → check MAX Balance (negative = saturated).
+
+---
+
 ## 1.14.99 — Eligible Boxes: new "Closed (excluded from SIM)" row (2026-05-21)
 
 ### What's new

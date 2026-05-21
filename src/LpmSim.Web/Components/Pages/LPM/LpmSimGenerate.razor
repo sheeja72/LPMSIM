@@ -1754,6 +1754,10 @@
                 var igTotalElig      = fig.Sum(r => r.EligibleWhQty);
                 var igTotalSim       = fig.Sum(r => r.SimQty);
                 var igTotalRemaining = fig.Sum(r => r.RemainingQty);
+                // 1.14.100 — Totals for the new context columns.
+                var igTotalSoh       = fig.Sum(r => r.SOH);
+                var igTotalSkuMax    = fig.Sum(r => r.SkuMax);
+                var igTotalMaxBal    = fig.Sum(r => r.MaxBalance);
 
                 <MudTable T="ItemAllocationGapRow" Items="fig" Hover Striped Dense
                           FixedHeader Height="55vh" AllowUnsorted="false">
@@ -1771,6 +1775,14 @@
                         <MudTh Style="text-align:right;"><div class="th-total" style="background:#fef9c3;">@igTotalRemaining.ToString("N0")</div>
                             <MudTableSortLabel T="ItemAllocationGapRow" InitialDirection="SortDirection.Descending"
                                                SortBy="r => r.RemainingQty">Remaining<br />Qty</MudTableSortLabel></MudTh>
+                        @* 1.14.100 — Per-item context columns: SOH, SKU Max, MAX Balance.
+                           MAX Balance = SKUMax − SOH (negative = stores already saturated). *@
+                        <MudTh Style="text-align:right;"><div class="th-total" title="Σ LPM_LocStock.SOH across active stores in the country for this item.">@igTotalSoh.ToString("N0")</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total" title="Σ LPM_SimItemSkuMax.SKUMax for the batch's country/period.">@igTotalSkuMax.ToString("N0")</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.SkuMax">SKU<br />Max</MudTableSortLabel></MudTh>
+                        <MudTh Style="text-align:right;"><div class="th-total" title="MAX Balance = SKUMax − SOH. Negative = stores already at/above SKU Max ceiling.">@igTotalMaxBal.ToString("N0")</div>
+                            <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.MaxBalance">MAX<br />Balance</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>
                             <MudTableSortLabel T="ItemAllocationGapRow" SortBy="r => r.TopReason">Top Reason</MudTableSortLabel></MudTh>
                     </HeaderContent>
@@ -1781,6 +1793,10 @@
                         <MudTd Style="text-align:right;">@context.EligibleWhQty.ToString("N0")</MudTd>
                         <MudTd Style="text-align:right;">@context.SimQty.ToString("N0")</MudTd>
                         <MudTd Style="text-align:right;font-weight:600;background:#fffbeb;">@context.RemainingQty.ToString("N0")</MudTd>
+                        @* 1.14.100 — SOH / SKU Max / MAX Balance cells; MAX Balance in red when negative. *@
+                        <MudTd Style="text-align:right;">@context.SOH.ToString("N0")</MudTd>
+                        <MudTd Style="text-align:right;">@context.SkuMax.ToString("N0")</MudTd>
+                        <MudTd Style="@(context.MaxBalance < 0 ? "text-align:right;color:#dc2626;" : "text-align:right;")">@context.MaxBalance.ToString("N0")</MudTd>
                         <MudTd>
                             @if (!string.IsNullOrEmpty(context.TopReason))
                             {
@@ -3354,8 +3370,12 @@
             var rows = FilteredItemGap.ToList();
             using var wb = new XLWorkbook();
             var ws = wb.Worksheets.Add("Gap by UPC");
+            // 1.14.100 — SOH / SKU Max / MAX Balance appended after Remaining Qty;
+            // Top Reason shifts from col 7 to col 10.
             string[] headers = { "Itemcode", "Item Name", "Division",
-                                 "Eligible WH Qty", "SIM Qty", "Remaining Qty", "Top Reason" };
+                                 "Eligible WH Qty", "SIM Qty", "Remaining Qty",
+                                 "SOH", "SKU Max", "MAX Balance",
+                                 "Top Reason" };
             for (int i = 0; i < headers.Length; i++)
             {
                 ws.Cell(1, i + 1).Value = headers[i];
@@ -3366,13 +3386,16 @@
             int row = 2;
             foreach (var r in rows)
             {
-                ws.Cell(row, 1).Value = r.ItemCode;
-                ws.Cell(row, 2).Value = r.ItemName;
-                ws.Cell(row, 3).Value = r.Division;
-                ws.Cell(row, 4).Value = r.EligibleWhQty;
-                ws.Cell(row, 5).Value = r.SimQty;
-                ws.Cell(row, 6).Value = r.RemainingQty;
-                ws.Cell(row, 7).Value = r.TopReason;
+                ws.Cell(row, 1).Value  = r.ItemCode;
+                ws.Cell(row, 2).Value  = r.ItemName;
+                ws.Cell(row, 3).Value  = r.Division;
+                ws.Cell(row, 4).Value  = r.EligibleWhQty;
+                ws.Cell(row, 5).Value  = r.SimQty;
+                ws.Cell(row, 6).Value  = r.RemainingQty;
+                ws.Cell(row, 7).Value  = r.SOH;          // 1.14.100
+                ws.Cell(row, 8).Value  = r.SkuMax;       // 1.14.100
+                ws.Cell(row, 9).Value  = r.MaxBalance;   // 1.14.100
+                ws.Cell(row, 10).Value = r.TopReason;
                 row++;
             }
             // TOTAL row.
@@ -3382,8 +3405,11 @@
             ws.Cell(totalRow, 4).Value = rows.Sum(r => r.EligibleWhQty);
             ws.Cell(totalRow, 5).Value = rows.Sum(r => r.SimQty);
             ws.Cell(totalRow, 6).Value = rows.Sum(r => r.RemainingQty);
-            for (int c = 4; c <= 6; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
-            ws.Range(2, 4, totalRow, 6).Style.NumberFormat.Format = "#,##0";
+            ws.Cell(totalRow, 7).Value = rows.Sum(r => r.SOH);          // 1.14.100
+            ws.Cell(totalRow, 8).Value = rows.Sum(r => r.SkuMax);       // 1.14.100
+            ws.Cell(totalRow, 9).Value = rows.Sum(r => r.MaxBalance);   // 1.14.100
+            for (int c = 4; c <= 9; c++) ws.Cell(totalRow, c).Style.Font.Bold = true;
+            ws.Range(2, 4, totalRow, 9).Style.NumberFormat.Format = "#,##0";
             ws.Columns().AdjustToContents();
 
             using var ms = new MemoryStream();

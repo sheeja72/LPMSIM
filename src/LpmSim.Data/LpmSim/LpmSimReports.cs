@@ -253,7 +253,20 @@ public record ItemAllocationGapRow(
     long   EligibleWhQty,
     long   SimQty,
     long   RemainingQty,
-    string TopReason);
+    string TopReason,
+    // 1.14.100 — Per-item context columns added so the planner can see WHY a
+    // gap exists without leaving the tab. SOH = SUM(LPM_LocStock.SOH) across
+    // active stores in the country; SkuMax = SUM(LPM_SimItemSkuMax.SKUMax)
+    // for the batch's country/period; MaxBalance = SKUMax − SOH (room left
+    // before stores hit the SKU Max ceiling — negative = already saturated).
+    long   SOH       = 0,
+    long   SkuMax    = 0)
+{
+    /// <summary>1.14.100 — MAX Balance = SKUMax − SOH. Negative when the
+    /// stores are already at or above the SKU Max ceiling for the item;
+    /// positive = headroom remaining.</summary>
+    public long MaxBalance => SkuMax - SOH;
+}
 
 /// <summary>
 /// One row of the "Allocation Result" matrix at the top of the SIM Generate
@@ -2585,6 +2598,33 @@ SELECT {string.Join(", ", selectParts)}
                           ON LTRIM(RTRIM(d.Division)) = LTRIM(RTRIM(sm.Division))
                          AND d.IsActive = 1
                  GROUP BY u.itemcode
+            ),
+            -- 1.14.100 — SOH per item across active stores in the country.
+            -- Same source + DataSettings join shape used by WH SKU Investigation
+            -- (StoresSoh) so the numbers reconcile byte-for-byte.
+            ItemSoh AS (
+                SELECT ls.Itemcode AS ItemCode,
+                       SOH = SUM(CAST(
+                           CASE WHEN ISNULL(ls.SOH, 0) < 0 THEN 0
+                                ELSE ls.SOH END AS bigint))
+                  FROM racks.dbo.LPM_LocStock ls
+                  INNER JOIN bfldata.dbo.DataSettings ds ON ds.StoreID = ls.StoreID
+                 WHERE ds.SIMCountry  = @country
+                   AND ds.ActiveStore = 'Y'
+                   AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
+                 GROUP BY ls.Itemcode
+            ),
+            -- 1.14.100 — SKU Max per item for the batch's country at the
+            -- latest period in LPM_SimItemSkuMax (matches the existing
+            -- SkuMax projection in WH SKU Investigation).
+            ItemSkuMaxAgg AS (
+                SELECT sm.ItemCode,
+                       SkuMax = SUM(CAST(ISNULL(sm.SKUMax, 0) AS bigint))
+                  FROM LPMSIM.dbo.LPM_SimItemSkuMax sm
+                 WHERE sm.Country = @country
+                   AND sm.Year1   = @y
+                   AND sm.Month1  = @m
+                 GROUP BY sm.ItemCode
             )
             SELECT  ie.ItemCode,
                     ItemName     = ISNULL(im.description, ''),
@@ -2592,19 +2632,31 @@ SELECT {string.Join(", ", selectParts)}
                     EligibleWhQty = ie.EligibleWhQty,
                     SimQty        = ISNULL(ia.SimQty, 0),
                     RemainingQty  = ie.EligibleWhQty - ISNULL(ia.SimQty, 0),
-                    TopReason     = ISNULL(itr.TopReason, '')
+                    TopReason     = ISNULL(itr.TopReason, ''),
+                    -- 1.14.100 — SOH + SKUMax surfaced per item; MaxBalance
+                    -- = SKUMax − SOH computed in the C# record (saves a
+                    -- subtraction in SQL and keeps the field shape consistent
+                    -- with MerchNeedBalance on Store/Division Summary).
+                    SOH          = ISNULL(isoh.SOH, 0),
+                    SkuMax       = ISNULL(ism.SkuMax, 0)
               FROM  ItemEligible ie
               LEFT  JOIN ItemAllocated ia       ON ia.ItemCode = ie.ItemCode
               LEFT  JOIN ItemTopReason itr      ON itr.ItemCode = ie.ItemCode AND itr.rn = 1
               LEFT  JOIN ItemDiv idv            ON idv.itemcode = ie.ItemCode
               LEFT  JOIN HODATA.dbo.Itemmaster im
                       ON CAST(im.Itemcode AS nvarchar(64)) = ie.ItemCode
+              LEFT  JOIN ItemSoh    isoh        ON isoh.ItemCode = ie.ItemCode    -- 1.14.100
+              LEFT  JOIN ItemSkuMaxAgg ism      ON ism.ItemCode  = ie.ItemCode    -- 1.14.100
              WHERE (ie.EligibleWhQty - ISNULL(ia.SimQty, 0)) > 0
              ORDER BY RemainingQty DESC, ie.ItemCode;";
 
         using var cmd = (SqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
+        // 1.14.100 — @country/@y/@m needed by the new ItemSoh + ItemSkuMaxAgg CTEs.
+        cmd.Parameters.Add(new SqlParameter("@country", country));
+        cmd.Parameters.Add(new SqlParameter("@y",       b.RunYear));
+        cmd.Parameters.Add(new SqlParameter("@m",       b.RunMonth));
         foreach (var p in whParms)         cmd.Parameters.Add(p);
         foreach (var p in pcParms)         cmd.Parameters.Add(p);   // 1.14.98
         foreach (var p in lpmMonthsParms)  cmd.Parameters.Add(p);   // 1.14.98
@@ -2621,6 +2673,10 @@ SELECT {string.Join(", ", selectParts)}
                 EligibleWhQty: rdr.IsDBNull(3) ? 0L : rdr.GetInt64(3),
                 SimQty:        rdr.IsDBNull(4) ? 0L : rdr.GetInt64(4),
                 RemainingQty:  rdr.IsDBNull(5) ? 0L : rdr.GetInt64(5),
+                // 1.14.100 — SOH at index 7, SkuMax at index 8 (TopReason
+                // stays at 6). MaxBalance is computed in the record.
+                SOH:           rdr.FieldCount > 7 && !rdr.IsDBNull(7) ? rdr.GetInt64(7) : 0L,
+                SkuMax:        rdr.FieldCount > 8 && !rdr.IsDBNull(8) ? rdr.GetInt64(8) : 0L,
                 TopReason:     rdr.IsDBNull(6) ? "" : rdr.GetString(6)));
         }
         return rows;
