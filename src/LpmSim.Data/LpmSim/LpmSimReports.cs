@@ -173,6 +173,13 @@ public class BoxDetailRow
     /// spot "this box already shipped in batch #N, why is it back?" cases.</summary>
     public long? RecentBatchNo { get; set; }
 
+    /// <summary>1.14.81 — Raw LPM-tagged date from <c>whboxitems.LPMDt</c> /
+    /// <c>WHBoxItemsExport.LPMDt</c>. Pair-column with BoxKind: when this is
+    /// non-NULL the box is "LPM" (which is exactly how BoxKind is computed).
+    /// NULL means the box is Non-LPM. Surfaced separately so the planner can
+    /// see *when* the LPM tag was applied, not just whether it exists.</summary>
+    public DateTime? LpmDate { get; set; }
+
     /// <summary>% of the box's qty that was allocated in this batch (Allocated / Box Qty × 100).</summary>
     public decimal? SkuUsabilityPct =>
         BoxQty.HasValue && BoxQty.Value > 0
@@ -956,6 +963,7 @@ BoxMeta AS (
            MAX(w.GinDate)                                                        AS GinDate,
            MAX(w.FromTo)                                                         AS FromTo,
            MAX(w.ContNo)                                                         AS ContNo,
+           MAX(w.LPMDt)                                                          AS LpmDate,
            CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
                 THEN 'LPM' ELSE 'Non-LPM' END                                    AS BoxKind
       FROM BoxAgg b
@@ -979,6 +987,7 @@ BoxMeta AS (
            MAX(w.GinDate)                                                        AS GinDate,
            MAX(w.FromTo)                                                         AS FromTo,
            MAX(w.ContNo)                                                         AS ContNo,
+           MAX(w.LPMDt)                                                          AS LpmDate,
            CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
                 THEN 'LPM' ELSE 'Non-LPM' END                                    AS BoxKind
       FROM BoxAgg b
@@ -1054,7 +1063,8 @@ SELECT b.LPMBatchNo,
        bm.GinDate,
        bm.FromTo,
        bm.ContNo,           -- 1.14.80 — Container number from whboxitems
-       rab.RecentBatchNo    -- 1.14.80 — Most recent Approved batch with this BoxNo (NULL if none)
+       rab.RecentBatchNo,   -- 1.14.80 — Most recent Approved batch with this BoxNo (NULL if none)
+       bm.LpmDate           -- 1.14.81 — Raw LPMDt (pair with BoxKind: non-NULL ⇒ LPM)
   FROM BoxAgg b
   LEFT JOIN BoxMeta bm
          ON ISNULL(bm.BoxNo, '')   = ISNULL(b.BoxNo, '')
@@ -1134,7 +1144,15 @@ SELECT sa.LPMBatchNo,
        CAST(NULL AS nvarchar(50)) AS Warehouse,
        CAST(NULL AS nvarchar(50)) AS Rack,
        CAST(0    AS bigint)       AS RoundRobinQty,
-       CAST(NULL AS nvarchar(10)) AS BoxKind,
+       -- 1.14.81 — BoxKind was a NULL placeholder pre-1.14.81. Now computed:
+       -- if any matching whboxitems row has a non-NULL LPMDt for this pallet,
+       -- the box is ''LPM''; otherwise ''Non-LPM''. Same rule as the rollup CTE.
+       CASE WHEN EXISTS (
+                SELECT 1 FROM {whSrc} w
+                 WHERE w.BoxNo = sa.MatchKey
+                   AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))
+                   AND w.LPMDt IS NOT NULL)
+            THEN 'LPM' ELSE 'Non-LPM' END AS BoxKind,
        (SELECT TOP 1 ToteId FROM {whSrc} w WHERE w.BoxNo = sa.MatchKey) AS ToteId,
        -- 1.14.70 — new columns from whboxitems / WHBoxItemsExport. All
        -- pallet-level attributes so they're matched on (BoxNo, PalletNo)
@@ -1165,7 +1183,11 @@ SELECT sa.LPMBatchNo,
            AND bb.LPMBatchNo <> @batchNo
            AND bb.Country   = @batchCountry
            AND o.BoxNo      = sa.BoxNo
-           AND ISNULL(sa.BoxNo, '') <> '') AS RecentBatchNo
+           AND ISNULL(sa.BoxNo, '') <> '') AS RecentBatchNo,
+       -- 1.14.81 — Per-pallet LPMDt (paired with BoxKind). NULL ⇒ Non-LPM box.
+       (SELECT TOP 1 LPMDt FROM {whSrc} w
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS LpmDate
   FROM SimAgg sa
   LEFT JOIN dbo.DataSettings ds ON ds.StoreID = sa.StoreID
   LEFT JOIN dbo.Division div ON div.DivCode = sa.DivCode
@@ -1856,6 +1878,8 @@ SELECT TOP (@top)
         // older callers safe if they ever run an out-of-date SELECT.
         ContNo         = r.FieldCount > 22 && !r.IsDBNull(22) ? r.GetString(22)   : null,
         RecentBatchNo  = r.FieldCount > 23 && !r.IsDBNull(23) ? r.GetInt64(23)    : (long?)null,
+        // 1.14.81 — LpmDate at index 24.
+        LpmDate        = r.FieldCount > 24 && !r.IsDBNull(24) ? r.GetDateTime(24) : (DateTime?)null,
     };
 
     // 1.14.12: PalletNo column added at index 6; every subsequent index shifted by +1.

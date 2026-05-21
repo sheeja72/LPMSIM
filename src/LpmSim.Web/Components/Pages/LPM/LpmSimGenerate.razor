@@ -1361,6 +1361,9 @@
                         <MudTh><div class="th-total">@filteredBoxes.Count.ToString("N0") rows</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.PalletNo ?? string.Empty">Pallet No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxKind ?? string.Empty">Kind</MudTableSortLabel></MudTh>
+                        @* 1.14.81 — LPM Date column paired with Kind so the planner can see
+                           both whether a box is LPM-tagged and when the tag was applied. *@
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmDate ?? DateTime.MinValue">LPM Date</MudTableSortLabel></MudTh>
                         @* 1.14.65 — Division column added after Kind (top-1 mapping per box). *@
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.DivisionName ?? string.Empty">Division</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div>Pallet Type</MudTh>
@@ -1397,6 +1400,8 @@
                                 <span class="lpm-status lpm-status-warn">Non-LPM</span>
                             }
                         </MudTd>
+                        @* 1.14.81 — LPM Date cell (blank when Non-LPM). *@
+                        <MudTd>@(context.LpmDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
                         <MudTd>@context.DivisionName</MudTd>
                         <MudTd>@context.PalletType</MudTd>
                         <MudTd>@context.TypeName</MudTd>
@@ -2219,6 +2224,26 @@
 }
 
 @code {
+    /// <summary>
+    /// 1.14.81 — Leading filename prefix derived from the current batch's
+    /// <c>Sources</c> value (e.g. "LPM" / "Non-LPM" / "LPM,Non-LPM" / NULL).
+    /// Mirrors the helper in LpmSimReports.razor — returns "LPM_",
+    /// "NONLPM_", "LPM_NONLPM_" or "" so Downloads-folder views group the
+    /// LPM and Non-LPM Excel exports separately and so a NONLPM export
+    /// can't be misread as an LPM one at a glance.
+    /// </summary>
+    private string CurrentBatchTag()
+    {
+        var raw = _readiness?.CurrentBatchSources;
+        if (string.IsNullOrWhiteSpace(raw)) return "";
+        var s = raw.TrimEnd('*').Trim()
+                   .Replace(" ", "")
+                   .Replace(",", "_")
+                   .Replace("-", "")
+                   .ToUpperInvariant();
+        return string.IsNullOrEmpty(s) ? "" : s + "_";
+    }
+
     private List<string> _countries = new();
     private string _country = "UAE";
     private DateTime? _runDate = DateTime.Today;
@@ -2938,7 +2963,8 @@
             var bytes = ms.ToArray();
             var b64 = Convert.ToBase64String(bytes);
             var url = $"data:application/octet-stream;base64,{b64}";
-            var fileName = $"AllocationGap_Batch{_readiness?.CurrentBatchNo}_{DateTime.Now:yyyy-MM-dd_HHmm}.xlsx";
+            // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag() (was untagged).
+            var fileName = $"{CurrentBatchTag()}AllocationGap_Batch{_readiness?.CurrentBatchNo}_{DateTime.Now:yyyy-MM-dd_HHmm}.xlsx";
             await JS.InvokeVoidAsync("lpmDownload", url, fileName);
             Snackbar.Add($"Downloaded {_gapRows.Count:N0} row(s) to {fileName}.", Severity.Success);
         }
@@ -3225,7 +3251,10 @@
         var bn  = _readiness?.CurrentBatchNo ?? 0;
         var ts  = DateTime.Now.ToString("yyyyMMdd-HHmm");
         var cr  = _customResult;
-        await SaveExcelAsync($"LPMSIM_Custom_{bn}_{ts}.xlsx", "Custom", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag(). Stored in a local
+        // so the success-snackbar can quote the same name (it was inlined twice).
+        var customFileName = $"{CurrentBatchTag()}LPMSIM_Custom_{bn}_{ts}.xlsx";
+        await SaveExcelAsync(customFileName, "Custom", sheet =>
         {
             for (int c = 0; c < cr.Columns.Count; c++)
             {
@@ -3260,7 +3289,7 @@
                 }
             }
         });
-        Snackbar.Add($"Exported {cr.Rows.Count:N0} rows to LPMSIM_Custom_{bn}_{ts}.xlsx",
+        Snackbar.Add($"Exported {cr.Rows.Count:N0} rows to {customFileName}",
                      Severity.Success, cfg => cfg.VisibleStateDuration = 4000);
     }
 
@@ -4303,7 +4332,8 @@
         var rows = FilteredSummary.ToList();
         if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
         var bn = _readiness?.CurrentBatchNo ?? 0;
-        await SaveExcelAsync($"LPMSIM_Summary_{bn}.xlsx", "Summary", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag().
+        await SaveExcelAsync($"{CurrentBatchTag()}LPMSIM_Summary_{bn}.xlsx", "Summary", sheet =>
         {
             string[] headers = { "Store ID", "Store Name", "Rank", "Division", "EOM", "SOH", "Merch Need (Week)", "LPM SIM Qty", "RR Qty", "Override Qty", "Use %" };
             ApplyHeaders(sheet, headers);
@@ -4333,7 +4363,8 @@
         var rows = FilteredDivisionSummary.ToList();
         if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
         var bn = _readiness?.CurrentBatchNo ?? 0;
-        await SaveExcelAsync($"LPMSIM_DivisionSummary_{bn}.xlsx", "DivisionSummary", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag().
+        await SaveExcelAsync($"{CurrentBatchTag()}LPMSIM_DivisionSummary_{bn}.xlsx", "DivisionSummary", sheet =>
         {
             // 1.14.33: Box Qty inserted between Merch Need (Day) and SIM Qty
             // to match the on-screen column order in the Division Summary tab.
@@ -4370,7 +4401,8 @@
         var rows = FilteredStoreSummary.ToList();
         if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
         var bn = _readiness?.CurrentBatchNo ?? 0;
-        await SaveExcelAsync($"LPMSIM_StoreSummary_{bn}.xlsx", "StoreSummary", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag().
+        await SaveExcelAsync($"{CurrentBatchTag()}LPMSIM_StoreSummary_{bn}.xlsx", "StoreSummary", sheet =>
         {
             string[] headers = { "Store ID", "Store Name", "EOM", "SOH", "Merch Need (Week)", "SIM Qty", "RR Qty", "Override Qty" };
             ApplyHeaders(sheet, headers);
@@ -4395,13 +4427,15 @@
         var rows = FilteredBoxes.ToList();
         if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
         var bn = _readiness?.CurrentBatchNo ?? 0;
-        await SaveExcelAsync($"LPMSIM_Boxes_{bn}.xlsx", "Boxes", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag().
+        await SaveExcelAsync($"{CurrentBatchTag()}LPMSIM_Boxes_{bn}.xlsx", "Boxes", sheet =>
         {
             // 1.14.12: Pallet No column added after Box No.
             // 1.14.65: Division (after Kind) + Tote ID (after Rack) added.
             // 1.14.70: Purchase Dt / GIN No / GIN Date / From-To added after Tote ID.
             // 1.14.80: Cont No + Recent Batch appended after From/To (qty/usability columns shift +2).
-            string[] headers = { "Box No", "Pallet No", "Kind", "Division", "Pallet Type", "Type Name",
+            // 1.14.81: LPM Date inserted after Kind (everything from Division onwards shifts +1).
+            string[] headers = { "Box No", "Pallet No", "Kind", "LPM Date", "Division", "Pallet Type", "Type Name",
                                  "Trn Date", "Warehouse", "Rack", "Tote ID",
                                  "Purchase Dt", "GIN No", "GIN Date", "From/To",
                                  "Cont No", "Recent Batch",
@@ -4413,35 +4447,38 @@
                 sheet.Cell(row, 1).Value  = r.BoxNo;
                 sheet.Cell(row, 2).Value  = r.PalletNo ?? "";
                 sheet.Cell(row, 3).Value  = r.BoxKind ?? "";
-                sheet.Cell(row, 4).Value  = r.DivisionName ?? "";
-                sheet.Cell(row, 5).Value  = r.PalletType ?? "";
-                sheet.Cell(row, 6).Value  = r.TypeName ?? "";
-                if (r.TrnDate.HasValue) sheet.Cell(row, 7).Value = r.TrnDate.Value;
-                sheet.Cell(row, 8).Value  = r.Warehouse ?? "";
-                sheet.Cell(row, 9).Value  = r.Rack ?? "";
-                sheet.Cell(row, 10).Value = r.ToteId ?? "";
+                // 1.14.81 — LPM Date at col 4. Everything below shifts +1.
+                if (r.LpmDate.HasValue) sheet.Cell(row, 4).Value = r.LpmDate.Value;
+                sheet.Cell(row, 5).Value  = r.DivisionName ?? "";
+                sheet.Cell(row, 6).Value  = r.PalletType ?? "";
+                sheet.Cell(row, 7).Value  = r.TypeName ?? "";
+                if (r.TrnDate.HasValue) sheet.Cell(row, 8).Value = r.TrnDate.Value;
+                sheet.Cell(row, 9).Value  = r.Warehouse ?? "";
+                sheet.Cell(row, 10).Value = r.Rack ?? "";
+                sheet.Cell(row, 11).Value = r.ToteId ?? "";
                 // 1.14.70 — Pallet-purchase / GIN columns. Dates kept as
                 // DateTime so Excel formats them natively + sorts properly.
-                if (r.PurDate.HasValue) sheet.Cell(row, 11).Value = r.PurDate.Value;
-                sheet.Cell(row, 12).Value = r.GINNo ?? "";
-                if (r.GinDate.HasValue) sheet.Cell(row, 13).Value = r.GinDate.Value;
-                sheet.Cell(row, 14).Value = r.FromTo ?? "";
+                if (r.PurDate.HasValue) sheet.Cell(row, 12).Value = r.PurDate.Value;
+                sheet.Cell(row, 13).Value = r.GINNo ?? "";
+                if (r.GinDate.HasValue) sheet.Cell(row, 14).Value = r.GinDate.Value;
+                sheet.Cell(row, 15).Value = r.FromTo ?? "";
                 // 1.14.80 — Cont No + Recent Batch. RecentBatchNo as a numeric so
                 // Excel sort/filter is usable; blank when no prior batch matches.
-                sheet.Cell(row, 15).Value = r.ContNo ?? "";
-                if (r.RecentBatchNo.HasValue) sheet.Cell(row, 16).Value = r.RecentBatchNo.Value;
-                sheet.Cell(row, 17).Value = r.BoxQty ?? 0;
-                sheet.Cell(row, 18).Value = r.LpmSimQty;
-                sheet.Cell(row, 19).Value = r.RoundRobinQty;
-                sheet.Cell(row, 20).Value = (double?)r.SkuUsabilityPct;
+                sheet.Cell(row, 16).Value = r.ContNo ?? "";
+                if (r.RecentBatchNo.HasValue) sheet.Cell(row, 17).Value = r.RecentBatchNo.Value;
+                sheet.Cell(row, 18).Value = r.BoxQty ?? 0;
+                sheet.Cell(row, 19).Value = r.LpmSimQty;
+                sheet.Cell(row, 20).Value = r.RoundRobinQty;
+                sheet.Cell(row, 21).Value = (double?)r.SkuUsabilityPct;
             }
-            sheet.Range(2, 7, rows.Count + 1, 7).Style.NumberFormat.Format = "yyyy-mm-dd";
-            // 1.14.70 — Format the two new date columns (Purchase Dt at 11, GIN Date at 13).
-            sheet.Range(2, 11, rows.Count + 1, 11).Style.NumberFormat.Format = "yyyy-mm-dd";
-            sheet.Range(2, 13, rows.Count + 1, 13).Style.NumberFormat.Format = "yyyy-mm-dd";
-            // 1.14.80 — Trailing numeric columns shifted from 15-18 → 17-20.
-            FormatNumeric(sheet, rows.Count, new[] { 17, 18, 19 });
-            sheet.Range(2, 20, rows.Count + 1, 20).Style.NumberFormat.Format = "0.0";
+            // 1.14.81 — Date columns: LPM Date (4), Trn Date (8 was 7), Purchase Dt (12 was 11), GIN Date (14 was 13).
+            sheet.Range(2, 4,  rows.Count + 1, 4 ).Style.NumberFormat.Format = "yyyy-mm-dd";
+            sheet.Range(2, 8,  rows.Count + 1, 8 ).Style.NumberFormat.Format = "yyyy-mm-dd";
+            sheet.Range(2, 12, rows.Count + 1, 12).Style.NumberFormat.Format = "yyyy-mm-dd";
+            sheet.Range(2, 14, rows.Count + 1, 14).Style.NumberFormat.Format = "yyyy-mm-dd";
+            // 1.14.81 — Trailing numeric columns shifted from 17-20 → 18-21.
+            FormatNumeric(sheet, rows.Count, new[] { 18, 19, 20 });
+            sheet.Range(2, 21, rows.Count + 1, 21).Style.NumberFormat.Format = "0.0";
         });
     }
 
@@ -4450,7 +4487,10 @@
         var rows = FilteredItems.ToList();
         if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
         var bn = _readiness?.CurrentBatchNo ?? 0;
-        await SaveExcelAsync($"LPMSIM_Items_{bn}.xlsx", "Items", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag(). Stored in a local
+        // so the success-snackbar quotes the same name.
+        var itemsFileName = $"{CurrentBatchTag()}LPMSIM_Items_{bn}.xlsx";
+        await SaveExcelAsync(itemsFileName, "Items", sheet =>
         {
             // Excel columns mirror the on-screen Item Details table.
             // 1.14.12: Pallet No column added after Item.
@@ -4478,7 +4518,7 @@
             sheet.Range(2, 4,  rows.Count + 1, 4).Style.NumberFormat.Format  = "0.##";
             sheet.Range(2, 14, rows.Count + 1, 14).Style.NumberFormat.Format = "0.0";
         });
-        Snackbar.Add($"Exported {rows.Count:N0} item-detail rows to LPMSIM_Items_{bn}.xlsx",
+        Snackbar.Add($"Exported {rows.Count:N0} item-detail rows to {itemsFileName}",
                      Severity.Success, cfg => cfg.VisibleStateDuration = 4000);
     }
 
@@ -4501,7 +4541,8 @@
         }
         if (rows.Count == 0) { Snackbar.Add("Nothing to export.", Severity.Info); return; }
 
-        await SaveExcelAsync($"LPMSIM_Trace_{bn}.xlsx", "Trace", sheet =>
+        // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag().
+        await SaveExcelAsync($"{CurrentBatchTag()}LPMSIM_Trace_{bn}.xlsx", "Trace", sheet =>
         {
             string[] headers = { "Phase", "Decision", "Box", "Item", "Div Code", "Division", "Store ID", "Store",
                                  "SKU Max", "SOH (Item)", "SKU Bal", "Target EOM",

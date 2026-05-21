@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.80</Version>
-    <AssemblyVersion>1.14.80.0</AssemblyVersion>
-    <FileVersion>1.14.80.0</FileVersion>
-    <InformationalVersion>1.14.80 (SIM Boxes report — two new columns: (1) Cont No — container number from whboxitems/WHBoxItemsExport.ContNo, pallet-level (matched on BoxNo + PalletNo); (2) Recent Batch — most recent Approved SIM batch (other than the current one) in the same country that contained this BoxNo. Surfaces "this box already shipped, why is it back?" reuse cases. Both columns appear in the Reports SIM Boxes tab, the Generate-preview Boxes tab, and both Excel exports.)</InformationalVersion>
+    <Version>1.14.81</Version>
+    <AssemblyVersion>1.14.81.0</AssemblyVersion>
+    <FileVersion>1.14.81.0</FileVersion>
+    <InformationalVersion>1.14.81 (Two changes bundled: (1) SIM Boxes — LPM tag columns: Kind (LPM/Non-LPM badge) added to Reports SIM Boxes tab (Generate-preview already had it; also fixed pre-existing placeholder bug where Reports non-rollup hard-coded BoxKind to NULL); LPM Date (raw whboxitems.LPMDt) added to both Reports SIM Boxes and Generate-preview Boxes tabs plus both Excel exports. (2) Excel filename prefix — every batch-level Excel download (8 in Generate + 3 in Reports) now leads with the LPM/NONLPM tag (was a trailing _LPM/_NonLPM suffix; Non-LPM form is now all-caps NONLPM so it can't be misread as LPM at a glance, and Generate-side exports that were untagged previously now carry the prefix too).)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

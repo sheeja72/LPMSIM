@@ -238,6 +238,11 @@ else
                             <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.DivisionName ?? string.Empty">Division</MudTableSortLabel></MudTh>
                         }
                         <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxNo">Box</MudTableSortLabel></MudTh>
+                        @* 1.14.81 — Kind (LPM/Non-LPM badge) + LPM Date right after Box
+                           so the planner sees the LPM tag at a glance, paired with the
+                           date stamp from whboxitems.LPMDt. *@
+                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxKind ?? string.Empty">Kind</MudTableSortLabel></MudTh>
+                        <MudTh><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmDate ?? DateTime.MinValue">LPM Date</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalBoxQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Box Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalAlloc.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">Allocated Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@avgUsability.ToString("0.0")% avg</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.SkuUsabilityPct ?? 0m">SKU Usability %</MudTableSortLabel></MudTh>
@@ -270,6 +275,18 @@ else
                             <MudTd>@context.DivisionName</MudTd>
                         }
                         <MudTd><code>@context.BoxNo</code></MudTd>
+                        @* 1.14.81 — Kind badge (mirrors Generate preview styling) + LPM Date. *@
+                        <MudTd>
+                            @if (context.BoxKind == "LPM")
+                            {
+                                <span class="lpm-status lpm-status-ok">LPM</span>
+                            }
+                            else if (context.BoxKind == "Non-LPM")
+                            {
+                                <span class="lpm-status lpm-status-warn">Non-LPM</span>
+                            }
+                        </MudTd>
+                        <MudTd>@(context.LpmDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
                         <MudTd>@(context.BoxQty?.ToString("N0"))</MudTd>
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.SkuUsabilityPct?.ToString("0.0") ?? "—")%</MudTd>
@@ -302,6 +319,9 @@ else
                         {
                             <MudTd Style="font-weight:600;" colspan="1">TOTAL (@fb.Count.ToString("N0") boxes)</MudTd>
                         }
+                        @* 1.14.81 — Footer cells for Kind + LPM Date (no totals — badge / date). *@
+                        <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
                         <MudTd Style="font-weight:600;">@totalBoxQty.ToString("N0")</MudTd>
                         <MudTd Style="font-weight:600;">@totalAlloc.ToString("N0")</MudTd>
                         <MudTd Style="font-weight:600;">@avgUsability.ToString("0.0")% avg</MudTd>
@@ -409,29 +429,35 @@ else
 
     /// <summary>
     /// 1.14.70 — Filename tag derived from the current batch's <c>Sources</c>
-    /// column so every Excel download names the LPM / Non-LPM run:
+    /// column so every Excel download names the LPM / Non-LPM run.
+    /// 1.14.81 — Moved to a leading prefix (was a trailing suffix) and the
+    /// Non-LPM form is now all-caps so it's visually distinct from LPM at a
+    /// glance in the Downloads folder:
     /// <list type="bullet">
-    ///   <item><c>"LPM"</c> → <c>"_LPM"</c></item>
-    ///   <item><c>"Non-LPM"</c> or <c>"Non-LPM*"</c> → <c>"_NonLPM"</c></item>
-    ///   <item><c>"LPM,Non-LPM"</c> → <c>"_LPM_NonLPM"</c></item>
+    ///   <item><c>"LPM"</c> → <c>"LPM_"</c></item>
+    ///   <item><c>"Non-LPM"</c> or <c>"Non-LPM*"</c> → <c>"NONLPM_"</c></item>
+    ///   <item><c>"LPM,Non-LPM"</c> → <c>"LPM_NONLPM_"</c></item>
     ///   <item>missing / unknown batch → <c>""</c> (filename omits the tag)</item>
     /// </list>
     /// The trailing <c>"*"</c> marker (IncludePurchasedBoxes) is stripped from
     /// the filename — it's metadata that lives in the DB, not something the
-    /// planner browses by.
+    /// planner browses by. Callers prepend this to the filename.
     /// </summary>
     private string CurrentBatchTag()
     {
         var b = _batches.FirstOrDefault(x => x.LPMBatchNo == _batchNo);
         var raw = b?.Sources;
         if (string.IsNullOrWhiteSpace(raw)) return "";
-        // "Non-LPM*" → "Non-LPM"; ".replace(",",..)" then ".replace("-","")"
+        // "Non-LPM*" → "Non-LPM"; ".Replace(",",..)" then ".Replace("-","")"
         // collapses "LPM,Non-LPM" to "LPM_NonLPM" and "Non-LPM" to "NonLPM".
+        // ToUpperInvariant flips that to "LPM_NONLPM" / "NONLPM" so the Non-LPM
+        // file can't be misread as LPM at a glance.
         var s = raw.TrimEnd('*').Trim()
                    .Replace(" ", "")
                    .Replace(",", "_")
-                   .Replace("-", "");
-        return string.IsNullOrEmpty(s) ? "" : "_" + s;
+                   .Replace("-", "")
+                   .ToUpperInvariant();
+        return string.IsNullOrEmpty(s) ? "" : s + "_";
     }
     private string _filterStore = "";
     private string _filterDiv = "";
@@ -732,7 +758,9 @@ else
             ws.Columns().AdjustToContents();
 
             // 1.14.70 — Filename includes the LPM / Non-LPM tag from the batch's Sources.
-            var fileName = $"SimReports_EomSummary_Batch{_batchNo}{CurrentBatchTag()}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            // 1.14.81 — Tag moved to the LEADING prefix (was a trailing suffix) so the
+            // Downloads-folder view groups LPM and NONLPM exports separately.
+            var fileName = $"{CurrentBatchTag()}SimReports_EomSummary_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }
@@ -756,7 +784,11 @@ else
             // only when NOT rolled up — matches what's shown on screen).
             var headers = new List<string> { "Batch" };
             if (!_rollupBoxOnly) { headers.Add("StoreID"); headers.Add("StoreName"); headers.Add("Division"); }
-            headers.AddRange(new[] { "BoxNo", "Box Qty", "Allocated Qty", "SKU Usability %",
+            headers.AddRange(new[] { "BoxNo",
+                                     // 1.14.81 — Kind (LPM / Non-LPM) + LPM Date, inserted after BoxNo
+                                     // to mirror the on-screen layout.
+                                     "Kind", "LPM Date",
+                                     "Box Qty", "Allocated Qty", "SKU Usability %",
                                      "Pallet Type", "Type Name", "Pallet Category",
                                      // 1.14.70 — Pallet-purchase / GIN columns.
                                      "Purchase Dt", "GIN No", "GIN Date", "From/To",
@@ -780,6 +812,11 @@ else
                     ws.Cell(r, c++).Value = x.DivisionName ?? "";
                 }
                 ws.Cell(r, c++).Value = x.BoxNo;
+                // 1.14.81 — Kind + LPM Date inserted right after BoxNo to match
+                // the on-screen layout. Date written as DateTime so Excel sorts
+                // it properly; blank when the box is Non-LPM.
+                ws.Cell(r, c++).Value = x.BoxKind ?? "";
+                if (x.LpmDate.HasValue) ws.Cell(r, c).Value = x.LpmDate.Value; c++;
                 if (x.BoxQty.HasValue)             ws.Cell(r, c).Value = x.BoxQty.Value;        c++;
                 ws.Cell(r, c++).Value = x.LpmSimQty;
                 if (x.SkuUsabilityPct.HasValue)    ws.Cell(r, c).Value = (double)x.SkuUsabilityPct.Value;  c++;
@@ -804,7 +841,10 @@ else
             var totBoxQty  = distinctBoxes.Sum(g => (long)(g.First().BoxQty ?? 0));
             var totAlloc   = rows.Sum(x => (long)x.LpmSimQty);
             var avgUse     = rows.Count > 0 ? rows.Average(x => x.SkuUsabilityPct ?? 0m) : 0m;
-            int boxQtyCol  = _rollupBoxOnly ? 3 : 6;
+            // 1.14.81 — boxQtyCol shifted +2: Kind + LPM Date were inserted
+            // after BoxNo, so Box Qty now lives at column 5 (rollup) / 8 (non-rollup)
+            // rather than 3 / 6. Allocated + Usability shift along with it.
+            int boxQtyCol  = _rollupBoxOnly ? 5 : 8;
             int allocCol   = boxQtyCol + 1;
             int usableCol  = boxQtyCol + 2;
             var totalRow = rows.Count + 2;
@@ -821,7 +861,8 @@ else
             ws.Columns().AdjustToContents();
 
             // 1.14.70 — Filename includes the LPM / Non-LPM tag from the batch's Sources.
-            var fileName = $"SimReports_SimBoxes_Batch{_batchNo}{CurrentBatchTag()}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            // 1.14.81 — Tag moved to leading prefix (was a trailing suffix).
+            var fileName = $"{CurrentBatchTag()}SimReports_SimBoxes_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }
@@ -877,7 +918,8 @@ else
             ws.Columns().AdjustToContents();
 
             // 1.14.70 — Filename includes the LPM / Non-LPM tag from the batch's Sources.
-            var fileName = $"SimReports_ItemDetails_Batch{_batchNo}{CurrentBatchTag()}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
+            // 1.14.81 — Tag moved to leading prefix (was a trailing suffix).
+            var fileName = $"{CurrentBatchTag()}SimReports_ItemDetails_Batch{_batchNo}_{DateTime.Now:yyyyMMdd_HHmm}.xlsx";
             await UploadHelpers.DownloadAsync(JS, wb, fileName);
             Snackbar.Add($"Exported {fileName}", Severity.Success);
         }

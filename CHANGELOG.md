@@ -23,6 +23,61 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.81 — SIM Boxes: Kind + LPM Date columns; Excel filename LPM/NONLPM prefix (2026-05-21)
+
+### What's new
+
+Two bundled changes — the new columns on the **SIM Boxes** report (the change you asked for) plus a consistency fix to the Excel filename so a Non-LPM export can't be misread as an LPM one at a glance.
+
+#### A) SIM Boxes — Kind + LPM Date
+
+Two more columns on the **SIM Boxes** report (visible in both the *LPM → SIM Reports → SIM Boxes* tab and the *LPM → SIM Generate → Result Preview → Boxes* tab, plus both Excel exports):
+
+#### 1) **Kind** — LPM / Non-LPM badge
+
+A coloured badge that mirrors the existing styling on the Generate preview's Boxes tab. The rule is unchanged from how the rest of the app classifies boxes: if **any** matching `whboxitems` / `WHBoxItemsExport` row has a non-NULL `LPMDt` for the chosen pallet, the box is **LPM**; otherwise **Non-LPM**. Sortable, included in the table filter.
+
+> **Bug fix bundled in:** Reports non-rollup mode previously hard-coded `BoxKind` as `NULL` (placeholder from when the column was first introduced for the rollup branch). Now correctly computed via the same rule (`EXISTS … WHERE LPMDt IS NOT NULL`).
+
+#### 2) **LPM Date** — raw LPMDt source
+
+The actual date stamp from `whboxitems.LPMDt` / `WHBoxItemsExport.LPMDt`. Pair-column with **Kind**: when the date is non-NULL the box is LPM; blank means Non-LPM. Surfaced separately so the planner can see *when* the box was LPM-tagged, not just whether it was. Pallet-grain (matched on `BoxNo` + `PalletNo` to disambiguate multi-pallet boxes, same rule as Cont No / GIN No / Purchase Dt).
+
+### Implementation notes
+
+- **Rollup mode SQL** (Reports view): both branches of the existing `BoxMeta` CTE add `MAX(w.LPMDt) AS LpmDate`. The `BoxKind` computation was already correct in this branch.
+- **Non-rollup mode SQL** (Generate preview / non-rollup Reports view): `BoxKind` switched from `CAST(NULL AS nvarchar(10))` placeholder to a real `CASE WHEN EXISTS (...)` subquery; `LpmDate` added as a `TOP 1 LPMDt` per-pallet subquery with the same `MatchKey` / `PalletNo` predicates as the existing pallet-level subqueries.
+- `ReadBoxDetail` reads `LpmDate` at index 24 (after 1.14.80's 22 `ContNo` and 23 `RecentBatchNo`). `BoxKind` index is unchanged at 16.
+- **UI placement:** Reports SIM Boxes inserts **Kind + LPM Date** between *Box* and *Box Qty* so the LPM tag is the first thing the planner sees about each row. Generate preview inserts **LPM Date** right after the existing **Kind** column. Excel exports follow the same on-screen ordering — `boxQtyCol` shifts from 3→5 (rollup) / 6→8 (non-rollup) and Generate's trailing numeric columns shift from 17-20 → 18-21.
+- No migration required — `LPMDt` already exists on both `racks.dbo.whboxitems` (UAE) and `[<DataName>].dbo.WHBoxItemsExport` (non-UAE).
+
+#### B) Excel filename — leading LPM / NONLPM prefix
+
+Every batch-level Excel download now leads with the LPM / NONLPM tag instead of carrying it as a trailing suffix:
+
+| Before | After |
+| --- | --- |
+| `SimReports_SimBoxes_Batch120_LPM_20260521_1530.xlsx` | `LPM_SimReports_SimBoxes_Batch120_20260521_1530.xlsx` |
+| `SimReports_SimBoxes_Batch120_NonLPM_20260521_1530.xlsx` | `NONLPM_SimReports_SimBoxes_Batch120_20260521_1530.xlsx` |
+| `LPMSIM_Boxes_120.xlsx` *(no tag)* | `LPM_LPMSIM_Boxes_120.xlsx` / `NONLPM_LPMSIM_Boxes_120.xlsx` |
+
+Two reasons:
+
+1. **`NonLPM` → `NONLPM`**: a `..._NonLPM_...` filename can be misread as `..._LPM_...` at a glance because the case-mixed "Non" blends in. Forcing all-caps makes the distinction unmissable.
+2. **Tag moves to the front**: a Downloads-folder view sorted alphabetically now groups all `LPM_*` exports together and all `NONLPM_*` exports together, so the planner can see at a glance which batches are which kind without having to scan to the middle of the filename.
+
+Eleven Excel exports got the new tag — eight on SIM Generate (Summary, DivisionSummary, StoreSummary, Boxes, Items, Trace, Custom, AllocationGap; the first six were previously untagged) and three on SIM Reports (EOM Summary, SIM Boxes, Item Details; existing `_LPM` / `_NonLPM` suffix dropped and the new prefix added). The SKU Max Detail export (which is country/run-date level, not batch level) is unchanged.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `BoxDetailRow` (added `LpmDate`); rollup `BoxMeta` CTE (added `MAX(w.LPMDt)` to both branches); rollup main SELECT (added `bm.LpmDate`); non-rollup SELECT (replaced `BoxKind` NULL placeholder with `CASE WHEN EXISTS`, added `LpmDate` subquery); `ReadBoxDetail` (added index 24).
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimReports.razor` — SIM Boxes header (Kind + LPM Date columns), row (badge + date cells), footer dashes; Excel export (headers, body cells, `boxQtyCol` shift +2); `CurrentBatchTag()` helper rewritten to return uppercase prefix (`LPM_` / `NONLPM_` / `LPM_NONLPM_`) and three filename callers updated to prepend the tag.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — Boxes preview header (LPM Date column after Kind), row cell; Excel export (LPM Date column at position 4, all subsequent positions shift +1, four date-formatted ranges); new `CurrentBatchTag()` helper reading `_readiness.CurrentBatchSources`; eight Excel filename templates updated to prepend the tag (Summary, DivisionSummary, StoreSummary, Boxes, Items, Trace, Custom, AllocationGap) — Custom + Items also factored their filename into a local so the success snackbar shows the same name.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.80 → 1.14.81.
+- `CHANGELOG.md` — this section.
+
+---
+
 ## 1.14.80 — SIM Boxes report: Cont No + Recent Batch columns (2026-05-21)
 
 ### What's new
