@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.100</Version>
-    <AssemblyVersion>1.14.100.0</AssemblyVersion>
-    <FileVersion>1.14.100.0</FileVersion>
-    <InformationalVersion>1.14.100 (Gap by UPC — three new context columns added after Remaining Qty: SOH (SUM LPM_LocStock.SOH across active stores), SKU Max (SUM LPM_SimItemSkuMax.SKUMax for batch's country/period), MAX Balance (= SKUMax − SOH; red when negative — stores already at/above SKU Max ceiling). Same lookup shape as WH SKU Investigation. ItemAllocationGapRow record gains SOH + SkuMax fields with computed MaxBalance property. Excel export updated with 3 new columns + total row.)</InformationalVersion>
+    <Version>1.14.101</Version>
+    <AssemblyVersion>1.14.101.0</AssemblyVersion>
+    <FileVersion>1.14.101.0</FileVersion>
+    <InformationalVersion>1.14.101 hotfix (Closed-box row was invisible because 1.14.99 added 4 per-row EXISTS sub-queries to the main BoxSegments SQL — those inflated the CheckAsync runtime, likely timed out, and the surrounding try/catch swallowed the exception, leaving the whole Eligible Boxes table null. Fix: closed-box rollup is now a SEPARATE query with its own try/catch + uses INNER JOIN to a pre-filtered closed-box set (single index seek instead of N per-row sub-queries). Main BoxSegments table renders even if the closed query fails — closed row just shows 0/0 instead.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

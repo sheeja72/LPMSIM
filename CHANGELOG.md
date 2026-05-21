@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.101 — Hotfix: Closed-box row invisible because 1.14.99 SQL killed the whole BoxSegments (2026-05-21)
+
+### What was wrong
+
+1.14.99 added 4 SUM/COUNT CASE columns to the existing big `CheckAsync` SQL — each with a per-row `EXISTS (SELECT 1 FROM USA.dbo.upcboxhead WHERE BoxNo = w.BoxNo AND Closed = 'Y')` sub-query. For a UAE batch with ~1.3M whboxitems rows, that's effectively **4 × per-row EXISTS sub-queries × 1.3M rows** added to the query that runs on every filter change (CheckAsync).
+
+The query either timed out or threw, the surrounding `try { … } catch { /* leave null */ }` swallowed the exception, `segments` stayed null, and the **entire Eligible Boxes table disappeared** (not just the Closed row — the whole `@if (BoxSegments is not null)` block went dark).
+
+Planner confirmed on 1.14.100 (same code path): "still same" — the Closed row was never visible because the underlying query was failing silently.
+
+### Fix
+
+Two changes:
+
+1. **Closed-box rollup is now a SEPARATE SQL query** with its own `try/catch`. If it fails, the main BoxSegments table still renders; the Closed row just shows `0/0` instead of breaking the whole panel. The original CheckAsync query is restored to its 1.14.98 shape (20 columns, no closed-box predicates).
+
+2. **Query uses an INNER JOIN to a pre-filtered closed-box set** instead of per-row `EXISTS`:
+   ```sql
+   WITH ClosedBoxes AS (
+       SELECT DISTINCT BoxNo FROM USA.dbo.upcboxhead WHERE Closed = 'Y'
+   )
+   SELECT … FROM whboxitems w
+     INNER JOIN ClosedBoxes c ON c.BoxNo = w.BoxNo
+    WHERE …
+   ```
+   SQL Server can use standard index seeks on both sides — much faster than executing the EXISTS sub-query for every whboxitems row. Same shape for non-UAE (UNION of `Exclude_Transfers_Sim.Trfno` + `CloseR1Pallet.palletno`).
+
+### Failure modes
+
+- **Closed query times out / errors** → main BoxSegments table renders normally; closed row shows `0 (0)`.
+- **Closed query returns no rows** → closed row shows `0 (0)` correctly.
+- **DataName missing on a non-UAE country** → closed query throws, gets swallowed; main table fine.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — removed 4 inline closed SUM/COUNT CASE columns from main SQL; restored reader to 20 indices; added separate `cmdClosed` query with INNER JOIN to a `WITH ClosedBoxes AS (...)` CTE; wrapped in its own try/catch; uses `segments with { ... }` to merge closed counts into the existing record.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.100 → 1.14.101.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar version `1.14.101`.
+2. SIM Generate → expand Input Readiness → the Eligible Boxes table renders with all rows: Summer / Winter / Total / **Closed (excluded from SIM)**.
+3. Closed row shows actual values (not 0/0 unless your country genuinely has no closed boxes).
+4. Page load / filter-change responsiveness should be back to pre-1.14.99 speed.
+
+---
+
 ## 1.14.100 — Gap by UPC: SOH + SKU Max + MAX Balance columns added (2026-05-21)
 
 ### What's new

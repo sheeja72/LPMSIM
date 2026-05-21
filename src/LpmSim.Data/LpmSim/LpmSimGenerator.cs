@@ -68,16 +68,19 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         await db.Database.OpenConnectionAsync(ct);
 
         BoxSegmentCounts? segments = null;
+        // 1.14.101 — Hoisted to method scope so the separate closed-box query
+        // below (outside this try block) can reuse them.
+        string? whSrc = null;
+        string? dataNameForClosed = null;
         try
         {
             // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
             // others use [<DataName>].dbo.WHBoxItemsExport.
-            var whSrc      = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
-            // 1.14.99 — DataName + IsClosed expression needed for the new
-            // closed-box aggregations added to the SELECT below. Resolved
-            // here once so the CASE expressions can splice it in.
-            var dataNameForClosed = await WhBoxItemsSource.ResolveDataNameAsync((SqlConnection)conn, country, ct);
-            var isClosedExpr      = WhBoxItemsSource.BuildIsClosedExpression(country, dataNameForClosed);
+            whSrc      = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            // 1.14.101 — dataName needed for the separate closed-box query
+            // (non-UAE only). UAE returns null and uses the upcboxhead
+            // shape; non-UAE uses the [<DataName>] FQTN.
+            dataNameForClosed = await WhBoxItemsSource.ResolveDataNameAsync((SqlConnection)conn, country, ct);
             // 1.14.74 — The closed-box exclusion (1.14.70) is now applied
             // ONLY in the allocator (ReadBoxesAsync) and surfaced in the
             // Allocation Gap diagnostic. The Input Readiness counts grid
@@ -175,19 +178,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
 
                     -- Non-LPM × Winter × Non-Purchased
                     SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes,
-
-                    -- 1.14.99 — Closed-box subsets (LPM + Non-LPM, no season
-                    -- breakdown). These are a SUBSET of the LPM / Non-LPM
-                    -- counts above (closed boxes still appear in the
-                    -- LPM/Non-LPM rows since the page deliberately shows the
-                    -- full whboxitems totals — see 1.14.74 comment). Surfaced
-                    -- here so the planner can see how much each kind loses
-                    -- to the closed-box exclusion that the allocator applies.
-                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ({isClosedExpr}) THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS ClosedLpmQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ({isClosedExpr}) THEN w.BoxNo END) AS ClosedLpmBoxes,
-                    SUM(CASE WHEN w.LPMDt IS NULL     AND ({isClosedExpr}) THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS ClosedNonLpmQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL     AND ({isClosedExpr}) THEN w.BoxNo END) AS ClosedNonLpmBoxes
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
+                  -- 1.14.101 — Closed-box subsets MOVED to a separate query
+                  -- (was inline 1.14.99 — 4 per-row EXISTS sub-queries
+                  -- against USA.dbo.upcboxhead inflated the runtime and
+                  -- could throw / time out, killing the entire BoxSegments
+                  -- result via the swallowing catch below. Now isolated.)
                   FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE 1 = 1
@@ -228,12 +224,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 int  lwBn = rdr.IsDBNull(17) ? 0 : rdr.GetInt32(17);
                 long nwQn = rdr.IsDBNull(18) ? 0 : rdr.GetInt64(18);
                 int  nwBn = rdr.IsDBNull(19) ? 0 : rdr.GetInt32(19);
-                // 1.14.99 — Closed-box subsets at indices 20-23 (Qty first,
-                // then Boxes, mirroring the SUM/COUNT order in the SELECT).
-                long clQ  = rdr.IsDBNull(20) ? 0 : rdr.GetInt64(20);
-                int  clB  = rdr.IsDBNull(21) ? 0 : rdr.GetInt32(21);
-                long cnQ  = rdr.IsDBNull(22) ? 0 : rdr.GetInt64(22);
-                int  cnB  = rdr.IsDBNull(23) ? 0 : rdr.GetInt32(23);
+                // 1.14.101 — Closed-box subsets reverted from indices 20-23.
+                // Now sourced from a separate query below so a failure
+                // doesn't kill the whole BoxSegments rollup.
                 segments = new BoxSegmentCounts(
                     LpmSummerBoxes: lsB,      LpmSummerQty: lsQ,
                     NonLpmSummerBoxes: nsB,   NonLpmSummerQty: nsQ,
@@ -242,12 +235,75 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     LpmSummerNpBoxes: lsBn,   LpmSummerNpQty: lsQn,
                     NonLpmSummerNpBoxes: nsBn,NonLpmSummerNpQty: nsQn,
                     LpmWinterNpBoxes: lwBn,   LpmWinterNpQty: lwQn,
-                    NonLpmWinterNpBoxes: nwBn,NonLpmWinterNpQty: nwQn,
-                    ClosedLpmBoxes: clB,      ClosedLpmQty: clQ,        // 1.14.99
-                    ClosedNonLpmBoxes: cnB,   ClosedNonLpmQty: cnQ);    // 1.14.99
+                    NonLpmWinterNpBoxes: nwBn,NonLpmWinterNpQty: nwQn);
             }
         }
         catch { /* leave null */ }
+
+        // 1.14.101 — Closed-box rollup as a SEPARATE query with its own
+        // try/catch. If this fails (timeout, permission, missing source
+        // table), the main BoxSegments above still renders — the closed
+        // row just shows 0/0 instead of breaking the entire table.
+        // Implementation switches from per-row EXISTS to an INNER JOIN
+        // against a pre-filtered closed-box set so SQL Server can use
+        // standard index seeks (BoxNo on whboxitems + BoxNo on the closed
+        // source) instead of executing the EXISTS sub-query for every
+        // whboxitems row.
+        // Skips entirely if whSrc never got resolved (main query bombed
+        // before line 75 — no source to join against anyway).
+        if (segments is not null && !string.IsNullOrEmpty(whSrc))
+        {
+            try
+            {
+                // Build a "closed BoxNo set" CTE that fits both UAE and non-UAE
+                // shapes via the SAME WhBoxItemsSource helper. The full
+                // expression already references `w.BoxNo`, so we rebuild it as
+                // a standalone SELECT here for the JOIN target.
+                string closedSetSql = country.Equals("UAE", StringComparison.OrdinalIgnoreCase)
+                    ? @"SELECT DISTINCT BoxNo FROM USA.dbo.upcboxhead WHERE Closed = 'Y'"
+                    : $@"SELECT DISTINCT Trfno    AS BoxNo FROM [{dataNameForClosed}].dbo.Exclude_Transfers_Sim
+                         UNION
+                         SELECT DISTINCT palletno AS BoxNo FROM [{dataNameForClosed}].dbo.CloseR1Pallet";
+
+                var (whClauseC,     whParamsC)     = BuildWarehouseClause(warehouses);
+                var (palletClauseC, palletParamsC) = BuildPalletCategoryClause(palletCategories);
+
+                using var cmdClosed = conn.CreateCommand();
+                cmdClosed.CommandText = $@"
+                    WITH ClosedBoxes AS (
+                        {closedSetSql}
+                    )
+                    SELECT
+                        ClosedLpmQty      = SUM(CASE WHEN w.LPMDt IS NOT NULL THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END),
+                        ClosedLpmBoxes    = COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL THEN w.BoxNo END),
+                        ClosedNonLpmQty   = SUM(CASE WHEN w.LPMDt IS NULL     THEN CAST(ISNULL(w.Qty, 0) AS bigint) ELSE 0 END),
+                        ClosedNonLpmBoxes = COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL     THEN w.BoxNo END)
+                      FROM {whSrc} w
+                      INNER JOIN ClosedBoxes c ON c.BoxNo = w.BoxNo
+                     WHERE 1 = 1
+                       {palletClauseC}
+                       {whClauseC};";
+                foreach (var p in whParamsC)     cmdClosed.Parameters.Add(p);
+                foreach (var p in palletParamsC) cmdClosed.Parameters.Add(p);
+                cmdClosed.CommandTimeout = 60;
+                using var rdrC = await cmdClosed.ExecuteReaderAsync(ct);
+                if (await rdrC.ReadAsync(ct))
+                {
+                    var clQ = rdrC.IsDBNull(0) ? 0L : rdrC.GetInt64(0);
+                    var clB = rdrC.IsDBNull(1) ? 0  : rdrC.GetInt32(1);
+                    var cnQ = rdrC.IsDBNull(2) ? 0L : rdrC.GetInt64(2);
+                    var cnB = rdrC.IsDBNull(3) ? 0  : rdrC.GetInt32(3);
+                    segments = segments with
+                    {
+                        ClosedLpmBoxes    = clB,
+                        ClosedLpmQty      = clQ,
+                        ClosedNonLpmBoxes = cnB,
+                        ClosedNonLpmQty   = cnQ,
+                    };
+                }
+            }
+            catch { /* leave closed-box counts at 0 — main table still renders */ }
+        }
 
         // Sum the requested-segment counts for the readiness check / metric.
         // 1.14.11: now adds Non-Purchased buckets when the planner has
