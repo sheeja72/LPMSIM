@@ -367,6 +367,20 @@ html, body {
     min-height: 12px;
 }
 
+/* 1.14.105 — Opt-in tall header row. Apply via the `lpm-table-tall-header`
+   marker class on a MudTable when its HeaderContent contains multi-line
+   labels (e.g. "Total<br />SKU Max") mixed with single-word ones
+   ("Slashed"). Bottom-aligning the headers makes the single-word labels
+   sit on the same baseline as the bottom line of the wrapped labels,
+   which is what reads as "aligned". Scoped so other tables keep the
+   compact default header. Current users: WH SKU Investigation. */
+.lpm-table-tall-header.mud-table .mud-table-head th {
+    height: 56px !important;
+    vertical-align: bottom !important;
+    padding-bottom: 8px !important;
+    line-height: 1.1;
+}
+
 /* --------------- SIM Generate report tabs (green theme) --------------- */
 /* MudBlazor 7 selectors: the tab strip is .mud-tabs-tabbar (NOT
    .mud-tabs-toolbar from older versions). We paint the strip dark green

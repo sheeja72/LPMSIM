@@ -23,6 +23,42 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.105 — WH SKU Investigation header alignment (2026-05-21)
+
+### What's new
+
+Bumped the column header row on the WH SKU Investigation table so multi-line labels — `Total / SKU Max`, `Avg / SKU Max`, `Stores SOH`, `Blocked Qty`, `Blocked Stores` — visually align with the single-word `Slashed` and `Itemcode` headers next to them. Previously the wrapped labels overflowed the compact default header height, making the table read as misaligned even though the underlying columns were correct.
+
+### How
+
+New opt-in CSS class `lpm-table-tall-header` in `app.css`:
+
+```css
+.lpm-table-tall-header.mud-table .mud-table-head th {
+    height: 56px !important;
+    vertical-align: bottom !important;
+    padding-bottom: 8px !important;
+    line-height: 1.1;
+}
+```
+
+Applied only to the WH SKU Investigation `MudTable`. Other tables across the app keep the existing compact header height — zero behaviour change elsewhere.
+
+Bottom-aligning is what reads as "aligned": single-word labels sit on the same baseline as the **bottom** line of the wrapped 2-line labels, so the eye reads them as one tidy row.
+
+### Files changed
+
+- `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` — added `lpm-table-tall-header` to the table's `Class` attribute.
+- `src/LpmSim.Web/wwwroot/app.css` — new opt-in `.lpm-table-tall-header.mud-table .mud-table-head th` block.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.104 → 1.14.105.
+- `CHANGELOG.md` — this section.
+
+### No DB changes
+
+Pure CSS + markup tweak.
+
+---
+
 ## 1.14.104 — Hotfix: Build SKU Max click handler deadlock from the 1.14.102 sync lock check (2026-05-21)
 
 ### What was wrong

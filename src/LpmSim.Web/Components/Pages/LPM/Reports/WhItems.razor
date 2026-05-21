@@ -166,8 +166,12 @@
         </div></MudItem>
     </MudGrid>
 
+    @* 1.14.105 — lpm-table-tall-header bumps the header row height + bottom-
+       aligns the labels so multi-line headers ("Total / SKU Max", "Avg / SKU
+       Max", "Stores SOH", "Blocked Qty", "Blocked Stores") line up cleanly
+       with single-word headers like "Slashed". See app.css. *@
     <MudTable Items="_rows" Dense="true" Striped="true" Hover="true" Bordered="true"
-              SortLabel="Sort" Class="lpm-table" FixedHeader="true"
+              SortLabel="Sort" Class="lpm-table lpm-table-tall-header" FixedHeader="true"
               Filter="new Func<WhItemsReportRow, bool>(FilterRow)">
         <ToolBarContent>
             <MudTextField T="string" Value="_textFilter"

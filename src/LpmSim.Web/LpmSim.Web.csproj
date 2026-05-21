@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.104</Version>
-    <AssemblyVersion>1.14.104.0</AssemblyVersion>
-    <FileVersion>1.14.104.0</FileVersion>
-    <InformationalVersion>1.14.104 hotfix — Build SKU Max click handler deadlock introduced in 1.14.102. The sync `GetLockAsync(country).GetAwaiter().GetResult()` I added inside SkuMaxBuildJobManager.Start blocked the Blazor circuit's dispatcher waiting for an async EF call whose continuations couldn't resume on the captured context — classic sync-over-async deadlock. Symptom: clicking Build (or Cancel) on the "Confirm SKU Max Build" dialog did nothing; circuit hung. Fix: removed the sync check from Start; defence-in-depth preserved by two async lock checks the callers already run before invoking Start (razor click handler + nightly scheduler) plus the generator's own async lock pre-check at the top of BuildSkuMaxAsync. Belt-and-suspenders: added ConfigureAwait(false) to GetLockAsync's awaits in case any future caller goes sync-over-async again.</InformationalVersion>
+    <Version>1.14.105</Version>
+    <AssemblyVersion>1.14.105.0</AssemblyVersion>
+    <FileVersion>1.14.105.0</FileVersion>
+    <InformationalVersion>1.14.105 — WH SKU Investigation header alignment. New opt-in `lpm-table-tall-header` CSS class bumps the header row height to 56px and bottom-aligns labels so multi-line headers ("Total / SKU Max", "Avg / SKU Max", "Stores SOH", "Blocked Qty", "Blocked Stores") line up cleanly with single-word headers ("Slashed"). Applied ONLY to the WH SKU Investigation table — other tables keep their compact default header.</InformationalVersion>
   </PropertyGroup>
 
 </Project>
