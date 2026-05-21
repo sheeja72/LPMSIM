@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.93</Version>
-    <AssemblyVersion>1.14.93.0</AssemblyVersion>
-    <FileVersion>1.14.93.0</FileVersion>
-    <InformationalVersion>1.14.93 (SIM Generate — new "Gap by UPC" tab on the Result preview, next to the existing per-box "Allocation Gap" tab. Per-item rollup of LPMSIM_AllocTrace: each row shows EligibleWhQty (qty in eligible whboxitems that entered the SIM box pool), SIM Qty (actually placed), Remaining Qty (the gap), and Top Reason (most-frequent SKIP_* Decision in the trace for that item). Filters by itemcode/name/division contains-match, Top Reason exact match, and Min Remaining. Includes an Excel export with totals.)</InformationalVersion>
+    <Version>1.14.95</Version>
+    <AssemblyVersion>1.14.95.0</AssemblyVersion>
+    <FileVersion>1.14.95.0</FileVersion>
+    <InformationalVersion>1.14.95 (Deploy recovery + WH SKU Investigation polish: (1) The 1.14.86 WhItemsReportService.cs change (IsSlashed bool record field + MAX(CASE) SQL) was stranded in the working tree — never committed. Subsequent commits (1.14.92, 1.14.93, 1.14.94) updated the razor to use r.IsSlashed but the deployed record still had SlashedQty long, causing Azure CI builds to fail with a compile error. Production was stuck on 1.14.91 with the broken Slashed column showing 0s. This release commits the missing service file so the build can finally succeed. (2) WH SKU Investigation column widths: min-width added to every multi-word right-aligned column so labels render on ONE line (HO Price, WH Qty, Stores SOH, Blocked Qty, Blocked Stores, To Fill Qty, Slashed) instead of wrapping awkwardly into two. (3) Includes the previously-pending 1.14.94 Store Summary Merch Need (Month) column.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

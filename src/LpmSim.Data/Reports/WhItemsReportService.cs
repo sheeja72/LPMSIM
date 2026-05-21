@@ -75,8 +75,11 @@ public record WhItemsReportRow(
     /// rows. Per-pallet value; MAX keeps the result deterministic when pallets
     /// of the same item have differing prices (rare but possible).</summary>
     decimal HoPrice,
-    /// <summary>Sum of whboxitems.Slashed across the in-scope rows for the item.</summary>
-    long    SlashedQty,
+    /// <summary>1.14.86 — TRUE when at least one in-scope whboxitems row for the
+    /// item has <c>Slashed = 'Y'</c>. The column is a Y/N flag at source (not a
+    /// quantity, despite the 1.14.82 misreading), so the report shows a per-item
+    /// rolled-up flag: Y if any of the item's pallets in scope is slashed, else N.</summary>
+    bool    IsSlashed,
     /// <summary>SUM of PriorSKUMax from LPM_SimItemSkuMaxExcluded for the
     /// selected country, latest (Year1, Month1). Deduped to one row per
     /// (Store, Item) before summing so items matching multiple exclusion
@@ -231,26 +234,30 @@ public sealed class WhItemsReportService
             --    reconcile with WH Stock Position. 1.14.52 — also excludes
             --    PalletCategory = 'NON-PURCHASED' to drop the rows the
             --    planner flagged on the screenshot.
-            -- 1.14.82: HoPrice (MAX) + SlashedQty (SUM) projected alongside WhQty.
-            -- Both come from the same {whSrc} grain so they ride the same scan +
-            -- WHERE filter — no extra cost.
+            -- 1.14.82: HoPrice (MAX) + Slashed flag projected alongside WhQty.
+            -- All three come from the same {whSrc} grain so they ride the same
+            -- scan + WHERE filter — no extra cost.
             --
-            -- 1.14.85 hotfix: HOPrice and Slashed are stored as varchar in
-            -- whboxitems / WHBoxItemsExport (not numeric), so:
-            --   * The original SUM(CAST(ISNULL(w.Slashed, 0) AS bigint))
-            --     fails with ''Error converting data type varchar to bigint''
-            --     whenever a row has a non-numeric Slashed value (blank, ''N'',
-            --     etc.) -- SQL Server resolves ISNULL(varchar, 0) by
-            --     converting the varchar to int first (int has higher type
-            --     precedence) and fails on the first bad value.
+            -- 1.14.85 hotfix: HOPrice is stored as varchar (not numeric), so:
             --   * MAX(w.HOPrice) on a varchar returns a lexicographic max,
-            --     which is wrong for prices (''9'' > ''100'').
-            -- TRY_CAST returns NULL on conversion failure instead of erroring;
-            -- ISNULL(...,0) collapses the NULLs back to 0 for the SUM.
+            --     which is wrong for prices (''9'' > ''100''). TRY_CAST to
+            --     decimal first; non-numeric / NULL values fall through as
+            --     NULL and are ignored by MAX naturally.
+            --
+            -- 1.14.86: Slashed is a Y/N flag (varchar), NOT a quantity. 1.14.82
+            -- misread it as numeric and 1.14.85 tried to TRY_CAST varchar Y/N
+            -- to bigint — which always failed → column always showed 0.
+            -- Correct rollup is per-item ''any pallet slashed''? MAX(CASE WHEN
+            -- Slashed = ''Y'' THEN 1 ELSE 0 END) gives 1 if any in-scope row
+            -- for the item has Slashed = ''Y'', else 0. Trimmed + uppered
+            -- defensively so leading spaces / lowercase y don''t miss.
             SELECT w.itemcode,
-                   WhQty      = SUM(CAST(ISNULL(w.Qty, 0) AS bigint)),
-                   HoPrice    = MAX(TRY_CAST(w.HOPrice AS decimal(18, 2))),
-                   SlashedQty = SUM(ISNULL(TRY_CAST(w.Slashed AS bigint), 0))
+                   WhQty     = SUM(CAST(ISNULL(w.Qty, 0) AS bigint)),
+                   HoPrice   = MAX(TRY_CAST(w.HOPrice AS decimal(18, 2))),
+                   IsSlashed = MAX(CASE
+                                     WHEN UPPER(LTRIM(RTRIM(ISNULL(w.Slashed, '')))) = 'Y'
+                                          THEN 1 ELSE 0
+                                   END)
               INTO #WhItemsAgg
               FROM {whSrc} w
              WHERE w.itemcode IS NOT NULL AND w.itemcode <> ''
@@ -433,11 +440,13 @@ public sealed class WhItemsReportService
                                        THEN wa.WhQty
                                   ELSE ISNULL(wsm.ToFillQty, 0)
                                 END,
-                    -- 1.14.82 — HoPrice / SlashedQty come from #WhItemsAgg
+                    -- 1.14.82 — HoPrice / Slashed flag come from #WhItemsAgg
                     -- (computed alongside WhQty against {whSrc}); BlockedQty +
                     -- BlockedStores come from the exclusion audit table rollup.
+                    -- 1.14.86 — IsSlashed projected as a bit/int flag (1 if any
+                    -- in-scope row has Slashed = ''Y'', else 0).
                     HoPrice       = ISNULL(wa.HoPrice,       CAST(0 AS decimal(18,2))),
-                    SlashedQty    = ISNULL(wa.SlashedQty,    0),
+                    IsSlashed     = ISNULL(wa.IsSlashed,     0),
                     BlockedQty    = ISNULL(wblk.BlockedQty,  0),
                     BlockedStores = ISNULL(wblk.BlockedStores, 0)
               FROM  #WhItemsAgg   wa
@@ -474,11 +483,12 @@ public sealed class WhItemsReportService
                 SkuMax:        rdr.IsDBNull(7)  ? 0L : rdr.GetInt64(7),
                 AvgSkuMax:     rdr.IsDBNull(8)  ? 0m : rdr.GetDecimal(8),
                 ToFillQty:     rdr.IsDBNull(9)  ? 0L : rdr.GetInt64(9),
-                // 1.14.82 — HoPrice (10), SlashedQty (11), BlockedQty (12), BlockedStores (13).
-                HoPrice:       rdr.IsDBNull(10) ? 0m : Convert.ToDecimal(rdr.GetValue(10)),
-                SlashedQty:    rdr.IsDBNull(11) ? 0L : rdr.GetInt64(11),
-                BlockedQty:    rdr.IsDBNull(12) ? 0L : rdr.GetInt64(12),
-                BlockedStores: rdr.IsDBNull(13) ? 0  : rdr.GetInt32(13)));
+                // 1.14.82 — HoPrice (10), Slashed flag (11), BlockedQty (12), BlockedStores (13).
+                // 1.14.86 — index 11 is now an int flag (1/0), not a qty.
+                HoPrice:       rdr.IsDBNull(10) ? 0m    : Convert.ToDecimal(rdr.GetValue(10)),
+                IsSlashed:     !rdr.IsDBNull(11) && Convert.ToInt32(rdr.GetValue(11)) == 1,
+                BlockedQty:    rdr.IsDBNull(12) ? 0L    : rdr.GetInt64(12),
+                BlockedStores: rdr.IsDBNull(13) ? 0     : rdr.GetInt32(13)));
         }
         return rows;
     }

@@ -23,6 +23,102 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.95 — Deploy recovery + WH SKU Investigation column widths (2026-05-21)
+
+### What's wrong (and why production was stuck on 1.14.91)
+
+The 1.14.86 changes to `WhItemsReportService.cs` (the record field switching from `SlashedQty long` to `IsSlashed bool`, plus the SQL `MAX(CASE WHEN Slashed = 'Y' …)` aggregate) were **stranded in the working tree** — they were built and verified locally but never committed because the planner pivoted to the SIM allocator refactor before the push was approved.
+
+Every subsequent commit (1.14.92, 1.14.93, 1.14.94) updated `WhItems.razor` to reference `r.IsSlashed`, but the deployed `WhItemsReportRow` record on disk still carried `SlashedQty long`. That's a **C# compile error** — the Azure GitHub Actions builds for 1.14.92, 1.14.93, and 1.14.94 all failed, and the production app remained pinned on **1.14.91** for the entire window.
+
+Symptoms the planner saw:
+
+- "Slashed" column header still rendered as "Slashed Qty" (old text, wrapping at the break).
+- Slashed cell values still showed as numeric `0` (the broken 1.14.85 `TRY_CAST(Slashed AS bigint)` always returning 0).
+- "Total / Avg SKU Max" header `<br />` fix from 1.14.92 wasn't visible.
+- New "Gap by UPC" tab from 1.14.93 was missing.
+- Store Summary's new Merch Need (Month) column from 1.14.94 was missing.
+
+### Recovery
+
+This release stages and commits the stranded `WhItemsReportService.cs` changes so the build succeeds. The razor / record / SQL are now all in sync; the deployed app will pick up everything from 1.14.86 onward in one go.
+
+### Also in this release — WH SKU Investigation column widths
+
+Per planner request, `min-width` added to every multi-word right-aligned `<MudTh>` on the WH SKU Investigation table so headers render on **one** line instead of wrapping awkwardly:
+
+| Column | min-width |
+|---|---|
+| HO Price | 90px |
+| WH Qty | 90px |
+| Slashed | 80px |
+| Stores SOH | 100px |
+| Total SKU Max | 95px (was 80px) |
+| Avg SKU Max | 95px (was 80px) |
+| Blocked Qty | 100px |
+| Blocked Stores | 115px |
+| To Fill Qty | 95px |
+
+The table will scroll horizontally on narrow viewports rather than cramming labels onto two lines.
+
+### Files changed
+
+- `src/LpmSim.Data/Reports/WhItemsReportService.cs` — **the file that was stranded since 1.14.86**. Record field `SlashedQty long` → `IsSlashed bool`; `#WhItemsAgg` SQL switches from `SUM(ISNULL(TRY_CAST(Slashed AS bigint), 0))` to `MAX(CASE WHEN UPPER(TRIM(Slashed)) = 'Y' THEN 1 ELSE 0 END)`; reader maps index 11 as a bool.
+- `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` — `min-width` added to 9 column headers.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.94 → 1.14.95.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar footer shows `1.14.95` (currently shows 1.14.91 because the broken builds never landed).
+2. Reports → WH SKU Investigation:
+   - **Slashed** column header on ONE line, values render as red **Y** / muted **N** badges (1.14.86).
+   - **Total SKU Max** / **Avg SKU Max** headers show on two lines as "Total / SKU Max" and "Avg / SKU Max" (1.14.92).
+   - All other multi-word headers (HO Price, WH Qty, Stores SOH, Blocked Qty, Blocked Stores, To Fill Qty) on one line each (1.14.95).
+3. SIM Generate:
+   - New **Gap by UPC** tab visible between "Allocation Gap" and "Item Details" (1.14.93).
+   - Store Summary tab shows **Merch Need (Month)** column before Merch Need (Week) (1.14.94).
+   - **Containers Purchased Today** panel visible in the Input Readiness expansion (1.14.91 — was already live).
+
+### Lesson learned
+
+Before committing, always run `git status` and verify EVERY file that the working tree expects to be in sync gets staged. A razor referencing a record field that doesn't exist will compile locally if both files happen to be on disk, but a CI checkout that pulls only the committed files will fail. The build-verify step caught the local working-tree state as correct, but didn't catch the partial-stage problem.
+
+---
+
+## 1.14.94 — Store Summary: Merch Need (Month) column added before Merch Need (Week) (2026-05-21)
+
+### What's new
+
+The **Store Summary** tab on SIM Generate → Result preview now shows **Merch Need (Month)** as a separate column **immediately before** the existing Merch Need (Week) column. Both columns are now displayed side by side so the planner can see the monthly demand (the cap the 1.14.87 allocator actually uses) alongside the weekly slice.
+
+New column order:
+
+| ... | EOM | SOH | **Merch Need (Month)** *(new)* | Merch Need (Week) | SIM Qty | RR Qty | Override Qty |
+
+- **Merch Need (Month)** = `SUM(LPM_EOM_Output.MerchNeedMonth)` across all divisions for the store. This is the cap the allocator reads in Phase 1a/2a from 1.14.87 onwards. Tooltip on the header total reads "Σ Merch Need (Month) for this store = SIM cap (1.14.87+)".
+- **Merch Need (Week)** stays — now labeled informational ("allocator no longer uses Week as cap from 1.14.87"). Kept so planners who cross-check against the weekly demand still see it.
+- Footer total computed for the new column.
+- Caption below the table updated to explain both.
+
+### Excel export
+
+The Store Summary Excel export now has 9 columns (was 8) — Merch Need (Month) inserted between SOH and Merch Need (Week); SIM/RR/Override shift right by 1.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `StoreSummaryRow.MerchNeedMonth (long)` added; `EomAgg` CTE projects `MerchNeedMonth`; main SELECT projects it; `ReadStoreSummary` reads index 5 as `MerchNeedMonth` (MerchNeedWeek shifts to 6, SimQty 7, RrQty 8, OverrideQty 9).
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — new `<MudTh>` + `<MudTd>` for Month before Week, header total `sumMnm`, footer caption updated, Excel export headers + body shifted.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.93 → 1.14.94.
+- `CHANGELOG.md` — this section.
+
+### Not changed
+
+- **Division Summary** and **Summary (per Store × Division)** tabs still show only Merch Need (Week) — flagging for the follow-up if you want Month added there too.
+- Allocator behaviour unchanged from 1.14.87.
+
+---
+
 ## 1.14.93 — SIM Generate: new "Gap by UPC" tab on the Result preview (2026-05-21)
 
 ### What's new

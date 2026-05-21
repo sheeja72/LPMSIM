@@ -63,8 +63,15 @@ public class StoreSummaryRow
     public decimal EOM { get; set; }
     public long SOH { get; set; }
 
-    /// <summary>Replaces legacy <c>EomDiff</c>. Sum of Merch Need (Week)
-    /// across all divisions for this store. Drives SIM cap as of Phase C₂.</summary>
+    /// <summary>1.14.94 — Sum of Merch Need (Month) across all divisions for
+    /// this store. This is the cap the 1.14.87 allocator now uses; the
+    /// MerchNeedWeek column below is kept as informational.</summary>
+    public long MerchNeedMonth { get; set; }
+
+    /// <summary>Sum of Merch Need (Week) across all divisions for this store.
+    /// As of 1.14.87, the allocator no longer reads this column — it's purely
+    /// informational. Surfaced on the Store Summary alongside MerchNeedMonth
+    /// for back-reference (planners still cross-check weekly demand).</summary>
     public long MerchNeedWeek { get; set; }
 
     public long SimQty { get; set; }
@@ -644,9 +651,12 @@ SimAgg AS (
      GROUP BY s.StoreID
 ),
 EomAgg AS (
+    -- 1.14.94 — MerchNeedMonth added (the cap the 1.14.87 allocator uses).
+    -- MerchNeedWeek kept alongside as informational for the planner.
     SELECT eo.StoreID,
-           EOM           = SUM(ISNULL(eo.TargetEOM, 0)),
-           MerchNeedWeek = SUM(CAST(ISNULL(eo.MerchNeedWeek, 0) AS bigint))
+           EOM            = SUM(ISNULL(eo.TargetEOM, 0)),
+           MerchNeedMonth = SUM(CAST(ISNULL(eo.MerchNeedMonth, 0) AS bigint)),
+           MerchNeedWeek  = SUM(CAST(ISNULL(eo.MerchNeedWeek,  0) AS bigint))
       FROM dbo.LPM_EOM_Output eo
      WHERE eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
      GROUP BY eo.StoreID
@@ -677,12 +687,13 @@ AllStores AS (
 SELECT @batchNo                  AS LPMBatchNo,
        a.StoreID,
        ds.PBFullname              AS StoreName,
-       EOM           = ISNULL(eo.EOM, 0),
-       SOH           = ISNULL(soh.SOH, 0),
-       MerchNeedWeek = ISNULL(eo.MerchNeedWeek, 0),
-       SimQty        = ISNULL(sim.SimQty, 0),
-       RrQty         = ISNULL(sim.RrQty, 0),
-       OverrideQty   = ISNULL(sim.OverrideQty, 0)
+       EOM            = ISNULL(eo.EOM, 0),
+       SOH            = ISNULL(soh.SOH, 0),
+       MerchNeedMonth = ISNULL(eo.MerchNeedMonth, 0),  -- 1.14.94
+       MerchNeedWeek  = ISNULL(eo.MerchNeedWeek,  0),
+       SimQty         = ISNULL(sim.SimQty, 0),
+       RrQty          = ISNULL(sim.RrQty, 0),
+       OverrideQty    = ISNULL(sim.OverrideQty, 0)
   FROM AllStores a
   LEFT JOIN SimAgg sim ON sim.StoreID = a.StoreID
   LEFT JOIN EomAgg eo  ON eo.StoreID  = a.StoreID
@@ -922,17 +933,20 @@ DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
         BoxQty        = r.IsDBNull(9) ? 0 : r.GetInt64(9),
     };
 
+    // 1.14.94 — MerchNeedMonth inserted at index 5; MerchNeedWeek shifts
+    // from 5 to 6; SimQty / RrQty / OverrideQty shift from 6/7/8 to 7/8/9.
     private static StoreSummaryRow ReadStoreSummary(SqlDataReader r) => new()
     {
-        LPMBatchNo    = r.GetInt64(0),
-        StoreID       = r.IsDBNull(1) ? "" : r.GetString(1),
-        StoreName     = r.IsDBNull(2) ? "" : r.GetString(2),
-        EOM           = r.IsDBNull(3) ? 0 : r.GetDecimal(3),
-        SOH           = r.IsDBNull(4) ? 0 : r.GetInt64(4),
-        MerchNeedWeek = r.IsDBNull(5) ? 0 : r.GetInt64(5),
-        SimQty        = r.IsDBNull(6) ? 0 : r.GetInt64(6),
-        RrQty         = r.IsDBNull(7) ? 0 : r.GetInt64(7),
-        OverrideQty   = r.IsDBNull(8) ? 0 : r.GetInt64(8),
+        LPMBatchNo     = r.GetInt64(0),
+        StoreID        = r.IsDBNull(1) ? "" : r.GetString(1),
+        StoreName      = r.IsDBNull(2) ? "" : r.GetString(2),
+        EOM            = r.IsDBNull(3) ? 0 : r.GetDecimal(3),
+        SOH            = r.IsDBNull(4) ? 0 : r.GetInt64(4),
+        MerchNeedMonth = r.IsDBNull(5) ? 0 : r.GetInt64(5),
+        MerchNeedWeek  = r.IsDBNull(6) ? 0 : r.GetInt64(6),
+        SimQty         = r.IsDBNull(7) ? 0 : r.GetInt64(7),
+        RrQty          = r.IsDBNull(8) ? 0 : r.GetInt64(8),
+        OverrideQty    = r.IsDBNull(9) ? 0 : r.GetInt64(9),
     };
 
     public async Task<List<BoxDetailRow>> GetBoxDetailsAsync(long batchNo, bool rollupToBoxOnly, CancellationToken ct = default)

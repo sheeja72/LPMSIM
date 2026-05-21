@@ -1182,6 +1182,7 @@
                 var ssRows  = FilteredStoreSummary.ToList();
                 var sumEom  = ssRows.Sum(r => r.EOM);
                 var sumSoh  = ssRows.Sum(r => r.SOH);
+                var sumMnm  = ssRows.Sum(r => r.MerchNeedMonth);    // 1.14.94
                 var sumMnw  = ssRows.Sum(r => r.MerchNeedWeek);
                 var sumSim  = ssRows.Sum(r => r.SimQty);
                 var sumRr   = ssRows.Sum(r => r.RrQty);
@@ -1195,7 +1196,11 @@
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.StoreName">Store Name</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumEom.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.EOM">EOM</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumSoh.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.SOH">SOH</MudTableSortLabel></MudTh>
-                        <MudTh><div class="th-total" title="Σ Merch Need (Week) for this store = SIM cap.">@sumMnw.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
+                        @* 1.14.94 — Merch Need (Month) inserted BEFORE Merch Need (Week).
+                           Month is the cap the 1.14.87 allocator actually uses;
+                           Week is informational. *@
+                        <MudTh><div class="th-total" title="Σ Merch Need (Month) for this store = SIM cap (1.14.87+).">@sumMnm.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.MerchNeedMonth">Merch Need<br />(Month)</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total" title="Σ Merch Need (Week) — informational (allocator no longer uses Week as cap from 1.14.87).">@sumMnw.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.MerchNeedWeek">Merch Need<br />(Week)</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumSim.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.SimQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@sumRr.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.RrQty">RR Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total" title="Subset of SIM Qty above SKU Max / Merch Need caps (P1b/P2b override).">@sumOvr.ToString("N0")</div><MudTableSortLabel T="StoreSummaryRow" SortBy="r => r.OverrideQty">Override<br />Qty</MudTableSortLabel></MudTh>
@@ -1205,6 +1210,7 @@
                         <MudTd>@context.StoreName</MudTd>
                         <MudTd>@context.EOM.ToString("N0")</MudTd>
                         <MudTd>@context.SOH.ToString("N0")</MudTd>
+                        <MudTd>@context.MerchNeedMonth.ToString("N0")</MudTd>  @* 1.14.94 *@
                         <MudTd>@context.MerchNeedWeek.ToString("N0")</MudTd>
                         <MudTd>@context.SimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RrQty > 0 ? context.RrQty.ToString("N0") : "—")</MudTd>
@@ -1215,7 +1221,8 @@
                     </PagerContent>
                 </MudTable>
                 <MudText Typo="Typo.caption" Class="mt-2" Style="color:#64748b;">
-                    <strong>Merch Need (Week)</strong> = weekly open-to-receive that drives the SIM cap.
+                    <strong>Merch Need (Month)</strong> = monthly open-to-receive — the SIM cap as of 1.14.87.
+                    <strong>Merch Need (Week)</strong> = weekly slice; informational only (allocator no longer reads Week as a cap).
                     <strong>SIM Qty</strong> = total allocated to this store this run; <strong>RR Qty</strong> = subset from round-robin.
                     <strong>Override Qty</strong> = qty allocated above SKU Max / Merch Need caps (P1b/P2b override mode).
                 </MudText>
@@ -4800,7 +4807,11 @@
         // 1.14.81 — LPM/NONLPM prefix from CurrentBatchTag().
         await SaveExcelAsync($"{CurrentBatchTag()}LPMSIM_StoreSummary_{bn}.xlsx", "StoreSummary", sheet =>
         {
-            string[] headers = { "Store ID", "Store Name", "EOM", "SOH", "Merch Need (Week)", "SIM Qty", "RR Qty", "Override Qty" };
+            // 1.14.94 — Merch Need (Month) column inserted between SOH and
+            // Merch Need (Week). SIM/RR/Override columns shift +1.
+            string[] headers = { "Store ID", "Store Name", "EOM", "SOH",
+                                 "Merch Need (Month)", "Merch Need (Week)",
+                                 "SIM Qty", "RR Qty", "Override Qty" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
             {
@@ -4809,12 +4820,13 @@
                 sheet.Cell(row, 2).Value = r.StoreName;
                 sheet.Cell(row, 3).Value = (double)r.EOM;
                 sheet.Cell(row, 4).Value = r.SOH;
-                sheet.Cell(row, 5).Value = r.MerchNeedWeek;
-                sheet.Cell(row, 6).Value = r.SimQty;
-                sheet.Cell(row, 7).Value = r.RrQty;
-                sheet.Cell(row, 8).Value = r.OverrideQty;
+                sheet.Cell(row, 5).Value = r.MerchNeedMonth;  // 1.14.94
+                sheet.Cell(row, 6).Value = r.MerchNeedWeek;
+                sheet.Cell(row, 7).Value = r.SimQty;
+                sheet.Cell(row, 8).Value = r.RrQty;
+                sheet.Cell(row, 9).Value = r.OverrideQty;
             }
-            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7, 8 });
+            FormatNumeric(sheet, rows.Count, new[] { 3, 4, 5, 6, 7, 8, 9 });
         });
     }
 

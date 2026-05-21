@@ -190,43 +190,50 @@
             <MudTh><MudTableSortLabel T="WhItemsReportRow"
                                        SortBy="r => r.Brand">Brand</MudTableSortLabel></MudTh>
             @* 1.14.82 — HO Price (from whboxitems.HOPrice) right after Brand
-               so the per-item identifiers stay grouped before the qty columns. *@
-            <MudTh Style="text-align:right;">
+               so the per-item identifiers stay grouped before the qty columns.
+               1.14.95 — min-width:90px added to all multi-word right-aligned
+               columns so 2-word labels (HO Price, WH Qty, Stores SOH, Blocked
+               Qty, Blocked Stores, To Fill Qty) render on ONE line instead of
+               wrapping awkwardly into two. *@
+            <MudTh Style="text-align:right;min-width:90px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.HoPrice">HO Price</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;min-width:90px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.WhQty">WH Qty</MudTableSortLabel>
             </MudTh>
             @* 1.14.82 — Slashed flag (MAX(whboxitems.Slashed = 'Y') per item)
                right after WH Qty. 1.14.86 — column is a Y/N flag, not a qty
                (the source column is Y/N text). Y = at least one in-scope
-               pallet for this item has Slashed = 'Y'; N = none. *@
-            <MudTh Style="text-align:center;">
+               pallet for this item has Slashed = 'Y'; N = none.
+               1.14.95 — min-width:80px so "Slashed" header sits on one line. *@
+            <MudTh Style="text-align:center;min-width:80px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.IsSlashed">Slashed</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;min-width:100px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.StoresSoh">Stores SOH</MudTableSortLabel>
             </MudTh>
             @* 1.14.92 — Explicit <br /> so the 3-word labels wrap consistently
                at the qualifier (Total / Avg) instead of inheriting a
                browser-arbitrary break that hid the "Total" and "Avg" prefixes
-               and made both columns read as just "SKU Max". *@
-            <MudTh Style="text-align:right;min-width:80px;">
+               and made both columns read as just "SKU Max".
+               1.14.95 — min-width bumped from 80 → 95 so the wider "Total SKU
+               Max" / "Avg SKU Max" labels never clip even on tight viewports. *@
+            <MudTh Style="text-align:right;min-width:95px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.SkuMax">Total<br />SKU Max</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;min-width:80px;">
+            <MudTh Style="text-align:right;min-width:95px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.AvgSkuMax">Avg<br />SKU Max</MudTableSortLabel>
             </MudTh>
             @* 1.14.82 — Blocked Qty + Blocked Stores from LPM_SimItemSkuMaxExcluded
                (selected country, latest period). Sits next to the SKU Max columns
                because the values explain *why* the SKU Max is reduced for stores. *@
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;min-width:100px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.BlockedQty">Blocked Qty</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;min-width:115px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.BlockedStores">Blocked Stores</MudTableSortLabel>
             </MudTh>
-            <MudTh Style="text-align:right;">
+            <MudTh Style="text-align:right;min-width:95px;">
                 <MudTableSortLabel T="WhItemsReportRow" SortBy="r => r.ToFillQty">To Fill Qty</MudTableSortLabel>
             </MudTh>
         </HeaderContent>
