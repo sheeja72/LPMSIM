@@ -23,6 +23,30 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.84 — "Season" filter labels clarified on two pages (2026-05-21)
+
+### What's new
+
+Two filter labels renamed so what they actually filter on is unambiguous from the label:
+
+- **SIM Generate** — *Season* → ***PalletType Season***. This filter reads `pallettype.Season` (`'W'` = Winter, anything else = Summer) — i.e. the seasonality of the **physical pallet's type**. Independent of the item's own seasonality.
+- **Reports → WH SKU Investigation** — *Season* → ***Item Season***. This filter reads `whboxitems.Season` directly — i.e. the **item's** seasonality stamp on the warehouse row.
+
+Same underlying filters with the same options (All / Summer / Winter) and identical behaviour — only the label text changes. The rename surfaces that the two pages were filtering on **different** things despite sharing a single label, which had caused some confusion when a planner toggled Season on SIM Generate expecting it to behave like the Reports filter.
+
+### Files changed
+
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — `<span class="lpm-fb-label">Season</span>` → `<span class="lpm-fb-label">PalletType Season</span>`.
+- `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` — `<MudSelect ... Label="Season" ...>` → `Label="Item Season"`.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.83 → 1.14.84.
+- `CHANGELOG.md` — this section.
+
+### Files intentionally not touched
+
+- `Reports/WhHoStock.razor` and `Reports/VarianceReport.razor` also have a `Label="Season"` MudSelect. Those weren't part of the request — they read different sources again — flagging here for awareness but not changing.
+
+---
+
 ## 1.14.83 — SKU Max "Built by" bug fix — was showing the prior builder's name (2026-05-21)
 
 ### What's wrong

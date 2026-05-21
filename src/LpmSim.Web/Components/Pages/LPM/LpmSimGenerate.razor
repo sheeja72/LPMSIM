@@ -425,7 +425,10 @@
         </MudItem>
         <MudItem xs="6" sm="3" md="2">
             <div class="lpm-fb-group">
-                <span class="lpm-fb-label">Season</span>
+                @* 1.14.84 — Renamed "Season" → "PalletType Season" to disambiguate
+                   from item-level seasonality (which is what the WH SKU Investigation
+                   page filters on). This filter reads pallettype.Season. *@
+                <span class="lpm-fb-label">PalletType Season</span>
                 <div class="d-flex flex-wrap gap-1 align-center">
                     <MudCheckBox T="bool" Value="_seasonSummer" ValueChanged="async (bool v) => { _seasonSummer = v; await CheckAsync(); }"
                                  Color="Color.Primary" Dense="true" Size="Size.Small">Summer</MudCheckBox>

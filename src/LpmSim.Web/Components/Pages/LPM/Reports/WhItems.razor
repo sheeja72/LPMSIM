@@ -43,9 +43,13 @@
             </MudSelect>
         </MudItem>
 
-        @* Season — single. All / Summer / Winter. 1.14.50. *@
+        @* Season — single. All / Summer / Winter. 1.14.50.
+           1.14.84 — Label renamed to "Item Season" to make it explicit that the
+           filter is on the item's seasonality (whboxitems.Season) and to
+           differentiate it from SIM Generate's "PalletType Season" filter,
+           which reads pallettype.Season. *@
         <MudItem xs="6" sm="4" md="2">
-            <MudSelect T="WhHoSeason" Label="Season" Value="_season"
+            <MudSelect T="WhHoSeason" Label="Item Season" Value="_season"
                        ValueChanged="v => { _season = v; StateHasChanged(); }"
                        Variant="Variant.Outlined" Margin="Margin.Dense"
                        Class="@(_season == WhHoSeason.All ? "" : "lpm-filter-active")">

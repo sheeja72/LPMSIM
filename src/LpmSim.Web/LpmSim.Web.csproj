@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.83</Version>
-    <AssemblyVersion>1.14.83.0</AssemblyVersion>
-    <FileVersion>1.14.83.0</FileVersion>
-    <InformationalVersion>1.14.83 (SKU Max "Built by" bug — the panel showed the prior builder's name (e.g. sheeja) alongside the new build's timestamp because the apply-phase UPDATE statement bumped CreateTS but never updated CreatedBy. Fix: display now reads BuiltBy from the per-period LPM_SimItemSkuMaxBuild header (which is MERGE-updated correctly on every build) instead of the per-row LPM_SimItemSkuMax.CreatedBy; the apply-phase UPDATE also now writes CreatedBy = @user so the per-row audit trail stops drifting.)</InformationalVersion>
+    <Version>1.14.84</Version>
+    <AssemblyVersion>1.14.84.0</AssemblyVersion>
+    <FileVersion>1.14.84.0</FileVersion>
+    <InformationalVersion>1.14.84 (Label-clarity rename: SIM Generate's "Season" filter → "PalletType Season" (reads pallettype.Season); WH SKU Investigation's "Season" filter → "Item Season" (reads whboxitems.Season). Same underlying data, clearer intent — they were filtering on different things despite sharing one label.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>
