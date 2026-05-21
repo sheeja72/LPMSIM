@@ -249,6 +249,11 @@ else
                         <MudTh>GIN No</MudTh>
                         <MudTh>GIN Date</MudTh>
                         <MudTh>From/To</MudTh>
+                        @* 1.14.80 — Container number + most-recent Approved batch
+                           containing this box (same country). Helps planners spot
+                           reused / re-shipped boxes. *@
+                        <MudTh>Cont No</MudTh>
+                        <MudTh>Recent Batch</MudTh>
                     </HeaderContent>
                     <RowTemplate>
                         <MudTd>#@context.LPMBatchNo</MudTd>
@@ -278,6 +283,9 @@ else
                         <MudTd>@(context.GINNo ?? string.Empty)</MudTd>
                         <MudTd>@(context.GinDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
                         <MudTd>@(context.FromTo ?? string.Empty)</MudTd>
+                        @* 1.14.80 — Cont No (free text) + Recent Batch (#N or em-dash). *@
+                        <MudTd>@(context.ContNo ?? string.Empty)</MudTd>
+                        <MudTd>@(context.RecentBatchNo.HasValue ? $"#{context.RecentBatchNo}" : "—")</MudTd>
                     </RowTemplate>
                     <FooterContent>
                         @* 1.14.60 — Totals row. Box Qty is summed across DISTINCT
@@ -304,6 +312,9 @@ else
                            columns. Dashes (no totals — these are date / text). *@
                         <MudTd>—</MudTd>
                         <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
+                        <MudTd>—</MudTd>
+                        @* 1.14.80 — Footer cells for Cont No + Recent Batch. *@
                         <MudTd>—</MudTd>
                         <MudTd>—</MudTd>
                     </FooterContent>
@@ -748,7 +759,9 @@ else
             headers.AddRange(new[] { "BoxNo", "Box Qty", "Allocated Qty", "SKU Usability %",
                                      "Pallet Type", "Type Name", "Pallet Category",
                                      // 1.14.70 — Pallet-purchase / GIN columns.
-                                     "Purchase Dt", "GIN No", "GIN Date", "From/To" });
+                                     "Purchase Dt", "GIN No", "GIN Date", "From/To",
+                                     // 1.14.80 — Cont No + Recent Approved Batch (same country, other than this batch).
+                                     "Cont No", "Recent Batch" });
             for (int c = 0; c < headers.Count; c++)
             {
                 ws.Cell(1, c + 1).Value = headers[c];
@@ -780,6 +793,10 @@ else
                 ws.Cell(r, c++).Value = x.GINNo ?? "";
                 if (x.GinDate.HasValue) ws.Cell(r, c).Value = x.GinDate.Value; c++;
                 ws.Cell(r, c++).Value = x.FromTo ?? "";
+                // 1.14.80 — Cont No (free text) + Recent Batch (numeric — keeps
+                // Excel sort/filter useful; blank when no earlier batch matches).
+                ws.Cell(r, c++).Value = x.ContNo ?? "";
+                if (x.RecentBatchNo.HasValue) ws.Cell(r, c).Value = x.RecentBatchNo.Value; c++;
                 r++;
             }
             // TOTAL row — Box Qty deduped by BoxNo, Allocated summed, Usability averaged.

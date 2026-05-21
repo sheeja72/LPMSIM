@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.79</Version>
-    <AssemblyVersion>1.14.79.0</AssemblyVersion>
-    <FileVersion>1.14.79.0</FileVersion>
-    <InformationalVersion>1.14.79 (Three changes bundled: (1) Migration 058 fixes CK_LPMSIM_Batch_Status to allow 'Running' so 1.14.67's status lifecycle stops failing on Generate; (2) Country linkage Part 2 — UAE SIM batches now include OMAN stores with CountryPriority sort (UAE first); (3) GST timestamps applied to every remaining display site (SKU Max panel, build progress, Audit log, Access pages, Warehouse Boxes, Production Schedule approved-by stamp).)</InformationalVersion>
+    <Version>1.14.80</Version>
+    <AssemblyVersion>1.14.80.0</AssemblyVersion>
+    <FileVersion>1.14.80.0</FileVersion>
+    <InformationalVersion>1.14.80 (SIM Boxes report — two new columns: (1) Cont No — container number from whboxitems/WHBoxItemsExport.ContNo, pallet-level (matched on BoxNo + PalletNo); (2) Recent Batch — most recent Approved SIM batch (other than the current one) in the same country that contained this BoxNo. Surfaces "this box already shipped, why is it back?" reuse cases. Both columns appear in the Reports SIM Boxes tab, the Generate-preview Boxes tab, and both Excel exports.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

@@ -23,6 +23,40 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.80 — SIM Boxes report: Cont No + Recent Batch columns (2026-05-21)
+
+### What's new
+
+Two new columns on the **SIM Boxes** report (visible in both the *LPM → SIM Reports → SIM Boxes* tab and the *LPM → SIM Generate → Result Preview → Boxes* tab, plus both Excel exports):
+
+#### 1) **Cont No** — container number
+
+Comes from `racks.dbo.whboxitems.ContNo` (UAE) or `[<DataName>].dbo.WHBoxItemsExport.ContNo` (non-UAE). Identifies the inbound shipping container the pallet arrived on. Matched at the **pallet** grain (`BoxNo` + `PalletNo`) so a box that came in across two containers shows the container of the specific pallet the allocator picked. Blank when the source row carries no `ContNo`.
+
+#### 2) **Recent Batch** — most recent prior Approved batch containing this BoxNo
+
+For each box on the current batch, the report now shows the largest `LPMBatchNo` (i.e. most recent) of any **Approved** SIM batch in the **same country** (other than the current batch) that also contained that BoxNo. Renders as `#N` when a match exists or em-dash when the box has never been allocated before. The intent is to surface reuse cases — "this box already shipped in batch #1247, why is it back in #1290?" — without forcing the planner to dig through prior batches manually.
+
+Both columns participate in the table's free-text filter and the column sort. The Excel export writes `Cont No` as text and `Recent Batch` as a number so spreadsheet sort/filter work without extra cleanup.
+
+### Implementation notes
+
+- **Rollup-mode SQL** (Reports view): a new CTE `RecentApprovedBatchByBox` aggregates `LPMSIM_Output × LPMSIM_Batch` to find `MAX(LPMBatchNo)` per BoxNo where `Status = 'Approved' AND LPMBatchNo <> @batchNo AND Country = @batchCountry`. Left-joined onto `BoxAgg` so boxes without a prior batch render NULL. `ContNo` is added as `MAX(w.ContNo)` to both branches of the existing `BoxMeta` CTE (non-empty-BoxNo + empty-BoxNo fallback) so the 1.14.72 PalletNo-fallback path still resolves the container number correctly.
+- **Non-rollup mode SQL** (Generate preview): per-pallet `TOP 1 ContNo` subquery against `{whSrc}` matching the same `MatchKey` / `PalletNo` predicates already used for `PalletType` / `PurDate` / `GINNo` / `GinDate` / `FromTo`. `RecentBatchNo` is a per-BoxNo correlated subquery against `LPMSIM_Output × LPMSIM_Batch` with the same Approved / same-country / not-self predicates.
+- Country comes from the current batch's row (defaulting to `UAE` when missing, same as every other report). Wired through to the SQL as `@batchCountry`.
+- `ReadBoxDetail` reads the two new columns at indices 22 (`ContNo`) and 23 (`RecentBatchNo`), preserving the existing 0-21 indices.
+- No migration required — `ContNo` and `LPMSIM_Output.BoxNo` already exist on both schemas.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `BoxDetailRow` (added `ContNo` + `RecentBatchNo`), rollup branch SQL (new CTE + projection), non-rollup branch SQL (new subqueries), `ReadBoxDetail` (2 new indices), parameter list (added `@batchCountry`).
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimReports.razor` — SIM Boxes header + row + footer cells (Cont No + Recent Batch), Excel export.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — Boxes preview header + row cells, Excel export (qty/usability columns shift from 15-18 → 17-20).
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.79 → 1.14.80.
+- `CHANGELOG.md` — this section.
+
+---
+
 ## 1.14.79 — Three changes bundled: CK_LPMSIM_Batch_Status hotfix + Country linkage Part 2 + GST timestamps sweep (2026-05-21)
 
 ### What's new

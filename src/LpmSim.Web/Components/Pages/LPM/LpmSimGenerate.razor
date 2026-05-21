@@ -1376,6 +1376,9 @@
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.GINNo ?? string.Empty">GIN No</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.GinDate ?? DateTime.MinValue">GIN Date</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.FromTo ?? string.Empty">From/To</MudTableSortLabel></MudTh>
+                        @* 1.14.80 — Container number + most-recent Approved batch (same country, other than this one). *@
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.ContNo ?? string.Empty">Cont No</MudTableSortLabel></MudTh>
+                        <MudTh><div class="th-total">&nbsp;</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.RecentBatchNo ?? 0">Recent Batch</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalBoxQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.BoxQty ?? 0">Total Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalSimQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.LpmSimQty">SIM Qty</MudTableSortLabel></MudTh>
                         <MudTh><div class="th-total">@totalRrQty.ToString("N0")</div><MudTableSortLabel T="BoxDetailRow" SortBy="r => r.RoundRobinQty">RR Qty</MudTableSortLabel></MudTh>
@@ -1406,6 +1409,9 @@
                         <MudTd>@(context.GINNo ?? string.Empty)</MudTd>
                         <MudTd>@(context.GinDate?.ToString("yyyy-MM-dd") ?? string.Empty)</MudTd>
                         <MudTd>@(context.FromTo ?? string.Empty)</MudTd>
+                        @* 1.14.80 — Cont No (free text) + Recent Batch (#N or em-dash). *@
+                        <MudTd>@(context.ContNo ?? string.Empty)</MudTd>
+                        <MudTd>@(context.RecentBatchNo.HasValue ? $"#{context.RecentBatchNo}" : "—")</MudTd>
                         <MudTd>@(context.BoxQty?.ToString("N0"))</MudTd>
                         <MudTd>@context.LpmSimQty.ToString("N0")</MudTd>
                         <MudTd>@(context.RoundRobinQty > 0 ? context.RoundRobinQty.ToString("N0") : "—")</MudTd>
@@ -4394,9 +4400,11 @@
             // 1.14.12: Pallet No column added after Box No.
             // 1.14.65: Division (after Kind) + Tote ID (after Rack) added.
             // 1.14.70: Purchase Dt / GIN No / GIN Date / From-To added after Tote ID.
+            // 1.14.80: Cont No + Recent Batch appended after From/To (qty/usability columns shift +2).
             string[] headers = { "Box No", "Pallet No", "Kind", "Division", "Pallet Type", "Type Name",
                                  "Trn Date", "Warehouse", "Rack", "Tote ID",
                                  "Purchase Dt", "GIN No", "GIN Date", "From/To",
+                                 "Cont No", "Recent Batch",
                                  "Total Qty", "SIM Qty", "RR Qty", "Usability %" };
             ApplyHeaders(sheet, headers);
             for (int i = 0; i < rows.Count; i++)
@@ -4418,17 +4426,22 @@
                 sheet.Cell(row, 12).Value = r.GINNo ?? "";
                 if (r.GinDate.HasValue) sheet.Cell(row, 13).Value = r.GinDate.Value;
                 sheet.Cell(row, 14).Value = r.FromTo ?? "";
-                sheet.Cell(row, 15).Value = r.BoxQty ?? 0;
-                sheet.Cell(row, 16).Value = r.LpmSimQty;
-                sheet.Cell(row, 17).Value = r.RoundRobinQty;
-                sheet.Cell(row, 18).Value = (double?)r.SkuUsabilityPct;
+                // 1.14.80 — Cont No + Recent Batch. RecentBatchNo as a numeric so
+                // Excel sort/filter is usable; blank when no prior batch matches.
+                sheet.Cell(row, 15).Value = r.ContNo ?? "";
+                if (r.RecentBatchNo.HasValue) sheet.Cell(row, 16).Value = r.RecentBatchNo.Value;
+                sheet.Cell(row, 17).Value = r.BoxQty ?? 0;
+                sheet.Cell(row, 18).Value = r.LpmSimQty;
+                sheet.Cell(row, 19).Value = r.RoundRobinQty;
+                sheet.Cell(row, 20).Value = (double?)r.SkuUsabilityPct;
             }
             sheet.Range(2, 7, rows.Count + 1, 7).Style.NumberFormat.Format = "yyyy-mm-dd";
             // 1.14.70 — Format the two new date columns (Purchase Dt at 11, GIN Date at 13).
             sheet.Range(2, 11, rows.Count + 1, 11).Style.NumberFormat.Format = "yyyy-mm-dd";
             sheet.Range(2, 13, rows.Count + 1, 13).Style.NumberFormat.Format = "yyyy-mm-dd";
-            FormatNumeric(sheet, rows.Count, new[] { 15, 16, 17 });
-            sheet.Range(2, 18, rows.Count + 1, 18).Style.NumberFormat.Format = "0.0";
+            // 1.14.80 — Trailing numeric columns shifted from 15-18 → 17-20.
+            FormatNumeric(sheet, rows.Count, new[] { 17, 18, 19 });
+            sheet.Range(2, 20, rows.Count + 1, 20).Style.NumberFormat.Format = "0.0";
         });
     }
 

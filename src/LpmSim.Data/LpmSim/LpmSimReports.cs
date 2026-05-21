@@ -163,6 +163,16 @@ public class BoxDetailRow
     /// <summary>1.14.70 — From/To routing label for the pallet (whboxitems.FromTo). NULL when not set.</summary>
     public string? FromTo { get; set; }
 
+    /// <summary>1.14.80 — Container number (whboxitems.ContNo). Identifies the
+    /// inbound shipping container this box came in on. NULL when not tagged.</summary>
+    public string? ContNo { get; set; }
+
+    /// <summary>1.14.80 — Most recent Approved batch (other than the current one)
+    /// in the same country that contains this BoxNo. NULL when the box has
+    /// never been allocated in any earlier Approved batch. Helps planners
+    /// spot "this box already shipped in batch #N, why is it back?" cases.</summary>
+    public long? RecentBatchNo { get; set; }
+
     /// <summary>% of the box's qty that was allocated in this batch (Allocated / Box Qty × 100).</summary>
     public decimal? SkuUsabilityPct =>
         BoxQty.HasValue && BoxQty.Value > 0
@@ -945,6 +955,7 @@ BoxMeta AS (
            MAX(w.GINNo)                                                          AS GINNo,
            MAX(w.GinDate)                                                        AS GinDate,
            MAX(w.FromTo)                                                         AS FromTo,
+           MAX(w.ContNo)                                                         AS ContNo,
            CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
                 THEN 'LPM' ELSE 'Non-LPM' END                                    AS BoxKind
       FROM BoxAgg b
@@ -967,6 +978,7 @@ BoxMeta AS (
            MAX(w.GINNo)                                                          AS GINNo,
            MAX(w.GinDate)                                                        AS GinDate,
            MAX(w.FromTo)                                                         AS FromTo,
+           MAX(w.ContNo)                                                         AS ContNo,
            CASE WHEN MAX(CASE WHEN w.LPMDt IS NOT NULL THEN 1 ELSE 0 END) = 1
                 THEN 'LPM' ELSE 'Non-LPM' END                                    AS BoxKind
       FROM BoxAgg b
@@ -1004,6 +1016,21 @@ BoxDiv AS (
                                                      AND d.IsActive = 1
      WHERE ISNULL(b.BoxNo, '') = ''
      GROUP BY b.BoxNo, b.PalletNo
+),
+-- 1.14.80 — For every BoxNo in the current batch, find the most recent
+-- Approved batch (in the same country, other than this batch) that also
+-- contained that BoxNo. Surfaces ''this box already shipped in batch #N,
+-- why is it back?'' reuse cases to the planner. NULL when the box has
+-- never been allocated in any earlier Approved batch.
+RecentApprovedBatchByBox AS (
+    SELECT o.BoxNo, MAX(o.LPMBatchNo) AS RecentBatchNo
+      FROM dbo.LPMSIM_Output o
+      INNER JOIN dbo.LPMSIM_Batch b ON b.LPMBatchNo = o.LPMBatchNo
+     WHERE b.Status = 'Approved'
+       AND b.LPMBatchNo <> @batchNo
+       AND b.Country   = @batchCountry
+       AND ISNULL(o.BoxNo, '') <> ''
+     GROUP BY o.BoxNo
 )
 SELECT b.LPMBatchNo,
        NULL AS StoreID, NULL AS StoreName,
@@ -1025,7 +1052,9 @@ SELECT b.LPMBatchNo,
        bm.PurDate,
        bm.GINNo,
        bm.GinDate,
-       bm.FromTo
+       bm.FromTo,
+       bm.ContNo,           -- 1.14.80 — Container number from whboxitems
+       rab.RecentBatchNo    -- 1.14.80 — Most recent Approved batch with this BoxNo (NULL if none)
   FROM BoxAgg b
   LEFT JOIN BoxMeta bm
          ON ISNULL(bm.BoxNo, '')   = ISNULL(b.BoxNo, '')
@@ -1034,6 +1063,7 @@ SELECT b.LPMBatchNo,
          ON ISNULL(bd.BoxNo, '')   = ISNULL(b.BoxNo, '')
         AND ISNULL(bd.PalletNo, '') = ISNULL(b.PalletNo, '')
   LEFT JOIN bfldata.dbo.pallettype pt ON pt.PalletType = bm.PalletType
+  LEFT JOIN RecentApprovedBatchByBox rab ON rab.BoxNo = b.BoxNo
  ORDER BY b.BoxNo, b.PalletNo;"
             : $@"
 WITH ItemDiv AS (
@@ -1121,7 +1151,21 @@ SELECT sa.LPMBatchNo,
            AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS GinDate,
        (SELECT TOP 1 FromTo  FROM {whSrc} w
          WHERE w.BoxNo = sa.MatchKey
-           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS FromTo
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS FromTo,
+       -- 1.14.80 — ContNo (pallet-level container number) + RecentBatchNo
+       -- (most recent Approved batch in same country containing this BoxNo,
+       -- other than the current one). Both NULL when not applicable.
+       (SELECT TOP 1 ContNo  FROM {whSrc} w
+         WHERE w.BoxNo = sa.MatchKey
+           AND (ISNULL(sa.BoxNo, '') = '' OR ISNULL(w.PalletNo, '') = ISNULL(sa.PalletNo, ''))) AS ContNo,
+       (SELECT MAX(o.LPMBatchNo)
+          FROM dbo.LPMSIM_Output o
+          INNER JOIN dbo.LPMSIM_Batch bb ON bb.LPMBatchNo = o.LPMBatchNo
+         WHERE bb.Status = 'Approved'
+           AND bb.LPMBatchNo <> @batchNo
+           AND bb.Country   = @batchCountry
+           AND o.BoxNo      = sa.BoxNo
+           AND ISNULL(sa.BoxNo, '') <> '') AS RecentBatchNo
   FROM SimAgg sa
   LEFT JOIN dbo.DataSettings ds ON ds.StoreID = sa.StoreID
   LEFT JOIN dbo.Division div ON div.DivCode = sa.DivCode
@@ -1130,7 +1174,8 @@ SELECT sa.LPMBatchNo,
 
         return await ExecAsync(db, sql, ReadBoxDetail, ct, new Dictionary<string, object>
         {
-            ["@batchNo"] = batchNo,
+            ["@batchNo"]      = batchNo,
+            ["@batchCountry"] = batchCountry,
         });
     }
 
@@ -1807,6 +1852,10 @@ SELECT TOP (@top)
         GINNo          = r.FieldCount > 19 && !r.IsDBNull(19) ? r.GetString(19)   : null,
         GinDate        = r.FieldCount > 20 && !r.IsDBNull(20) ? r.GetDateTime(20) : null,
         FromTo         = r.FieldCount > 21 && !r.IsDBNull(21) ? r.GetString(21)   : null,
+        // 1.14.80 — ContNo (22) + RecentBatchNo (23). FieldCount guards keep
+        // older callers safe if they ever run an out-of-date SELECT.
+        ContNo         = r.FieldCount > 22 && !r.IsDBNull(22) ? r.GetString(22)   : null,
+        RecentBatchNo  = r.FieldCount > 23 && !r.IsDBNull(23) ? r.GetInt64(23)    : (long?)null,
     };
 
     // 1.14.12: PalletNo column added at index 6; every subsequent index shifted by +1.
