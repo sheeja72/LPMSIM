@@ -57,3 +57,10 @@ _ReSharper.*/
 
 # ─── Entrypoints / dev artefacts ───────────────────────────────────────
 launchSettings.local.json
+
+# ─── Local docs + working folders (kept out of the shared repo) ────────
+# Excel workbooks the planner uses locally and the executive briefing
+# materials that don't need to travel with the source code. These stay
+# on the original author's machine; teammates clone the repo without them.
+Excel Files/
+docs/
