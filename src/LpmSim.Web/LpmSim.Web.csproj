@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.101</Version>
-    <AssemblyVersion>1.14.101.0</AssemblyVersion>
-    <FileVersion>1.14.101.0</FileVersion>
-    <InformationalVersion>1.14.101 hotfix (Closed-box row was invisible because 1.14.99 added 4 per-row EXISTS sub-queries to the main BoxSegments SQL — those inflated the CheckAsync runtime, likely timed out, and the surrounding try/catch swallowed the exception, leaving the whole Eligible Boxes table null. Fix: closed-box rollup is now a SEPARATE query with its own try/catch + uses INNER JOIN to a pre-filtered closed-box set (single index seek instead of N per-row sub-queries). Main BoxSegments table renders even if the closed query fails — closed row just shows 0/0 instead.)</InformationalVersion>
+    <Version>1.14.102</Version>
+    <AssemblyVersion>1.14.102.0</AssemblyVersion>
+    <FileVersion>1.14.102.0</FileVersion>
+    <InformationalVersion>1.14.102 — Build SKU Max country-link routing + per-country lock. (1) Child-country builds now read the parent's whboxitems (OMAN → UAE racks.dbo.whboxitems) via the existing LPM_CountryLink table — same mechanism EOM Calculator has used since 1.14.77, just retro-fitted onto BuildItemSkuMaxAsync. (2) New LPM_SkuMaxLock table (migration 060): row presence per Country = locked. Both the manual Build SKU Max click AND the nightly SkuMaxBuildScheduler check this table and refuse / skip locked countries. UI shows a red "Locked" badge with tooltip (LockedAt / LockedBy / Reason); Build SKU Max button is greyed while locked. UAE is seeded locked by the migration — delete the row in SSMS to unlock.</InformationalVersion>
   </PropertyGroup>
 
 </Project>

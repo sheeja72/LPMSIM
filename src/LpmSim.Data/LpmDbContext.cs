@@ -35,6 +35,8 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
     public DbSet<LpmStoreCapacity> LpmStoreCapacities => Set<LpmStoreCapacity>();
     // 1.14.77 — Parent/Child country linkage (UAE -> OMAN today). See LpmCountryLink.
     public DbSet<LpmCountryLink>  LpmCountryLinks   => Set<LpmCountryLink>();
+    // 1.14.102 — Per-country Build SKU Max lock (row presence = locked).
+    public DbSet<LpmSkuMaxLock>   LpmSkuMaxLocks    => Set<LpmSkuMaxLock>();
     public DbSet<LpmSimItemSkuMax> LpmSimItemSkuMaxes => Set<LpmSimItemSkuMax>();
     public DbSet<LpmSimProductionSchedule> LpmSimProductionSchedules => Set<LpmSimProductionSchedule>();
     public DbSet<LpmSimAdmRun>     LpmSimAdmRuns      => Set<LpmSimAdmRun>();
@@ -307,6 +309,20 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.ChildCountry ).HasMaxLength(20);
             e.Property(x => x.CreatedBy    ).HasMaxLength(100);
             e.Property(x => x.CreateTS     ).HasColumnType("datetime2(0)");
+        });
+
+        // 1.14.102 — Per-country Build SKU Max lock. Row presence = locked.
+        // Both the manual SkuMaxBuildJobManager.Start path and the nightly
+        // SkuMaxBuildScheduler check this table and block / skip the country
+        // when a row exists. See db/060_lpm_skumaxlock.sql.
+        mb.Entity<LpmSkuMaxLock>(e =>
+        {
+            e.ToTable("LPM_SkuMaxLock");
+            e.HasKey(x => x.Country);
+            e.Property(x => x.Country ).HasMaxLength(50);
+            e.Property(x => x.LockedBy).HasMaxLength(100);
+            e.Property(x => x.Reason  ).HasMaxLength(500);
+            e.Property(x => x.LockedAt).HasColumnType("datetime");
         });
 
         mb.Entity<LpmSKUMaxRule>(e =>

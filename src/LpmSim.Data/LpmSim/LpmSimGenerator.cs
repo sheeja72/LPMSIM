@@ -3084,6 +3084,32 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         if (conn.State != System.Data.ConnectionState.Open)
             await db.Database.OpenConnectionAsync(ct);
 
+        // 1.14.102 — Lock gate. Final defence-in-depth check before doing any
+        // real work. The SkuMaxBuildJobManager.Start path and the
+        // SkuMaxBuildScheduler both check this table earlier and bail out
+        // cleanly, so reaching here while locked should only happen if a
+        // caller bypassed both — but we still want to refuse to overwrite
+        // LPM_SimItemSkuMax for a locked country.
+        var lockRow = await db.LpmSkuMaxLocks.AsNoTracking()
+            .FirstOrDefaultAsync(l => l.Country == country, ct);
+        if (lockRow is not null)
+        {
+            throw new InvalidOperationException(
+                $"Build SKU Max is LOCKED for {country} " +
+                $"(locked {lockRow.LockedAt:dd-MMM-yyyy HH:mm}" +
+                (string.IsNullOrEmpty(lockRow.LockedBy) ? "" : $" by {lockRow.LockedBy}") +
+                (string.IsNullOrEmpty(lockRow.Reason)   ? "" : $" — {lockRow.Reason}") +
+                "). Delete the LPM_SkuMaxLock row to unlock.");
+        }
+
+        // 1.14.102 — Country-link routing for the WH source (whboxitems).
+        // OMAN ships from UAE's warehouse, so its SKU Max must be built from
+        // UAE's whboxitems. ResolveWhSourceCountryAsync reads LPM_CountryLink
+        // and returns the parent country when one exists, else the country
+        // itself. Same mechanism EOM Calculator has used since 1.14.77.
+        var whSourceCountry = await CountryLinkResolver
+            .ResolveWhSourceCountryAsync(db, country, ct);
+
         // Force-close on cancel — SqlCommand.Cancel() (which the .NET token
         // plumbing calls when ct fires) sends a TDS attention signal, but
         // SQL Server can take a long time to honour it during a big
@@ -3154,7 +3180,9 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         // the originating user without depending on the scoped ICurrentUser
         // (which only exists on the request that started the build).
         var user = !string.IsNullOrEmpty(userOverride) ? userOverride : (currentUser?.Name ?? "");
-        var rows = await BuildItemSkuMaxAsync((SqlConnection)conn, country, year, month, user, eomByDiv, progress, scope, ct);
+        // 1.14.102 — Pass whSourceCountry through so the worker reads the
+        // parent country's whboxitems (UAE) for child-country builds (OMAN).
+        var rows = await BuildItemSkuMaxAsync((SqlConnection)conn, country, whSourceCountry, year, month, user, eomByDiv, progress, scope, ct);
 
         return new LpmSimSkuMaxBuildStatus
         {
@@ -3189,7 +3217,7 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     /// </summary>
     private static async Task<long> BuildItemSkuMaxAsync(
         SqlConnection conn,
-        string country, int year, int month, string user,
+        string country, string whSourceCountry, int year, int month, string user,
         Dictionary<int, List<EomStore>> eomByDiv,
         IProgress<string>? progress,
         LpmSimSkuMaxScope scope,
@@ -3205,9 +3233,12 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             _                             => ""
         };
 
-        // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
+        // Country-aware whboxitems source. UAE uses racks.dbo.whboxitems,
         // others use [<DataName>].dbo.WHBoxItemsExport.
-        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+        // 1.14.102 — Resolve against `whSourceCountry` (parent country when
+        // LPM_CountryLink routes a child like OMAN to UAE), not the raw
+        // run country. OMAN's SKU Max now reads UAE's whboxitems.
+        var whSrc = await WhBoxItemsSource.ResolveAsync(conn, whSourceCountry, ct);
 
         // ATOMIC REBUILD ORDER (fixed in v1.7.1):
         //   1) Build & populate temp tables  ← non-destructive, no transaction

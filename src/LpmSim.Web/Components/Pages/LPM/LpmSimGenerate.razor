@@ -663,10 +663,32 @@
         {
             <span style="font-size:0.75rem;color:#94a3b8;white-space:nowrap;">…</span>
         }
+        @* 1.14.102 — Lock badge. Shown when the current Country has a row in
+           LPM_SkuMaxLock. Tooltip exposes who locked it, when, and why. The
+           Build SKU Max button (below) is disabled while a lock is in
+           effect — same lock blocks the nightly scheduler too. *@
+        @if (_skuMaxLock is { } lk)
+        {
+            var lockTip = $"Locked at {TimeFormatting.ToGccString(lk.LockedAt, "dd-MMM-yyyy HH:mm")}"
+                          + (string.IsNullOrEmpty(lk.LockedBy) ? "" : $" by {lk.LockedBy}")
+                          + (string.IsNullOrEmpty(lk.Reason)   ? "" : $"\n{lk.Reason}")
+                          + "\n\nDelete the LPM_SkuMaxLock row (SSMS) to unlock.";
+            <MudTooltip Text="@lockTip">
+                <span style="display:inline-flex;align-items:center;gap:0.25rem;
+                             padding:0.15rem 0.5rem;border-radius:999px;
+                             background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;
+                             font-size:0.72rem;font-weight:700;letter-spacing:.04em;
+                             text-transform:uppercase;white-space:nowrap;">
+                    <MudIcon Icon="@Icons.Material.Filled.Lock" Size="Size.Small"
+                             Style="font-size:0.95rem;" />
+                    Locked
+                </span>
+            </MudTooltip>
+        }
         <MudButton Color="@(_skuStale ? Color.Warning : Color.Default)"
                    Variant="Variant.Filled" Size="Size.Small" DropShadow="false"
                    StartIcon="@Icons.Material.Filled.Build"
-                   Disabled="@(_busy || _isBuildingSkuMax || string.IsNullOrEmpty(_country) || _runDate is null || _readiness?.EomReady != true)"
+                   Disabled="@(_busy || _isBuildingSkuMax || string.IsNullOrEmpty(_country) || _runDate is null || _readiness?.EomReady != true || _skuMaxLock is not null)"
                    OnClick="BuildSkuMaxAsync">
             @if (_isBuildingSkuMax) { <text>Building…</text> } else { <text>Build SKU Max</text> }
         </MudButton>
@@ -2765,6 +2787,11 @@
     // or when no Country is selected.
     private SkuMaxScopeCounts? _skuMaxScopeCounts;
 
+    // 1.14.102 — Active SKU Max lock for the current Country, or null when
+    // not locked. Row presence in LPM_SkuMaxLock = locked; refreshed when
+    // Country changes (same lifecycle as _skuMaxScopeCounts).
+    private LpmSkuMaxLock? _skuMaxLock;
+
     private LpmSimSourceFlags CurrentSources =>
         (_srcLpm    ? LpmSimSourceFlags.LpmBoxes    : LpmSimSourceFlags.None)
       | (_srcNonLpm ? LpmSimSourceFlags.NonLpmBoxes : LpmSimSourceFlags.None);
@@ -4297,6 +4324,19 @@
             _skuMaxScopeCounts = null;
         }
         await InvokeAsync(StateHasChanged);
+
+        // Stage 4 — Lock status (1.14.102). Single PK index lookup on a tiny
+        // table — sub-millisecond. Drives the lock badge + Build SKU Max
+        // button disable.
+        try
+        {
+            _skuMaxLock = await SkuMaxJobs.GetLockAsync(_country);
+        }
+        catch
+        {
+            _skuMaxLock = null;
+        }
+        await InvokeAsync(StateHasChanged);
     }
 
     /// <summary>
@@ -4319,6 +4359,25 @@
         if (SkuMaxJobs.IsRunning(_country, d.Year, d.Month))
         {
             Snackbar.Add("A SKU Max build is already running for this period.", Severity.Info);
+            return;
+        }
+
+        // 1.14.102 — Lock pre-check. The button is normally disabled when
+        // _skuMaxLock is set, but a stale page state could still let the
+        // click through. Re-fetch the lock and refuse with a clear message
+        // before paying for the preview query.
+        var liveLock = await SkuMaxJobs.GetLockAsync(_country);
+        if (liveLock is not null)
+        {
+            _skuMaxLock = liveLock;     // refresh badge in case the page was stale
+            var when    = TimeFormatting.ToGccString(liveLock.LockedAt, "dd-MMM HH:mm");
+            var who     = string.IsNullOrEmpty(liveLock.LockedBy) ? "" : $" by {liveLock.LockedBy}";
+            var why     = string.IsNullOrEmpty(liveLock.Reason)   ? "" : $" — {liveLock.Reason}";
+            Snackbar.Add(
+                $"Build SKU Max is locked for {_country} (since {when}{who}{why}). " +
+                "Delete the LPM_SkuMaxLock row to unlock.",
+                Severity.Warning,
+                cfg => { cfg.RequireInteraction = true; cfg.VisibleStateDuration = 12000; });
             return;
         }
 

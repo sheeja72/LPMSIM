@@ -1,5 +1,6 @@
 using LpmSim.Core;
 using LpmSim.Core.Entities;
+using LpmSim.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -67,6 +68,33 @@ public class SkuMaxBuildJobManager
     }
 
     /// <summary>
+    /// 1.14.102 — Return the active lock row for the country, or <c>null</c>
+    /// when not locked. Row presence in <c>LPM_SkuMaxLock</c> = locked.
+    /// <para>
+    /// Used by both the manual "Build SKU Max" click path (razor) and the
+    /// nightly <see cref="LpmSim.Web.Hosting.SkuMaxBuildScheduler"/> to
+    /// short-circuit BEFORE invoking <see cref="Start"/>. The Generator's
+    /// <c>BuildSkuMaxAsync</c> also re-checks at the top as a safety net.
+    /// </para>
+    /// </summary>
+    public async Task<LpmSkuMaxLock?> GetLockAsync(string country, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(country)) return null;
+        var trimmed = country.Trim();
+        using var diScope = _services.CreateScope();
+        var dbFactory = diScope.ServiceProvider.GetRequiredService<IDbContextFactory<LpmDbContext>>();
+        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        return await db.LpmSkuMaxLocks.AsNoTracking()
+            .FirstOrDefaultAsync(l => l.Country == trimmed, ct);
+    }
+
+    /// <summary>
+    /// Convenience boolean wrapper around <see cref="GetLockAsync"/>.
+    /// </summary>
+    public async Task<bool> IsLockedAsync(string country, CancellationToken ct = default)
+        => (await GetLockAsync(country, ct)) is not null;
+
+    /// <summary>
     /// Kick off a Build SKU Max in the background. Returns the job (Running)
     /// without waiting for completion. Throws if a build is already running
     /// for the same (Country, Year, Month) — even for a different scope, since
@@ -84,6 +112,21 @@ public class SkuMaxBuildJobManager
             throw new InvalidOperationException(
                 $"A SKU Max build is already running for {country} {year:D4}-{month:D2} " +
                 $"(started {existing.StartedAt:dd-MMM HH:mm:ss}{(string.IsNullOrEmpty(existing.StartedBy) ? "" : $" by {existing.StartedBy}")}).");
+
+        // 1.14.102 — Lock gate. Both callers (razor click handler + nightly
+        // scheduler) check LPM_SkuMaxLock asynchronously BEFORE invoking
+        // Start, but we re-check here so any future caller that forgets the
+        // pre-check still hits a clean refusal. The lookup is a single PK
+        // index seek on a tiny table — running it sync via GetAwaiter is
+        // acceptable (no real blocking happens).
+        var lockRow = GetLockAsync(country).GetAwaiter().GetResult();
+        if (lockRow is not null)
+            throw new InvalidOperationException(
+                $"Build SKU Max is LOCKED for {country} " +
+                $"(locked {lockRow.LockedAt:dd-MMM-yyyy HH:mm}" +
+                (string.IsNullOrEmpty(lockRow.LockedBy) ? "" : $" by {lockRow.LockedBy}") +
+                (string.IsNullOrEmpty(lockRow.Reason)   ? "" : $" — {lockRow.Reason}") +
+                "). Delete the LPM_SkuMaxLock row to unlock.");
 
         var cts = new CancellationTokenSource();
         var job = new SkuMaxBuildJob

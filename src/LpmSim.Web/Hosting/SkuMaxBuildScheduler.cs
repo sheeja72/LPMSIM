@@ -188,6 +188,24 @@ public class SkuMaxBuildScheduler : BackgroundService
                     continue;
                 }
 
+                // 1.14.102 — LPM_SkuMaxLock check. Row presence = locked. We
+                // skip locked countries silently (Information log only) so
+                // ops can review the nightly cycle and confirm the lock
+                // honoured. The lock blocks BOTH manual and auto runs; the
+                // planner deletes the row to allow builds again.
+                var lockRow = await _jobs.GetLockAsync(country, stoppingToken).ConfigureAwait(false);
+                if (lockRow is not null)
+                {
+                    _log.LogInformation(
+                        "SkuMaxBuildScheduler: skipping {Country} {Year:D4}-{Month:D2} — LOCKED (LPM_SkuMaxLock; since {LockedAt:dd-MMM HH:mm} by {LockedBy}; reason: {Reason}).",
+                        country, year, month,
+                        lockRow.LockedAt,
+                        string.IsNullOrEmpty(lockRow.LockedBy) ? "(none)" : lockRow.LockedBy,
+                        string.IsNullOrEmpty(lockRow.Reason)   ? "(none)" : lockRow.Reason);
+                    skipped++;
+                    continue;
+                }
+
                 var job = _jobs.Start(country, year, month, startedBy, LpmSimSkuMaxScope.All);
                 _log.LogInformation(
                     "SkuMaxBuildScheduler: started {Country} {Year:D4}-{Month:D2} (jobId={JobId}).",

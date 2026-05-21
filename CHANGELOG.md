@@ -23,6 +23,74 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.102 — Build SKU Max: country-link routing (OMAN → UAE) + per-country lock (2026-05-21)
+
+Two changes shipped together — both touch the Build SKU Max pipeline.
+
+### 1. Child-country builds now read the parent's whboxitems
+
+**Before:** `BuildSkuMaxAsync` passed the raw country into `WhBoxItemsSource.ResolveAsync`, so OMAN's build pointed at `[<OMAN-DataName>].dbo.WHBoxItemsExport` — which holds no warehouse stock because OMAN physically ships from UAE's warehouse. Result: OMAN's `LPM_SimItemSkuMax` ended up nearly empty, SIM Generate then dropped most boxes with "SKUMax = 0".
+
+**After:** `BuildSkuMaxAsync` now calls `CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct)` — same helper EOM Calculator has used since 1.14.77 — and passes the resolved `whSourceCountry` through to `BuildItemSkuMaxAsync`. For OMAN this returns `"UAE"` (because of the existing `LPM_CountryLink(ChildCountry=OMAN, ParentCountry=UAE, IsActive=1)` row), so OMAN's SKU Max is now built from `racks.dbo.whboxitems`.
+
+The rest of the build stays on the child country (Oman): EOM Output rows, SKU Max rule bands, store-div deactivations, and the final `LPM_SimItemSkuMax` writes all use `Country = 'OMAN'`. Only the whboxitems read is routed to the parent. For any country with no `LPM_CountryLink` row, `ResolveWhSourceCountryAsync` returns the country itself → zero behaviour change.
+
+### 2. New `LPM_SkuMaxLock` table — per-country lock for Build SKU Max
+
+**Why:** Operators need a kill-switch for Build SKU Max — e.g. when a country's whboxitems data is mid-load and you don't want either the nightly scheduler OR a manual click to overwrite the existing snapshot with a half-built one.
+
+**Mechanism:** Row presence per Country in `dbo.LPM_SkuMaxLock` = locked. Insert a row to lock; `DELETE` the row to unlock. Both the manual click path (`SkuMaxBuildJobManager.Start` → `LpmSimGenerator.BuildSkuMaxAsync`) and the nightly auto path (`SkuMaxBuildScheduler.RunAllCountriesAsync`) check the table and refuse / skip.
+
+Three layers of enforcement:
+
+| Layer | Behaviour when locked |
+|---|---|
+| **UI** (`LpmSimGenerate.razor`) | Red "Locked" badge next to Build SKU Max button with `LockedAt` / `LockedBy` / `Reason` tooltip. Button greyed out. |
+| **JobManager.Start** | Throws `InvalidOperationException` — same shape as the existing "already running" guard. Click handler catches and surfaces as a Warning Snackbar with the lock reason. |
+| **Scheduler** | Logs an Info-level "skipping {Country} — LOCKED" line for each locked country in the nightly cycle and moves on. No banner, no error — the lock is honoured silently. |
+| **Generator** (`BuildSkuMaxAsync`) | Final defence-in-depth: re-checks the lock at the top of the method and throws before any SQL work begins. Catches any caller that bypassed the manager. |
+
+**UAE seeded locked** by `db/060_lpm_skumaxlock.sql` per planner request. Delete the row in SSMS to unlock:
+
+```sql
+DELETE FROM dbo.LPM_SkuMaxLock WHERE Country = 'UAE';
+```
+
+To lock a different country later:
+
+```sql
+INSERT INTO dbo.LPM_SkuMaxLock (Country, LockedBy, Reason)
+VALUES ('KSA', 'sheeja', 'WHBoxItemsExport load in progress');
+```
+
+### Files changed
+
+- `db/060_lpm_skumaxlock.sql` — new migration. Creates `LPM_SkuMaxLock` table + seeds UAE lock.
+- `src/LpmSim.Core/Entities/LpmSkuMaxLock.cs` — new EF entity.
+- `src/LpmSim.Data/LpmDbContext.cs` — `DbSet<LpmSkuMaxLock>` + `OnModelCreating`.
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `BuildSkuMaxAsync`: lock pre-check + `ResolveWhSourceCountryAsync` call. `BuildItemSkuMaxAsync`: new `whSourceCountry` parameter; resolves whboxitems source against it.
+- `src/LpmSim.Data/LpmSim/SkuMaxBuildJobManager.cs` — new `GetLockAsync` / `IsLockedAsync` helpers; sync lock guard at the top of `Start`.
+- `src/LpmSim.Web/Hosting/SkuMaxBuildScheduler.cs` — `GetLockAsync` check before each country's `Start`; logs + skips when locked.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — `_skuMaxLock` field; lock-status fetch on Country change; lock badge + button-disable + click-handler pre-check with Snackbar warning.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.101 → 1.14.102.
+- `CHANGELOG.md` — this section.
+
+### Deploy steps
+
+1. **Apply `db/060_lpm_skumaxlock.sql` to prod DB FIRST.** Without the table, the lock check throws SQL "Invalid object name 'LPM_SkuMaxLock'" on every Build SKU Max attempt.
+2. Push code. Confirm sidebar shows `1.14.102`.
+3. SIM Generate → pick **UAE** → the red "Locked" badge should appear next to Build SKU Max; the button should be greyed out. Hover the badge to see "Locked at 21-May-2026 …".
+4. Pick **OMAN** + click Build SKU Max → it should build (no lock for OMAN) and produce a meaningfully populated `LPM_SimItemSkuMax` (because it's now reading UAE's whboxitems).
+5. To unlock UAE when ready: `DELETE FROM dbo.LPM_SkuMaxLock WHERE Country = 'UAE';`
+
+### Failure modes
+
+- **Migration 060 not applied** → Build SKU Max throws "Invalid object name 'LPM_SkuMaxLock'". Fix: run the migration.
+- **Lock row gets stale** (locker forgets to remove it) → nightly scheduler logs "skipping {Country} — LOCKED" but otherwise does nothing. No data corruption, just stale snapshots. Fix: delete the row.
+- **OMAN has no `LPM_CountryLink` row** → falls back to OMAN's own DataName. Build will produce nearly-empty SKU Max (the original symptom). Fix: insert the link row.
+
+---
+
 ## 1.14.101 — Hotfix: Closed-box row invisible because 1.14.99 SQL killed the whole BoxSegments (2026-05-21)
 
 ### What was wrong
