@@ -155,7 +155,7 @@
             &nbsp;·&nbsp; Generated <strong>@TimeFormatting.ToGccString(s.CreateTS, "dd-MMM HH:mm")</strong> by @s.CreatedBy
             @if (_isApproved && s.ApprovedTS is DateTime aTs)
             {
-                <span>&nbsp;·&nbsp; Approved <strong style="color:#16a34a;">@aTs.ToString("dd-MMM HH:mm")</strong> by @s.ApprovedBy</span>
+                <span>&nbsp;·&nbsp; Approved <strong style="color:#16a34a;">@TimeFormatting.ToGccString(aTs, "dd-MMM HH:mm")</strong> by @s.ApprovedBy</span>
             }
         </span>
     </div>

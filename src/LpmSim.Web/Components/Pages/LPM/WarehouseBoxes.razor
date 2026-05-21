@@ -308,7 +308,7 @@
             <MudTd>@context.Rack</MudTd>
             <MudTd>@context.Purchased</MudTd>
             <MudTd>@(context.TrnDate?.ToString("yyyy-MM-dd") ?? "")</MudTd>
-            <MudTd>@(context.CurrDate?.ToString("yyyy-MM-dd HH:mm") ?? "")</MudTd>
+            <MudTd>@(context.CurrDate is { } cd ? TimeFormatting.ToGccString(cd, "yyyy-MM-dd HH:mm") : "")</MudTd>
             <MudTd Style="text-align:right;">@context.SummerQty.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@context.WinterQty.ToString("N0")</MudTd>
             <MudTd Style="text-align:right;">@(context.Qty == 0 ? "—" : ((decimal)context.SummerQty * 100m / context.Qty).ToString("F1"))</MudTd>

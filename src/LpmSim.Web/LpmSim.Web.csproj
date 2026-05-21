@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.77</Version>
-    <AssemblyVersion>1.14.77.0</AssemblyVersion>
-    <FileVersion>1.14.77.0</FileVersion>
-    <InformationalVersion>1.14.77 (Country linkage — Part 1 of 2. New LPM_CountryLink table; EOM Calculator routes Child countries (e.g. OMAN) to Parent's WH source (e.g. UAE) so OMAN EOM Generate reads UAE warehouse instead of failing on missing DataName. SIM-side parent-child inclusion lands in 1.14.78.)</InformationalVersion>
+    <Version>1.14.79</Version>
+    <AssemblyVersion>1.14.79.0</AssemblyVersion>
+    <FileVersion>1.14.79.0</FileVersion>
+    <InformationalVersion>1.14.79 (Three changes bundled: (1) Migration 058 fixes CK_LPMSIM_Batch_Status to allow 'Running' so 1.14.67's status lifecycle stops failing on Generate; (2) Country linkage Part 2 — UAE SIM batches now include OMAN stores with CountryPriority sort (UAE first); (3) GST timestamps applied to every remaining display site (SKU Max panel, build progress, Audit log, Access pages, Warehouse Boxes, Production Schedule approved-by stamp).)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

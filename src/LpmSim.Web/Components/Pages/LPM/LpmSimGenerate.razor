@@ -606,13 +606,13 @@
         else if (_skuStale)
         {
             <span style="color:#d97706;font-weight:600;">
-                ⚠ Stale — last @_sku.LastBuildTS?.ToString("dd-MMM HH:mm")@(string.IsNullOrEmpty(_sku.LastBuildBy) ? "" : $" · {_sku.LastBuildBy}") · @_sku.RowCount.ToString("N0") rows@(_sku.LastBuildDuration is { } dur1 ? $" · in {FormatDuration(dur1)}" : "")
+                ⚠ Stale — last @TimeFormatting.ToGccString(_sku.LastBuildTS, "dd-MMM HH:mm")@(string.IsNullOrEmpty(_sku.LastBuildBy) ? "" : $" · {_sku.LastBuildBy}") · @_sku.RowCount.ToString("N0") rows@(_sku.LastBuildDuration is { } dur1 ? $" · in {FormatDuration(dur1)}" : "")
             </span>
         }
         else
         {
             <span style="color:#16a34a;font-weight:600;">
-                ✓ Built @_sku.LastBuildTS?.ToString("dd-MMM HH:mm")@(string.IsNullOrEmpty(_sku.LastBuildBy) ? "" : $" · {_sku.LastBuildBy}") · @_sku.RowCount.ToString("N0") rows@(_sku.LastBuildDuration is { } dur2 ? $" · in {FormatDuration(dur2)}" : "")
+                ✓ Built @TimeFormatting.ToGccString(_sku.LastBuildTS, "dd-MMM HH:mm")@(string.IsNullOrEmpty(_sku.LastBuildBy) ? "" : $" · {_sku.LastBuildBy}") · @_sku.RowCount.ToString("N0") rows@(_sku.LastBuildDuration is { } dur2 ? $" · in {FormatDuration(dur2)}" : "")
             </span>
         }
         @if (_inf is not null)
@@ -621,7 +621,7 @@
             <span style="color:#64748b;">
                 WH Box @(_inf.LastWHBoxLoad?.ToString("dd-MMM") ?? "—")
                 &nbsp;·&nbsp; Rule @(_inf.LastSkuMaxRuleChange?.ToString("dd-MMM") ?? "—")
-                &nbsp;·&nbsp; EOM @(_inf.LastVolumeGroupChange?.ToString("dd-MMM HH:mm") ?? "—")
+                &nbsp;·&nbsp; EOM @(_inf.LastVolumeGroupChange is { } eomTs ? TimeFormatting.ToGccString(eomTs, "dd-MMM HH:mm") : "—")
             </span>
         }
         @* Scope selector — lets the planner refresh only LPM-items, only
@@ -682,7 +682,7 @@
              style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#fef3c7;border:1px solid #fcd34d;color:#78350f;">
             <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">SKU Max Build — Running</span>
             <span><strong>Scope:</strong> @scopeTag</span>
-            <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span>
+            <span><strong>Start:</strong> @TimeFormatting.ToGccString(_skuMaxBuildStartTS.Value, "dd-MMM HH:mm:ss")</span>
             <span><strong>Elapsed:</strong> @FormatDuration(elapsed)</span>
             @if (!string.IsNullOrEmpty(startedBy))
             {
@@ -706,9 +706,9 @@
              style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#fef3c7;border:1px solid #fcd34d;color:#92400e;">
             <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">SKU Max Build — Cancelled</span>
             @if (_skuMaxBuildStartTS.HasValue)
-            { <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            { <span><strong>Start:</strong> @TimeFormatting.ToGccString(_skuMaxBuildStartTS.Value, "dd-MMM HH:mm:ss")</span> }
             @if (_skuMaxBuildEndTS.HasValue)
-            { <span><strong>End:</strong> @_skuMaxBuildEndTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            { <span><strong>End:</strong> @TimeFormatting.ToGccString(_skuMaxBuildEndTS.Value, "dd-MMM HH:mm:ss")</span> }
             @if (_skuMaxBuildDuration.HasValue)
             { <span><strong>Duration:</strong> @FormatDuration(_skuMaxBuildDuration.Value)</span> }
         </div>
@@ -719,9 +719,9 @@
              style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#fee2e2;border:1px solid #fca5a5;color:#991b1b;">
             <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">SKU Max Build — Failed</span>
             @if (_skuMaxBuildStartTS.HasValue)
-            { <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            { <span><strong>Start:</strong> @TimeFormatting.ToGccString(_skuMaxBuildStartTS.Value, "dd-MMM HH:mm:ss")</span> }
             @if (_skuMaxBuildEndTS.HasValue)
-            { <span><strong>End:</strong> @_skuMaxBuildEndTS.Value.ToString("dd-MMM HH:mm:ss")</span> }
+            { <span><strong>End:</strong> @TimeFormatting.ToGccString(_skuMaxBuildEndTS.Value, "dd-MMM HH:mm:ss")</span> }
             @if (_skuMaxBuildDuration.HasValue)
             { <span><strong>Duration:</strong> @FormatDuration(_skuMaxBuildDuration.Value)</span> }
             @if (!string.IsNullOrEmpty(_activeBuildJob?.Error))
@@ -733,8 +733,8 @@
         <div class="lpm-section mb-2 d-flex align-center flex-wrap gap-3"
              style="padding:0.3rem 0.75rem;font-size:0.75rem;background:#ecfdf5;border:1px solid #a7f3d0;color:#065f46;">
             <span style="font-weight:700;letter-spacing:.04em;text-transform:uppercase;">Last SKU Max Build</span>
-            <span><strong>Start:</strong> @_skuMaxBuildStartTS.Value.ToString("dd-MMM HH:mm:ss")</span>
-            <span><strong>End:</strong> @_skuMaxBuildEndTS.Value.ToString("dd-MMM HH:mm:ss")</span>
+            <span><strong>Start:</strong> @TimeFormatting.ToGccString(_skuMaxBuildStartTS.Value, "dd-MMM HH:mm:ss")</span>
+            <span><strong>End:</strong> @TimeFormatting.ToGccString(_skuMaxBuildEndTS.Value, "dd-MMM HH:mm:ss")</span>
             <span><strong>Duration:</strong> @FormatDuration(_skuMaxBuildDuration.Value)</span>
         </div>
     }
@@ -3825,7 +3825,7 @@
         // needed when WHBox items / SKU Max Rules / Volume Group changed.
         if (_skuMaxStatus is { LastBuildTS: not null } sExist)
         {
-            var when     = sExist.LastBuildTS?.ToString("dd-MMM HH:mm") ?? "earlier";
+            var when     = sExist.LastBuildTS is { } whenTs ? TimeFormatting.ToGccString(whenTs, "dd-MMM HH:mm") : "earlier";
             var who      = string.IsNullOrEmpty(sExist.LastBuildBy) ? "" : $" by {sExist.LastBuildBy}";
             var freshTag = sExist.IsFreshToday ? "" : " (older than today — stale)";
             var ok       = await DialogService.ShowMessageBox(

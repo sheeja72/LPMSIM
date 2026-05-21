@@ -424,6 +424,39 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
     /// <c>dbo.LPM_WarehousePriority</c>, which <c>ReadBoxesAsync</c> joins
     /// to for ORDER BY. This helper only feeds the WHERE filter.
     /// </summary>
+    /// <summary>
+    /// 1.14.78 — Build a parameterised IN-clause for a list of country codes,
+    /// used by the SIM Generate path when widening filters to include child
+    /// countries (e.g. UAE + OMAN). Returns the literal fragment like
+    /// <c>"(@cn0, @cn1)"</c> + the bound parameters. Caller chooses the
+    /// column to compare against — typical use is
+    /// <c>"AND ds.SIMCountry IN {countryClause}"</c>.
+    /// </summary>
+    /// <param name="countries">Country list. First entry is the parent;
+    /// subsequent entries are children.</param>
+    /// <param name="prefix">Parameter prefix — default <c>"@cn"</c>. Override
+    /// when a single query embeds two country lists to avoid name clash.</param>
+    private static (string clause, List<SqlParameter> parameters) BuildCountryInClause(
+        IReadOnlyList<string> countries, string prefix = "@cn")
+    {
+        if (countries is null || countries.Count == 0)
+        {
+            // Empty list → match nothing. Using a sentinel string keeps the
+            // SQL syntactically valid; caller doesn't need to special-case.
+            return ("('__NO_COUNTRY_IN_SCOPE__')", new List<SqlParameter>());
+        }
+
+        var paramNames = new List<string>(countries.Count);
+        var parms      = new List<SqlParameter>(countries.Count);
+        for (int i = 0; i < countries.Count; i++)
+        {
+            var name = $"{prefix}{i}";
+            paramNames.Add(name);
+            parms.Add(new SqlParameter(name, countries[i]));
+        }
+        return ($"({string.Join(", ", paramNames)})", parms);
+    }
+
     private static (string clause, List<SqlParameter> parameters) BuildWarehouseClause(IReadOnlyList<string>? warehouses)
     {
         if (warehouses is null || warehouses.Count == 0)
@@ -542,6 +575,25 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         long msAllocate = 0, msPersistOutput = 0, msPersistTrace = 0, msPersistBalances = 0;
 
         await using var db = await dbFactory.CreateDbContextAsync(ct);
+
+        // 1.14.78 — Country linkage Part 2. When the parent country has child
+        // countries linked in dbo.LPM_CountryLink, the SIM allocator includes
+        // the children's stores in the same batch. UAE → OMAN is the seeded
+        // example: a UAE run pulls UAE + OMAN stores' EOM rows, SOH, and SKU
+        // Max so the allocator can ship from UAE's warehouse to stores in
+        // both countries.
+        //
+        // scopeCountries[0] == req.Country (the parent). children follow in
+        // alphabetical order. CountryPriority on each loaded EomStore = the
+        // index in this list, so the parent's stores always rank above any
+        // child's within each allocator phase.
+        var childCountries = await CountryLinkResolver.GetChildCountriesAsync(db, req.Country, ct);
+        var scopeCountries = new List<string>(childCountries.Count + 1) { req.Country };
+        scopeCountries.AddRange(childCountries);
+        // Lookup: country name → priority index (0 for parent, 1+ for children).
+        var countryPriority = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (int i = 0; i < scopeCountries.Count; i++)
+            countryPriority[scopeCountries[i]] = i;
 
         // AsNoTracking — we never modify this entity; we delete the row directly
         // via raw SQL below. Without AsNoTracking, EF's change tracker holds a
@@ -844,14 +896,17 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // occasionally populated as '' (empty string) by the daily ETL for
             // some stores; relying on it directly excludes those stores. Using
             // DataSettings.Country (the authoritative source) is bulletproof.
-            cmd.CommandText = @"
+            // 1.14.78 — Widen to parent + linked child countries
+            // (scopeCountries) so a UAE run also picks up OMAN store SOH.
+            var (sohCountryClause, sohCountryParams) = BuildCountryInClause(scopeCountries);
+            cmd.CommandText = $@"
                 SELECT ls.StoreID, ls.Itemcode, ls.DivCode, ISNULL(ls.SOH, 0) AS SOH
                   FROM racks.dbo.LPM_LocStock ls
                   INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-                 WHERE ds.SIMCountry = @country
+                 WHERE ds.SIMCountry IN {sohCountryClause}
                    AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
                    AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> '';";
-            cmd.Parameters.Add(new SqlParameter("@country", req.Country));
+            foreach (var p in sohCountryParams) cmd.Parameters.Add(p);
             cmd.CommandTimeout = 300;
             using var rdr = await cmd.ExecuteReaderAsync(ct);
             while (await rdr.ReadAsync(ct))
@@ -942,7 +997,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // back to the legacy MerchNeedWeek column when WeekNo is
             // outside 1..4 (defensive — req validation should keep it in
             // range, but a NULL or 0 must not fail open).
-            cmd.CommandText = @"
+            // 1.14.78 — Widen to scopeCountries (parent + linked children) so
+            // a UAE batch loads EOM rows for both UAE and OMAN stores.
+            // SIMCountry projected so the C# loop can compute CountryPriority
+            // (parent's stores rank first within each phase).
+            var (eomCountryClause, eomCountryParams) = BuildCountryInClause(scopeCountries);
+            cmd.CommandText = $@"
                 SELECT eo.StoreID, eo.DivCode, ISNULL(eo.SKUMax, 0) AS SKUMax,
                        ISNULL(eo.TargetEOM, 0)      AS TargetEOM,
                        ISNULL(eo.PriorityRank, 0)   AS PriorityRank,
@@ -954,21 +1014,24 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                                   WHEN 3 THEN eo.MerchNeedWeek3
                                   WHEN 4 THEN eo.MerchNeedWeek4
                                   ELSE        eo.MerchNeedWeek
-                              END, 0) AS MerchNeedWeek
+                              END, 0) AS MerchNeedWeek,
+                       ds.SIMCountry                AS SIMCountry  -- 1.14.78
                   FROM dbo.LPM_EOM_Output eo
                   INNER JOIN dbo.DataSettings ds
                           ON ds.StoreID = eo.StoreID
-                         AND ds.SIMCountry = @country
-                 WHERE eo.Country = @country
+                         AND ds.SIMCountry IN {eomCountryClause}
+                 WHERE eo.Country IN {eomCountryClause}
                    AND eo.Year1   = @y
                    AND eo.Month1  = @m;";
-            cmd.Parameters.Add(new SqlParameter("@country", req.Country));
+            foreach (var p in eomCountryParams) cmd.Parameters.Add(p);
             cmd.Parameters.Add(new SqlParameter("@y", req.RunYear));
             cmd.Parameters.Add(new SqlParameter("@m", req.RunMonth));
             cmd.Parameters.Add(new SqlParameter("@weekNo", (int)req.WeekNo));
             using var rdr = await cmd.ExecuteReaderAsync(ct);
             while (await rdr.ReadAsync(ct))
             {
+                var simCountry = rdr.IsDBNull(8) ? "" : rdr.GetString(8);
+                var cp = countryPriority.TryGetValue(simCountry, out var p) ? p : int.MaxValue;
                 var s = new EomStore(
                     StoreID:       rdr.GetString(0),
                     DivCode:       rdr.GetInt32(1),
@@ -979,7 +1042,8 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     VolumeGroup:   rdr.GetString(6),
                     // MerchNeedWeek is stored as int on LPM_EOM_Output;
                     // read as int and let the record convert to decimal.
-                    MerchNeedWeek: rdr.GetInt32(7));
+                    MerchNeedWeek: rdr.GetInt32(7),
+                    CountryPriority: cp);
                 if (!eomByDiv.TryGetValue(s.DivCode, out var list))
                     eomByDiv[s.DivCode] = list = new();
                 list.Add(s);
@@ -987,9 +1051,15 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         }
         foreach (var (div, list) in eomByDiv.ToList())
         {
-            // Spec ordering: Priority Rank ASC, then Wt-Avg-Sold-Qty DESC.
+            // Spec ordering: CountryPriority ASC (parent first), then
+            // Priority Rank ASC, then Wt-Avg-Sold-Qty DESC.
+            // 1.14.78 — CountryPriority is the new primary sort key. For
+            // runs with no linked children, every store has CountryPriority=0
+            // so the secondary keys (PriorityRank, WtAvgSold) drive the order
+            // exactly as they did pre-1.14.78.
             eomByDiv[div] = list
-                .OrderBy(s => s.PriorityRank)
+                .OrderBy(s => s.CountryPriority)
+                .ThenBy(s => s.PriorityRank)
                 .ThenByDescending(s => s.WtAvgSold)
                 .ToList();
         }
@@ -1012,7 +1082,8 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // for speed) — see GetLastSkuMaxBuildAsync / BuildSkuMaxAsync. The
         // staleness gate at the top of GenerateAsync ensures we never reach
         // here without a fresh snapshot.
-        var skuMaxByStoreItem = await LoadItemSkuMaxAsync((SqlConnection)conn, req, ct);
+        // 1.14.78 — Pass scopeCountries so SkuMax loads for parent + children.
+        var skuMaxByStoreItem = await LoadItemSkuMaxAsync((SqlConnection)conn, req, scopeCountries, ct);
 
         // ---------------- Allocation state ----------------
         var batch = new LpmSimBatch
@@ -4388,8 +4459,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     /// alloc loop having to track a per-box-season cap (cumulative qty per
     /// (Store, Item) is single-valued in the engine's bookkeeping).
     /// </summary>
+    // 1.14.78 — `scopeCountries` argument added. When the run's primary
+    // country has linked children (e.g. UAE → OMAN), the SkuMax read widens
+    // to include all countries in scope so the allocator has SKU Max for
+    // both parent's and children's stores. Defaults to a single-element
+    // list with just `req.Country` for runs with no linked children.
     private static async Task<Dictionary<(string Store, string Item), int>> LoadItemSkuMaxAsync(
-        SqlConnection conn, LpmSimGenerateRequest req, CancellationToken ct)
+        SqlConnection conn, LpmSimGenerateRequest req,
+        IReadOnlyList<string> scopeCountries,
+        CancellationToken ct)
     {
         // 1.14.58 — Filter SKUMax > 0 at the SQL level. The full LPM_SimItemSkuMax
         // snapshot is ~13.8M rows for UAE (~150 stores × ~90K items), and the
@@ -4508,9 +4586,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             ? ""
             : "INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType";
 
+        // 1.14.78 — `skuMaxCountryClause` widens the filter so parent +
+        // children SkuMax rows are both loaded (UAE+OMAN for a UAE run).
+        // Built BEFORE the SQL string interpolation so the `$@` interpolator
+        // can splice the literal "IN (@sc0, @sc1)" fragment into the SQL.
+        var (skuMaxCountryClause, skuMaxCountryParams) = BuildCountryInClause(scopeCountries, "@sc");
+
         // The CTE narrows to DISTINCT eligible itemcodes; the outer SELECT
-        // then INNER-JOINs LPM_SimItemSkuMax for the country + period and
-        // returns only rows whose item passed eligibility AND has SKUMax > 0.
+        // then INNER-JOINs LPM_SimItemSkuMax for the country(ies) + period
+        // and returns only rows whose item passed eligibility AND has
+        // SKUMax > 0.
         var sql = $@"
             ;WITH EligibleItems AS (
                 SELECT DISTINCT w.ItemCode
@@ -4526,14 +4611,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             SELECT sm.StoreID, sm.ItemCode, sm.SKUMax
               FROM dbo.LPM_SimItemSkuMax sm
               INNER JOIN EligibleItems ei ON ei.ItemCode = sm.ItemCode
-             WHERE sm.Country = @c AND sm.Year1 = @y AND sm.Month1 = @m
+             WHERE sm.Country IN {skuMaxCountryClause}
+               AND sm.Year1 = @y AND sm.Month1 = @m
                AND sm.SKUMax > 0;";
 
         using var cmd = conn.CreateCommand();
         cmd.CommandText = sql;
-        cmd.Parameters.Add(new SqlParameter("@c", country));
         cmd.Parameters.Add(new SqlParameter("@y", year));
         cmd.Parameters.Add(new SqlParameter("@m", month));
+        foreach (var p in skuMaxCountryParams) cmd.Parameters.Add(p);
         // @endExclusive is referenced only when LpmMonths is empty AND LPM is
         // in scope. Adding it unconditionally is fine — SQL Server ignores
         // unused params. Same convention as ReadBoxesAsync.
@@ -4576,9 +4662,16 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     /// sees one CLOSED_BOX row per excluded box in the Gap list.
     /// </summary>
     private record ClosedBoxMeta(string? PalletNo, DateTime? LPMDt, string BoxKind, long BoxQty);
+    // 1.14.78 — `CountryPriority` added so the allocator can rank parent's
+    // stores above child countries' stores within each phase. Parent (the
+    // run's primary country) = 0; children = 1, 2, … in alphabetical order
+    // of their country code. Defaults to 0 — for runs with no linked
+    // children (the common case), every store gets CountryPriority=0 and
+    // the sort behaves exactly as it did pre-1.14.78.
     private record EomStore(string StoreID, int DivCode, int SKUMax, decimal TargetEOM,
                             decimal PriorityRank, decimal WtAvgSold, string VolumeGroup,
-                            decimal MerchNeedWeek);
+                            decimal MerchNeedWeek,
+                            int CountryPriority = 0);
 
     // ============================================================
     // Case-insensitive comparers for the running dictionaries.

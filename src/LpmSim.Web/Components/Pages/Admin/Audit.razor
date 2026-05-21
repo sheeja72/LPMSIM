@@ -48,7 +48,7 @@
         <MudTh>Changes</MudTh>
     </HeaderContent>
     <RowTemplate>
-        <MudTd>@context.ChangedTS.ToString("yyyy-MM-dd HH:mm:ss")</MudTd>
+        <MudTd>@TimeFormatting.ToGccString(context.ChangedTS, "yyyy-MM-dd HH:mm:ss")</MudTd>
         <MudTd><code>@context.ChangedBy</code></MudTd>
         <MudTd>@context.EntityName</MudTd>
         <MudTd><code>@context.EntityKey</code></MudTd>

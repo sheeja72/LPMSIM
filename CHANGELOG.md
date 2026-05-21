@@ -23,6 +23,135 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.79 — Three changes bundled: CK_LPMSIM_Batch_Status hotfix + Country linkage Part 2 + GST timestamps sweep (2026-05-21)
+
+### What's new
+
+Three independently-useful changes bundled into one release because the second was already queued behind the third and the first is an urgent unblock:
+
+#### 1) **Migration 058** — `CK_LPMSIM_Batch_Status` allows `Running`
+
+A `CK_LPMSIM_Batch_Status` CHECK constraint was added to `dbo.LPMSIM_Batch` outside the application's migration history (likely by a DBA reviewing the schema), and it only allowed the legacy values `'Draft'` / `'Approved'`. 1.14.67 introduced a new `'Running'` intermediate status (the batch row is inserted with `Status = 'Running'`, then flipped to `'Draft'` after all persist writes commit — see 1.14.67's CHANGELOG for why). Once the DBA constraint went in, every **Generate** started failing with:
+
+> *The INSERT statement conflicted with the CHECK constraint 'CK_LPMSIM_Batch_Status'. The conflict occurred in database 'LPMSIM', table 'dbo.LPMSIM_Batch', column 'Status'.*
+
+Migration 058 drops the old constraint (if present) and re-creates it accepting all three values: `Draft / Approved / Running`. Idempotent.
+
+#### 2) SIM Generate parent-child store inclusion (was 1.14.78)
+
+Completes 1.14.77's country-linkage. When SIM Generate runs for a Parent (e.g. UAE) and that country has active Children in `dbo.LPM_CountryLink` (e.g. OMAN), the allocator now:
+
+- Loads stores from both Parent and Children (SOH, EOM Output, SKU Max all widen to `Country IN ('UAE','OMAN')`).
+- Ranks Parent's stores above Children's within each phase via a new `CountryPriority` sort key on the in-memory `EomStore` record (Parent = 0, Children = 1, 2, … in alphabetical order). Within a country, the existing secondary keys (`PriorityRank` ASC, `WtAvgSold` DESC) still drive the order.
+- Writes allocations for Child stores into the Parent's batch — same `LPMBatchNo`, real OMAN `StoreID` values.
+
+For runs with no linked children (every country today except OMAN-as-child-of-UAE), `scopeCountries` collapses to a 1-element list — SQL `IN` clauses behave like `=`, every `CountryPriority` is 0, and the result is byte-identical to 1.14.77.
+
+#### 3) GST timestamps applied to every remaining display site
+
+1.14.70 introduced `TimeFormatting.ToGccString` and converted the main batch timestamps. A handful of secondary display sites still showed raw UTC. 1.14.79 sweeps them all:
+
+| Page | Field | Before | After |
+|---|---|---|---|
+| **SIM Generate** | SKU Max panel "Built / Stale" | `dd-MMM HH:mm` | `dd-MMM HH:mm GST` |
+| **SIM Generate** | Input freshness "EOM" stamp | `dd-MMM HH:mm` | `dd-MMM HH:mm GST` |
+| **SIM Generate** | SKU Max build banner Start/End (Running / Cancelled / Failed / Completed states) | `dd-MMM HH:mm:ss` | `dd-MMM HH:mm:ss GST` |
+| **SIM Generate** | Overwrite-SKU-Max dialog "earlier" caption | raw | GST |
+| **Production Schedule** | Approved-by stamp | `dd-MMM HH:mm` | `dd-MMM HH:mm GST` |
+| **Admin → Audit** | ChangedTS column | `yyyy-MM-dd HH:mm:ss` | `… GST` |
+| **Admin → Store/Div Access** | UpdatedTS / CreateTS column | `yyyy-MM-dd HH:mm` | `… GST` |
+| **Admin → Store/Dept Access** | UpdatedTS / CreateTS column | `yyyy-MM-dd HH:mm` | `… GST` |
+| **Admin → Warehouse Priorities** | UpdatedTS / CreateTS column | `yyyy-MM-dd HH:mm` | `… GST` |
+| **LPM → Warehouse Boxes** | CurrDate column | `yyyy-MM-dd HH:mm` | `… GST` |
+
+Date-only displays (e.g. "WH Box 01-May", "Rule 19-May", "RunDate 20-May") are intentionally left alone — they have no time component, so the GST conversion would be a no-op.
+
+### Files changed
+| File | Change |
+|---|---|
+| `db/058_lpmsim_batch_status_constraint.sql` | **NEW** migration — idempotent DROP + ADD for `CK_LPMSIM_Batch_Status` allowing `Draft / Approved / Running`. |
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | (a) `BuildCountryInClause` helper. (b) `EomStore` record gains `CountryPriority`. (c) `GenerateAsync` computes `scopeCountries` + `countryPriority`. (d) SOH, eomByDiv, LoadItemSkuMax queries widen to `Country IN` + project SIMCountry for priority. (e) eomByDiv sort gains `OrderBy(CountryPriority)` first. |
+| `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` | SKU Max Built/Stale + input-freshness EOM + 6 SKU Max build banner timestamps + overwrite dialog "earlier" all via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/LPM/ProductionSchedule.razor` | Approved-by stamp via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/Admin/Audit.razor` | ChangedTS via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/Admin/StoreDeptAccess.razor` | UpdatedTS/CreateTS via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/Admin/StoreDivAccess.razor` | UpdatedTS/CreateTS via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/Admin/WarehousePriorities.razor` | UpdatedTS/CreateTS via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/Components/Pages/LPM/WarehouseBoxes.razor` | CurrDate via `TimeFormatting.ToGccString`. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.78 → 1.14.79 + new InformationalVersion (mentions all 3 changes). |
+
+### What was NOT touched (intentional)
+
+- **Date-only displays** (e.g. `dd-MMM` for WH Box, Rule, LPMDt, TrnDate, RunDate). The GST conversion would be a no-op — date is the same in any timezone unless you cross the date boundary, which doesn't happen for these display values.
+- **`LpmSimGenerator.cs` — server-side timestamps written to the DB.** `CreateTS = DateTime.Now` still writes server-local time (UTC on Azure App Service) — the conversion to GST happens **only on the display side**. This keeps the DB stable for downstream SQL queries that don't know about timezones.
+- **No changes to the closed-box exclusion / SQL Boxes report / WH Stock report** — already covered in earlier releases.
+- **Other readiness checks unchanged.**
+
+### Operator notes
+
+- **Run migration 058 immediately** (it's the unblock for Generate):
+  ```bash
+  sqlcmd -d LPMSIM -i db/058_lpmsim_batch_status_constraint.sql
+  ```
+  Idempotent — safe to re-run. Equivalent inline SQL was provided in the previous chat for immediate unblock.
+- After deploy, re-Generate any country — should succeed (no more constraint violation).
+- For Part 2 (OMAN-via-UAE) to actually produce OMAN allocations, you still need:
+  1. OMAN EOM generated (now possible via 1.14.77).
+  2. OMAN SKU Max built (manual or wait for the 04:00 GST scheduler).
+- Then a UAE Generate produces a single batch with both UAE and OMAN store rows in `LPMSIM_Output`.
+
+---
+
+## 1.14.77 — Country linkage Part 1: EOM Calculator routes Child countries to Parent's WH source (2026-05-20)
+
+### What's new
+
+Completes the parent-child country linkage seeded in 1.14.77. When SIM Generate runs for a Parent country (e.g. UAE) and that country has active Children in `dbo.LPM_CountryLink` (e.g. OMAN), the SIM allocator now:
+
+1. **Loads stores from both Parent and Children.** SOH, EOM Output, and SKU Max queries widen to `WHERE Country IN ('UAE', 'OMAN')` instead of `= 'UAE'`.
+2. **Ranks Parent's stores above Child's within each phase.** A new `CountryPriority` field on the in-memory `EomStore` record sorts as the primary key (Parent = 0, Children = 1, 2, … in alphabetical order). Within a country, the existing secondary keys (`PriorityRank` ASC, `WtAvgSold` DESC) still drive the order, so Parent-country planner ranks are preserved.
+3. **Writes allocations for Child stores into the Parent's batch.** A UAE SIM batch's `LPMSIM_Output` rows now include OMAN store rows — same `LPMBatchNo`, real OMAN `StoreID` values.
+
+### Phase-by-phase impact
+
+| Phase | Pre-1.14.78 | 1.14.78 |
+|---|---|---|
+| P1a (LPM normal) | UAE stores only | UAE stores first, then OMAN |
+| P1b (LPM RR) | UAE stores only | UAE stores first, then OMAN |
+| P2a (Non-LPM normal) | UAE stores only | UAE stores first, then OMAN |
+| P2b (Non-LPM RR) | UAE stores only | UAE stores first, then OMAN |
+
+For runs with **no** linked children (every country today except OMAN as Child of UAE), `scopeCountries` collapses to a single entry — the SQL `IN` clauses behave like `=`, every `CountryPriority` is 0, and the sort + result is byte-identical to 1.14.77.
+
+### Files changed
+| File | Change |
+|---|---|
+| `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` | (a) New private static helper `BuildCountryInClause` mirroring the existing `BuildWarehouseClause` / `BuildPalletCategoryClause` pattern. (b) `EomStore` record gains an `int CountryPriority = 0` field. (c) `GenerateAsync` computes `scopeCountries` once at the top (parent + children from `CountryLinkResolver.GetChildCountriesAsync`) + a `countryPriority` lookup. (d) SOH read at line ~847 widens to `SIMCountry IN {clause}`. (e) `eomByDiv` read at line ~934 widens `eo.Country IN {clause}` AND `ds.SIMCountry IN {clause}`, projects `ds.SIMCountry`, and populates `CountryPriority` per row. (f) The `eomByDiv` sort gains `OrderBy(s => s.CountryPriority)` as the primary key. (g) `LoadItemSkuMaxAsync` signature gains `IReadOnlyList<string> scopeCountries`; its SQL widens `sm.Country IN {clause}`. (h) Call site in `GenerateAsync` updated to pass `scopeCountries`. |
+| `src/LpmSim.Web/LpmSim.Web.csproj` | 1.14.77 → 1.14.78. |
+
+### What was NOT touched (intentional)
+
+- **Box loader (`ReadBoxesAsync`)** — Parent's warehouse only. UAE boxes are what ship; OMAN doesn't have a warehouse of its own.
+- **Post-allocation SOH refresh** (the `UPDATE dbo.LPM_SimItemSkuMax SET SOH = …` block) — still scoped to `req.Country` only. OMAN's SkuMax SOH stays at whatever the nightly Build SKU Max produced; refreshing it post-allocation is a nice-to-have that can be added in a follow-up if planners flag stale SOH on OMAN's SKU Max snapshot the morning after.
+- **Gap diagnostic** — still iterates the parent's eligible boxes only. Closed-box entries (1.14.70+) still emitted. Diagnostic shape unchanged.
+- **Existing `ReadBoxesAsync` filter rules** — closed-box exclusion (1.14.70), pallet-category, season, warehouse, LPM-month — all unchanged.
+- **No schema change.** `LPMSIM_Output.StoreID` already accepts any store; the country comes from joining StoreID → `DataSettings.SIMCountry` if needed.
+- **`CheckAsync` readiness counts** — currently scoped to the parent's whboxitems. The grid still shows UAE box counts; OMAN inclusion doesn't change those numbers because OMAN ships from UAE's boxes (no separate "OMAN boxes" to count).
+- **SIM Reports / SIM Boxes / Item Details** — they read `LPMSIM_Output` by batch. Output rows for OMAN stores have OMAN `StoreID` values; the existing `DataSettings` join surfaces them with OMAN's PBFullname. No report code change needed.
+- **Country-level allowed-list on the SIM Generate page** — still shows OMAN as an option. Per the design call ("OMAN always shipped via UAE"), OMAN's own SIM run would now hit the no-boxes condition naturally (its `WhBoxItemsSource` has no data). Hiding the OMAN option from the country dropdown for SIM Generate specifically is a small UX follow-up if you want it.
+
+### Operator notes
+
+- **Run order after deploy:**
+  1. Re-Generate **EOM for OMAN** (1.14.77 already lets this work). This populates `LPM_EOM_Output` with OMAN's per-(Store, Div) Tgt EOM, PriorityRank, etc.
+  2. Re-run **Build SKU Max for OMAN** (manual or wait for the 04:00 GST scheduler). This populates `LPM_SimItemSkuMax` for OMAN stores.
+  3. **Generate SIM for UAE**. The batch now produces UAE + OMAN store allocations in one run. SIM Reports → SIM Boxes shows both countries' allocations under the same `LPMBatchNo`.
+- **Priority verification:** in the SIM Boxes tab, sort by Store. UAE stores should appear with allocations completed BEFORE OMAN stores (the allocator filled UAE first, then OMAN). If you see OMAN allocated and a UAE store unfilled within the same division and phase, that's a real capacity / SKU Max constraint, not a priority bug.
+- **To temporarily disable** the linkage: `UPDATE dbo.LPM_CountryLink SET IsActive = 0 WHERE ParentCountry = 'UAE' AND ChildCountry = 'OMAN';`. The next UAE SIM Generate will revert to UAE-only stores. Re-enable by setting `IsActive = 1`.
+- **Adding more children to UAE** (or any parent): `INSERT INTO dbo.LPM_CountryLink (ParentCountry, ChildCountry, CreatedBy) VALUES ('UAE', 'BAH', 'manual_<your_name>');`. Takes effect on the next EOM / SIM Generate.
+
+---
+
 ## 1.14.77 — Country linkage Part 1: EOM Calculator routes Child countries to Parent's WH source (2026-05-20)
 
 ### What's new

@@ -101,7 +101,7 @@
         </MudTd>
         <MudTd>
             <span style="font-size:.78rem;color:#64748b;">
-                @((context.UpdatedTS ?? context.CreateTS).ToString("yyyy-MM-dd HH:mm"))
+                @TimeFormatting.ToGccString(context.UpdatedTS ?? context.CreateTS, "yyyy-MM-dd HH:mm")
                 @if (!string.IsNullOrEmpty(context.UpdatedBy ?? context.CreatedBy))
                 {
                     <span> · @(context.UpdatedBy ?? context.CreatedBy)</span>
