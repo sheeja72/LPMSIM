@@ -1002,20 +1002,22 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // SIMCountry projected so the C# loop can compute CountryPriority
             // (parent's stores rank first within each phase).
             var (eomCountryClause, eomCountryParams) = BuildCountryInClause(scopeCountries);
+            // 1.14.87 — Switched cap source from the per-week
+            // MerchNeedWeekN columns to the monthly MerchNeedMonth column
+            // (the per-week SQL CASE on @weekNo is gone; @weekNo parameter
+            // dropped). Grade added so the 1b/2b RR can iterate stores in
+            // grade-tier order. Both columns already exist on LPM_EOM_Output
+            // (see Core.Entities.LpmEomOutput) and are populated by every
+            // Approved EOM batch.
             cmd.CommandText = $@"
                 SELECT eo.StoreID, eo.DivCode, ISNULL(eo.SKUMax, 0) AS SKUMax,
                        ISNULL(eo.TargetEOM, 0)      AS TargetEOM,
                        ISNULL(eo.PriorityRank, 0)   AS PriorityRank,
                        ISNULL(eo.WtAvgSoldQty, 0)   AS WtAvgSoldQty,
                        ISNULL(eo.VolumeGroup, '')   AS VolumeGroup,
-                       ISNULL(CASE @weekNo
-                                  WHEN 1 THEN eo.MerchNeedWeek1
-                                  WHEN 2 THEN eo.MerchNeedWeek2
-                                  WHEN 3 THEN eo.MerchNeedWeek3
-                                  WHEN 4 THEN eo.MerchNeedWeek4
-                                  ELSE        eo.MerchNeedWeek
-                              END, 0) AS MerchNeedWeek,
-                       ds.SIMCountry                AS SIMCountry  -- 1.14.78
+                       ISNULL(eo.MerchNeedMonth, 0) AS MerchNeedMonth,   -- 1.14.87
+                       ISNULL(eo.Grade, '')         AS Grade,             -- 1.14.87
+                       ds.SIMCountry                AS SIMCountry         -- 1.14.78
                   FROM dbo.LPM_EOM_Output eo
                   INNER JOIN dbo.DataSettings ds
                           ON ds.StoreID = eo.StoreID
@@ -1026,23 +1028,25 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             foreach (var p in eomCountryParams) cmd.Parameters.Add(p);
             cmd.Parameters.Add(new SqlParameter("@y", req.RunYear));
             cmd.Parameters.Add(new SqlParameter("@m", req.RunMonth));
-            cmd.Parameters.Add(new SqlParameter("@weekNo", (int)req.WeekNo));
             using var rdr = await cmd.ExecuteReaderAsync(ct);
             while (await rdr.ReadAsync(ct))
             {
-                var simCountry = rdr.IsDBNull(8) ? "" : rdr.GetString(8);
+                // 1.14.87 — column indexes shifted: MerchNeedMonth at 7, Grade at 8,
+                // SIMCountry at 9 (was at 8).
+                var simCountry = rdr.IsDBNull(9) ? "" : rdr.GetString(9);
                 var cp = countryPriority.TryGetValue(simCountry, out var p) ? p : int.MaxValue;
                 var s = new EomStore(
-                    StoreID:       rdr.GetString(0),
-                    DivCode:       rdr.GetInt32(1),
-                    SKUMax:        rdr.GetInt32(2),
-                    TargetEOM:     rdr.GetDecimal(3),
-                    PriorityRank:  rdr.GetDecimal(4),
-                    WtAvgSold:     rdr.GetDecimal(5),
-                    VolumeGroup:   rdr.GetString(6),
-                    // MerchNeedWeek is stored as int on LPM_EOM_Output;
+                    StoreID:        rdr.GetString(0),
+                    DivCode:        rdr.GetInt32(1),
+                    SKUMax:         rdr.GetInt32(2),
+                    TargetEOM:      rdr.GetDecimal(3),
+                    PriorityRank:   rdr.GetDecimal(4),
+                    WtAvgSold:      rdr.GetDecimal(5),
+                    VolumeGroup:    rdr.GetString(6),
+                    // MerchNeedMonth is stored as int on LPM_EOM_Output;
                     // read as int and let the record convert to decimal.
-                    MerchNeedWeek: rdr.GetInt32(7),
+                    MerchNeedMonth: rdr.GetInt32(7),
+                    Grade:          rdr.GetString(8),
                     CountryPriority: cp);
                 if (!eomByDiv.TryGetValue(s.DivCode, out var list))
                     eomByDiv[s.DivCode] = list = new();
@@ -1776,28 +1780,30 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // divSohArr) keep the RAW values so the planner can spot the
             // underlying negative-stock anomaly in the Allocation Trace tab.
             var effSoh    = Math.Max(0, soh);
-            var effDivSoh = Math.Max(0, divSoh);
+            // 1.14.87 — effDivSoh no longer needed: the EOM Balance entry gate
+            // (TargetEOM − DivSOH ≤ 0) was removed. MerchNeedMonth (TargetEOM −
+            // SOH + TargetSales) subsumes it — a store with no headroom for the
+            // month will have MerchNeedMonth ≤ 0 and fail the cap check below.
             var sb = skuMax - effSoh - cumItem;
-            var db = s.MerchNeedWeek - cumDiv;
+            // 1.14.87 — MerchNeedWeek cap → MerchNeedMonth cap. The variable
+            // is still named `db` (DivBalance) inside the allocator for
+            // brevity; only the source column changed.
+            var db = s.MerchNeedMonth - cumDiv;
             skuBalArr[i] = sb; divBalArr[i] = db;
             if (sb <= 0)         { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_SKUMAX"); continue; }
             if (!ignoreMerch && db <= 0)
-            { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_TARGET"); continue; }
-            // EOM Balance gate — if the (Store, Div) is already at or above
-            // its TargetEOM (DivSOH ≥ TargetEOM), there's no headroom and
-            // nothing should ship there for this division. Applied regardless
-            // of IgnoreMerchNeed because EOM Balance is a separate signal
-            // from the weekly Merch Need cap. Skips for stores whose EOM rows
-            // exist but have a zero/negative balance (over-stocked or
-            // empty-target). 1.14.31 — divSoh clamped at 0 for the same
-            // reason as the SKU Max clamp above.
-            if ((s.TargetEOM - effDivSoh) <= 0m)
-            { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_EOM_BALANCE"); continue; }
-            // EqualFillRate normally requires MerchNeedWeek > 0 to compute fillRate.
+            { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_MNM"); continue; }
+            // 1.14.87 — Removed: the separate EOM Balance entry gate
+            // ((TargetEOM − DivSOH) ≤ 0). MerchNeedMonth = TargetEOM − SOH +
+            // TargetSales already encodes "is there room before the month
+            // ceiling?" — if MNM is ≤ 0, the cap check above kills the store.
+            // The Reports/Trace tab will stop seeing SKIP_EOM_BALANCE rows on
+            // new batches; old batches retain the legacy reason text.
+            // EqualFillRate normally requires MerchNeedMonth > 0 to compute fillRate.
             // In IgnoreMerchNeed mode the denominator becomes SkuMax instead, so
-            // stores with MerchNeedWeek = 0 are still candidates.
+            // stores with MerchNeedMonth = 0 are still candidates.
             if (req.FillStrategy == LpmSimFillStrategy.EqualFillRate
-                && !ignoreMerch && s.MerchNeedWeek <= 0m)
+                && !ignoreMerch && s.MerchNeedMonth <= 0m)
             { dead[i] = true; }
             if (req.FillStrategy == LpmSimFillStrategy.EqualFillRate
                 && ignoreMerch && skuMax <= 0)
@@ -1837,7 +1843,7 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     {
                         // current cumDiv = startCumDv[i] + deltaDiv[i]
                         var cur = startCumDv[i] + deltaDiv[i];
-                        fr = (decimal)cur / s.MerchNeedWeek;
+                        fr = (decimal)cur / s.MerchNeedMonth;   // 1.14.87 — MNW → MNM
                     }
                     if (fr < bestFill) { bestFill = fr; bestIdx = i; }
                 }
@@ -2035,73 +2041,129 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         // across the cycles, not one per unit.
         var buckets = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-        int placed = 0;
-        // Hard guard against runaway loop; in practice limit = stores.Count cycles is plenty.
-        var maxCycles = remaining + 1;
-        int cycle = 0;
-        while (remaining > 0 && cycle < maxCycles)
+        // 1.14.87 — REWRITTEN RR ITERATION (final, matches the planner's
+        // Option 1 spec):
+        //
+        // Old shape (pre-1.14.87): 1 unit per store per cycle in PriorityRank
+        // order, MerchNeedWeek bypassed but SKU Max honoured.
+        //
+        // New shape:
+        //   - Group eligible stores into grade tiers (Diamond → Platinum →
+        //     Gold → Silver). Stores without one of these four grades are
+        //     EXCLUDED from RR entirely.
+        //   - Per-store quantum varies by tier:
+        //       Diamond  → 2 units per pass
+        //       Platinum → 2 units per pass
+        //       Gold     → 1 unit  per pass
+        //       Silver   → 1 unit  per pass
+        //   - Within each tier, sort by MerchNeedMonth Balance DESC
+        //     (= MerchNeedMonth − cumDiv DESC; most-undersupplied store
+        //     against its monthly demand goes first). Pre-sorted once at
+        //     entry — order stays stable across passes; exhausted stores
+        //     simply get skipped on later passes.
+        //   - SKUMax = 0 exclusion + SKUMax ceiling always honoured.
+        //   - MerchNeedMonth Balance ≤ 0 → skip the store. A store that's
+        //     already at or above its monthly demand gets nothing from RR
+        //     (planner clarification: even in override mode, don't push
+        //     past monthly demand).
+        //   - Take per pass = min(quota, remaining, skuHeadroom, mnmBal).
+        //
+        // The bypassAllCaps parameter is now effectively a no-op for the
+        // MNM cap (always honoured) — kept on the signature for API
+        // stability. SKUMax is honoured regardless.
+        var GradeOrder = new[] { "DIAMOND", "PLATINUM", "GOLD", "SILVER" };
+        var byGrade = new Dictionary<string, List<EomStore>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in stores)
         {
-            bool tookAnyThisCycle = false;
-            foreach (var s in stores)
+            var g = (s.Grade ?? "").Trim().ToUpperInvariant();
+            if (Array.IndexOf(GradeOrder, g) < 0) continue;   // excluded — no recognised grade
+            if (!byGrade.TryGetValue(g, out var list))
+                byGrade[g] = list = new();
+            list.Add(s);
+        }
+        if (byGrade.Count == 0)
+        {
+            // No graded stores in this division — RR can't place anything.
+            // Trace one row so the planner can see why on the Trace tab.
+            trace.Add(NewTrace(batch, phaseTag, line, divCode, null,
+                LineQty: line.Qty, Take: 0, Decision: "SKIP_NO_GRADE"));
+            return 0;
+        }
+        // Pre-sort each tier by MerchNeedMonth Balance DESC, once. Balance
+        // computed against the CURRENT cumDiv (which already reflects
+        // 1a/2a allocations). Stores with the most monthly headroom left
+        // are picked first within their tier.
+        foreach (var g in GradeOrder)
+        {
+            if (!byGrade.TryGetValue(g, out var gStores)) continue;
+            byGrade[g] = gStores
+                .OrderByDescending(s =>
+                    s.MerchNeedMonth
+                    - allocStoreDiv.GetValueOrDefault((s.StoreID, divCode), 0))
+                .ToList();
+        }
+
+        // 1.14.87 — Per-grade quantum.
+        //   Diamond  → 2 / pass
+        //   Platinum → 2 / pass
+        //   Gold     → 1 / pass
+        //   Silver   → 1 / pass
+        static int QuotaForGrade(string g) => g switch
+        {
+            "DIAMOND"  => 2,
+            "PLATINUM" => 2,
+            "GOLD"     => 1,
+            "SILVER"   => 1,
+            _          => 0,    // unreachable — pre-filtered above
+        };
+
+        int placed = 0;
+        // Outer cap: at most `remaining` passes (each pass places ≥ 1 unit
+        // when it runs to completion; in practice we exit far sooner).
+        var maxOuterPasses = remaining + 1;
+        int pass = 0;
+        while (remaining > 0 && pass < maxOuterPasses)
+        {
+            bool tookAnyThisPass = false;
+            foreach (var grade in GradeOrder)
             {
                 if (remaining <= 0) break;
-
-                // 1.14.27 — SKUMax = 0 is an EXCLUSION (set by SKU Max Rules
-                // 1-7: ExcludeExport_Planning, ExcludeSubclass,
-                // RemoveItemsFromTransfer, ExcludeItemsMFCS, DeptPriceMaxQty
-                // with maxqty=0, LPM_StoreDivAccess deactivation,
-                // LPM_StoreDeptAccess deactivation), NOT a capacity cap.
-                // Honour the exclusion in both Normal and Override paths.
-                var skuMaxExcl = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
-                if (skuMaxExcl <= 0) continue;
-
-                // 1.14.30 — SKU Max CEILING is now also honoured in both
-                // Normal and Override paths. Previously Override RR
-                // bypassed BOTH SKU Max + EOM Merch Need so a 50%+ box
-                // could fill to 100% by ignoring all caps. That violated
-                // the planner's intent: SKU Max is a hard per-(Store, Item)
-                // ceiling — "this store can hold AT MOST this many of
-                // this item" — and must never be exceeded, even when a
-                // box's usability is below the Box% override threshold.
-                //
-                // Override RR still bypasses the EOM Merch Need (Week)
-                // ceiling (s.MerchNeedWeek - cumDiv) — that's the original
-                // purpose of the override (let a partial box top up past
-                // the weekly demand cap when usability >= Box%).
-                var soh         = sohMap.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
-                var cumItem     = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
-                // 1.14.31 — clamp negative SOH at 0 so over-stock anomalies
-                // (oversold rows in LPM_LocStock) don't inflate the SKU Max
-                // headroom. Same rationale as the AllocateLineNormal clamp.
-                var skuHeadroom = skuMaxExcl - Math.Max(0, soh) - cumItem;
-                if (skuHeadroom <= 0) continue;
-
-                if (!bypassAllCaps)
+                if (!byGrade.TryGetValue(grade, out var gStores)) continue;
+                int quota = QuotaForGrade(grade);
+                foreach (var s in gStores)
                 {
-                    // Normal mode also checks EOM Merch Need (Week).
-                    // Override mode skips this so partial boxes can fill
-                    // past the weekly cap.
-                    var cumDiv      = allocStoreDiv .GetValueOrDefault((s.StoreID, divCode), 0);
-                    var divHeadroom = s.MerchNeedWeek - cumDiv;
-                    if (divHeadroom <= 0) continue;
-                }
-                // SKUMax = 0 exclusions and SKU Max ceiling are both
-                // filtered out above for every mode. Stores with no
-                // Volume Group / EOM eligibility never enter `stores`
-                // here anyway, so we never push a unit to a non-existent
-                // store.
+                    if (remaining <= 0) break;
+                    // SKUMax = 0 is an exclusion (rules 1-7). Skip everywhere.
+                    var skuMaxExcl = skuMaxByStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+                    if (skuMaxExcl <= 0) continue;
+                    // SKUMax ceiling — honoured in 1b/2b per planner spec.
+                    var soh         = sohMap.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+                    var cumItem     = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0);
+                    var skuHeadroom = skuMaxExcl - Math.Max(0, soh) - cumItem;
+                    if (skuHeadroom <= 0) continue;
+                    // 1.14.87 (final): MerchNeedMonth is NOT a cap in 1b/2b —
+                    // it's used only as the within-tier SORT key (OrderByDescending
+                    // upstream). RR override deliberately allows pushing past
+                    // monthly demand for partial-box fill. A Diamond store with
+                    // MNM Balance ≤ 0 still receives RR units (it just sorts last
+                    // within its tier).
+                    // Take = min(per-grade quota, box remaining, SKU headroom).
+                    var cumDiv  = allocStoreDiv.GetValueOrDefault((s.StoreID, divCode), 0);
+                    var take = Math.Min(Math.Min(quota, remaining), skuHeadroom);
+                    if (take <= 0) continue;
 
-                buckets[s.StoreID] = buckets.GetValueOrDefault(s.StoreID, 0) + 1;
-                allocStoreItem[(s.StoreID, line.ItemCode)] = allocStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0) + 1;
-                allocStoreDiv [(s.StoreID, divCode)]       = allocStoreDiv .GetValueOrDefault((s.StoreID, divCode),       0) + 1;
-                phaseStoreItem[(s.StoreID, line.ItemCode)] = phaseStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0) + 1;
-                phaseStoreDiv [(s.StoreID, divCode)]       = phaseStoreDiv .GetValueOrDefault((s.StoreID, divCode),       0) + 1;
-                remaining--;
-                placed++;
-                tookAnyThisCycle = true;
+                    buckets[s.StoreID] = buckets.GetValueOrDefault(s.StoreID, 0) + take;
+                    allocStoreItem[(s.StoreID, line.ItemCode)] = cumItem + take;
+                    allocStoreDiv [(s.StoreID, divCode)]       = cumDiv + take;
+                    phaseStoreItem[(s.StoreID, line.ItemCode)] = phaseStoreItem.GetValueOrDefault((s.StoreID, line.ItemCode), 0) + take;
+                    phaseStoreDiv [(s.StoreID, divCode)]       = phaseStoreDiv .GetValueOrDefault((s.StoreID, divCode),       0) + take;
+                    remaining -= take;
+                    placed    += take;
+                    tookAnyThisPass = true;
+                }
             }
-            if (!tookAnyThisCycle) break;
-            cycle++;
+            if (!tookAnyThisPass) break;
+            pass++;
         }
 
         // Emit one output line per (box, item, store) with the cumulative bucket qty.
@@ -2890,13 +2952,17 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         var eomByDiv = new Dictionary<int, List<EomStore>>();
         using (var cmd = conn.CreateCommand())
         {
+            // 1.14.87 — Same column-list swap as the primary EOM read above:
+            // MerchNeedWeek → MerchNeedMonth + Grade added so the EomStore
+            // constructor is consistent across both call sites.
             cmd.CommandText = @"
                 SELECT eo.StoreID, eo.DivCode, ISNULL(eo.SKUMax, 0) AS SKUMax,
-                       ISNULL(eo.TargetEOM, 0)      AS TargetEOM,
-                       ISNULL(eo.PriorityRank, 0)   AS PriorityRank,
-                       ISNULL(eo.WtAvgSoldQty, 0)   AS WtAvgSoldQty,
-                       ISNULL(eo.VolumeGroup, '')   AS VolumeGroup,
-                       ISNULL(eo.MerchNeedWeek, 0)  AS MerchNeedWeek
+                       ISNULL(eo.TargetEOM, 0)        AS TargetEOM,
+                       ISNULL(eo.PriorityRank, 0)     AS PriorityRank,
+                       ISNULL(eo.WtAvgSoldQty, 0)     AS WtAvgSoldQty,
+                       ISNULL(eo.VolumeGroup, '')     AS VolumeGroup,
+                       ISNULL(eo.MerchNeedMonth, 0)   AS MerchNeedMonth,
+                       ISNULL(eo.Grade, '')           AS Grade
                   FROM dbo.LPM_EOM_Output eo
                   INNER JOIN dbo.DataSettings ds
                           ON ds.StoreID = eo.StoreID
@@ -2912,16 +2978,15 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
             while (await rdr.ReadAsync(ct))
             {
                 var s = new EomStore(
-                    StoreID:       rdr.GetString(0),
-                    DivCode:       rdr.GetInt32(1),
-                    SKUMax:        rdr.GetInt32(2),
-                    TargetEOM:     rdr.GetDecimal(3),
-                    PriorityRank:  rdr.GetDecimal(4),
-                    WtAvgSold:     rdr.GetDecimal(5),
-                    VolumeGroup:   rdr.GetString(6),
-                    // MerchNeedWeek is stored as int on LPM_EOM_Output;
-                    // read as int and let the record convert to decimal.
-                    MerchNeedWeek: rdr.GetInt32(7));
+                    StoreID:        rdr.GetString(0),
+                    DivCode:        rdr.GetInt32(1),
+                    SKUMax:         rdr.GetInt32(2),
+                    TargetEOM:      rdr.GetDecimal(3),
+                    PriorityRank:   rdr.GetDecimal(4),
+                    WtAvgSold:      rdr.GetDecimal(5),
+                    VolumeGroup:    rdr.GetString(6),
+                    MerchNeedMonth: rdr.GetInt32(7),
+                    Grade:          rdr.GetString(8));
                 if (!eomByDiv.TryGetValue(s.DivCode, out var list))
                     eomByDiv[s.DivCode] = list = new();
                 list.Add(s);
@@ -4721,9 +4786,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
     // of their country code. Defaults to 0 — for runs with no linked
     // children (the common case), every store gets CountryPriority=0 and
     // the sort behaves exactly as it did pre-1.14.78.
+    // 1.14.87 — MerchNeedWeek → MerchNeedMonth (the allocator's only Merch Need cap
+    // now; Week-per-store split dropped). Grade added so 1b/2b RR can fill in
+    // grade-tier order (Diamond → Platinum → Gold → Silver). Stores without a
+    // recognised grade are excluded from RR entirely.
     private record EomStore(string StoreID, int DivCode, int SKUMax, decimal TargetEOM,
                             decimal PriorityRank, decimal WtAvgSold, string VolumeGroup,
-                            decimal MerchNeedWeek,
+                            decimal MerchNeedMonth,
+                            string Grade,
                             int CountryPriority = 0);
 
     // ============================================================

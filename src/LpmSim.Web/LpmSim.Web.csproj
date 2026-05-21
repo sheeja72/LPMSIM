@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.85</Version>
-    <AssemblyVersion>1.14.85.0</AssemblyVersion>
-    <FileVersion>1.14.85.0</FileVersion>
-    <InformationalVersion>1.14.85 hotfix (WH SKU Investigation load failed with "Error converting data type varchar to bigint" — the 1.14.82 SUM(CAST(ISNULL(w.Slashed,0) AS bigint)) blew up because whboxitems.Slashed is varchar, and any non-numeric value made ISNULL fail. Switched both new aggregates to TRY_CAST: SUM(ISNULL(TRY_CAST(Slashed AS bigint),0)) + MAX(TRY_CAST(HOPrice AS decimal(18,2))) — non-numeric values fall through as NULL/0, and HOPrice now sorts numerically instead of lexicographically.)</InformationalVersion>
+    <Version>1.14.87</Version>
+    <AssemblyVersion>1.14.87.0</AssemblyVersion>
+    <FileVersion>1.14.87.0</FileVersion>
+    <InformationalVersion>1.14.87 (SIM allocator refactor per planner Option 1 spec — drop Week machinery, use MerchNeedMonth + Grade tiers. Phase 1a/2a caps: SKUMax + MerchNeedMonth (was MerchNeedWeek); legacy EOM Balance entry gate REMOVED (MNM subsumes it). Phase 1b/2b RR: stores grouped by Grade tier (Diamond → Platinum → Gold → Silver), within each tier sorted by MerchNeedMonth Balance DESC (sort key only — most-undersupplied first), per-store quantum varies by tier — 2 units for Diamond+Platinum, 1 unit for Gold+Silver. SKUMax honoured in all 4 phases; MerchNeedMonth is a cap in 1a/2a only (bypassed in 1b/2b — override deliberately lets partial boxes push past monthly demand). Stores without one of the four recognised grades are excluded from RR entirely. Week dropdown removed from SIM Generate page; IgnoreMerchNeed toggle stays (now means ignore MerchNeedMonth in 1a/2a). Report columns labelled "Merch Need (Week)" left as-is for now (informational; allocator no longer reads them).)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

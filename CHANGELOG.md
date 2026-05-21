@@ -23,6 +23,121 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.87 — SIM allocator refactor: drop Week, use MerchNeedMonth + Grade tiers in RR (2026-05-21)
+
+### What's new
+
+The SIM allocator is simplified per planner spec:
+
+- The per-week **MerchNeedWeek** cap is gone. Phase 1a and 2a now use **MerchNeedMonth** (the monthly open-to-receive: `TargetEOM − SOH + TargetSales`).
+- The legacy **EOM Balance entry gate** (`TargetEOM − DivSOH > 0`) is removed. MerchNeedMonth subsumes it — a store with no monthly headroom has `MerchNeedMonth ≤ 0` and fails the cap check naturally.
+- Phase 1b and 2b (round-robin) now iterate stores in **Grade-tier order** instead of PriorityRank. Diamond → Platinum → Gold → Silver, with **MerchNeedMonth Balance DESC** as the within-tier sort (most-undersupplied store goes first inside its tier). Per-store quantum varies by tier: **Diamond + Platinum get 2 units per pass; Gold + Silver get 1 unit per pass**. If the box still has qty after a full Diamond→Silver pass, loop back and repeat.
+- Stores without a recognised Grade are **excluded** from 1b/2b entirely. (Phase 1a / 2a are unchanged — still CountryPriority → PriorityRank → WtAvgSold sort.)
+- The **Week** dropdown is removed from SIM Generate. The `IgnoreMerchNeed` toggle stays — it now bypasses MerchNeedMonth in 1a/2a.
+
+### Cap matrix
+
+| Cap | 1a | 1b RR | 2a | 2b RR |
+|---|---|---|---|---|
+| SKUMax = 0 exclusion | ✓ | ✓ | ✓ | ✓ |
+| SKUMax ceiling | ✓ | ✓ | ✓ | ✓ |
+| Merch Need (Month) | ✓ (cap) | **sort key only** | ✓ (cap) | **sort key only** |
+| EOM Balance entry gate | **REMOVED** | REMOVED | REMOVED | REMOVED |
+
+SKUMax stays honoured in **every** phase per planner spec. In 1b/2b the MerchNeedMonth Balance is the **within-tier sort key** (most-undersupplied store goes first inside its grade tier) but **not a cap** — Diamond/Platinum stores still receive RR units even when their MNM Balance is ≤ 0, since the override is explicitly meant to top up partial boxes past the monthly demand.
+
+### Store ordering
+
+| Phase | Sort order |
+|---|---|
+| 1a, 2a | CountryPriority ASC → PriorityRank ASC → WtAvgSold DESC *(unchanged)* |
+| 1b, 2b | Grade tier (Diamond → Platinum → Gold → Silver), then **MerchNeedMonth Balance DESC** within tier |
+
+### Per-store quantum in 1b / 2b
+
+| Grade | Units per pass |
+|---|---|
+| Diamond  | 2 |
+| Platinum | 2 |
+| Gold     | 1 |
+| Silver   | 1 |
+
+Take is further capped at `min(remaining, SKUMax headroom)`, so a store with only 1 unit of SKUMax headroom only receives 1 unit even if it's Diamond. MerchNeedMonth Balance is the sort key but NOT a cap — RR override deliberately lets a partial box push past monthly demand.
+
+### Why MerchNeedMonth subsumes EOM Balance
+
+`MerchNeedMonth = TargetEOM − SOH + TargetSales`. That's the monthly demand at the (Store, Div) level: how much can land before the monthly EOM ceiling is breached. If MNM ≤ 0, the store is over-stocked for the month, the cap check fires, the store is dead. The separate `(TargetEOM − DivSOH) ≤ 0` gate was redundant — and worse, it disagreed with MNM on edge cases where TargetSales pushed a slightly-over store back into headroom-positive territory. Removing the gate brings cap behaviour fully in line with the MNM number the planner already reads on the EOM page.
+
+### Implementation notes
+
+- **SQL changes** — both EOM read sites in `LpmSimGenerator` now select `eo.MerchNeedMonth` + `eo.Grade` (both already on `LPM_EOM_Output`; no migration needed). The `@weekNo` parameter and `CASE` over `MerchNeedWeek1..4` are gone from the primary EOM read.
+- **`EomStore` record** — `MerchNeedWeek` → `MerchNeedMonth`; new `Grade` field. Constructor sites updated at both EOM read locations.
+- **`AllocateLineNormal`** — cap math switches from `s.MerchNeedWeek − cumDiv` to `s.MerchNeedMonth − cumDiv`. The `SKIP_TARGET` trace decision is renamed `SKIP_MNM`. The explicit EOM Balance entry gate (`(s.TargetEOM − effDivSoh) ≤ 0`) is deleted — MerchNeedMonth catches the same cases. The `EqualFillRate` denominator switches from `MerchNeedWeek` to `MerchNeedMonth` (same shape — `cumDiv / MerchNeedMonth`).
+- **`AllocateLineRoundRobin`** — completely rewritten iteration. Grouped stores by Grade (case-insensitive, trimmed); pre-sorted each tier once by **MerchNeedMonth Balance DESC** (sort key only — not a cap); outer loop cycles tiers Diamond→Silver; per-store quantum is **2 units for Diamond+Platinum, 1 unit for Gold+Silver** (capped at remaining + SKUMax headroom only — MNM is not a cap in RR). Stores without one of the four recognised grades are excluded entirely — one `SKIP_NO_GRADE` trace row gets written so the planner can see the reason on the Trace tab. The `bypassAllCaps` parameter is retained for API stability; its `false` branch (kept for completeness) still honours MNM but no current caller uses it.
+- **`LpmSimGenerate.razor`** — Week dropdown UI block removed. `_runWeek` field kept and hard-coded to 1 so `LpmSimGenerateRequest.WeekNo` stays a valid byte for `LpmSimBatch.WeekNo` persistence (back-compat — every new batch records `WeekNo = 1`; old batches keep their original values). `IgnoreMerchNeed` tooltip updated to reference Month instead of Week.
+
+### Things intentionally NOT touched
+
+- **`LPM_WeeklySalesTargetSplit`** — table + page stay alive; allocator just stops reading from it. EOM Generate continues to use it for split calculations.
+- **Report columns labelled "Merch Need (Week)"** — `LpmSimReports.cs` still reads `LPM_EOM_Output.MerchNeedWeek` for the EOM Summary / Store Summary / Division Summary tabs. These are now informational only (the allocator doesn't read them) but still show data. Flagging in case you want them switched to MerchNeedMonth — that's a separate change.
+- **EOM Generate page** — no behaviour change. `MerchNeedMonth` was already computed and persisted; we just start reading it on the SIM side.
+- **`LpmSimBatch.WeekNo` schema column** — kept. New batches always write 1; the column will be effectively constant going forward.
+- **`bypassAllCaps` parameter** — kept on `AllocateLineRoundRobin` for API stability. All current callers pass `true`; the `false` branch is reachable code but unused.
+
+### Behavioural impact
+
+- **Allocation volumes will shift.** Phase 1a/2a will place more units per (Store, Div) because the monthly cap is ~4× the weekly cap. Boxes that previously stayed partial (under the weekly cap) will now fully place if MNM allows.
+- **Phase 1b/2b RR pattern is different.** Old behaviour: 1 unit per store, PriorityRank order, MerchNeedWeek bypassed. New: per-grade quantum (2 for Diamond+Platinum, 1 for Gold+Silver), iterated by tier then MNM Balance DESC, **SKUMax cap still honoured but MerchNeedMonth bypassed** (RR override deliberately lets partial boxes push past monthly demand). Stores without a grade get nothing from RR. MNM Balance is used as the within-tier sort key only.
+- **Trace tab** — `SKIP_EOM_BALANCE` reason disappears on new batches; new reasons `SKIP_MNM` (Phase 1a/2a) and `SKIP_NO_GRADE` (1b/2b) appear. Old batches keep their historical reason text.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `EomStore` record updated (MerchNeedMonth + Grade); primary EOM read SQL (drop `@weekNo` CASE, add MerchNeedMonth + Grade); BuildSkuMaxAsync EOM read (same column swap); `AllocateLineNormal` (cap source, drop entry gate, rename trace reason, EqualFillRate denominator); `AllocateLineRoundRobin` (grade-tier iteration with 2-per-store quantum).
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — Week dropdown block removed; `_runWeek` field comment rewritten + behaviour note; `IgnoreMerchNeed` tooltip text updated.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.86 → 1.14.87.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar footer shows `1.14.87`.
+2. SIM Generate filter bar has no **Week** dropdown.
+3. Generate a fresh batch on a small period (e.g. UAE current month with the LPM-only checkbox to keep it fast). Confirm:
+   - Allocation Trace tab shows `SKIP_MNM` (not `SKIP_TARGET`) for stores that hit the monthly cap.
+   - No `SKIP_EOM_BALANCE` rows on the new batch.
+   - 1b/2b RR rows are concentrated on Diamond-grade stores first.
+   - Any store without a grade gets one `SKIP_NO_GRADE` trace row in the RR phases (look for divisions where the planner has ungraded stores).
+4. Compare allocated volume vs the prior batch — expect larger placements because Month > Week cap.
+
+---
+
+## 1.14.86 — WH SKU Investigation: Slashed column corrected (Y/N flag, not Qty) (2026-05-21)
+
+### What's wrong
+
+1.14.82 added a "Slashed Qty" column on Reports → WH SKU Investigation, reading `whboxitems.Slashed`. That column is actually a **Y/N flag** at source, not a quantity — pallets carry `'Y'` or `'N'` (with the occasional blank). 1.14.82's `SUM(...AS bigint)` errored on every load; 1.14.85's `TRY_CAST(... AS bigint)` hotfix stopped the error but silently coerced every `'Y'` / `'N'` to NULL, so the column always showed `0`. Either way, the displayed value was wrong.
+
+### Fix
+
+The column is now treated as what it is — a Y/N flag — and rolled up per item:
+
+- **SQL:** `IsSlashed = MAX(CASE WHEN UPPER(LTRIM(RTRIM(ISNULL(w.Slashed, '')))) = 'Y' THEN 1 ELSE 0 END)` against `#WhItemsAgg`. The TRIM + UPPER are defensive — leading spaces and lowercase `y` still count.
+- **Record:** `SlashedQty long` → `IsSlashed bool`.
+- **UI:** column header renamed `Slashed Qty` → `Slashed`. Cell shows a coloured `Y` (red) or muted `N` (grey) badge. Footer shows `<count> Y` — the number of items in the loaded set that have at least one slashed pallet.
+- **Excel:** column 8 still carries the per-item value, but now as text `"Y"` / `"N"`. Total row writes `"<N> Y"`. Numeric-format range split so col 8 isn't formatted as a number.
+
+### Why "per-item flag" rather than "per-pallet count"
+
+Per the planner: a single Y/N badge per item is easier to scan and matches how the planner thinks about slashed stock (the question is usually "*is* this item slashed somewhere?" rather than "*how many* of its pallets are slashed?"). The MAX rollup says yes if any in-scope pallet for the item is slashed.
+
+### Files changed
+
+- `src/LpmSim.Data/Reports/WhItemsReportService.cs` — `WhItemsReportRow.SlashedQty (long)` → `IsSlashed (bool)`; `#WhItemsAgg` aggregate changed from `SUM(TRY_CAST(...))` to `MAX(CASE WHEN ... = 'Y' ...)`; final SELECT projects as `IsSlashed`; reader maps the int 1/0 to a bool.
+- `src/LpmSim.Web/Components/Pages/LPM/Reports/WhItems.razor` — header `Slashed Qty` → `Slashed`; row cell rendered as a Y/N badge (red Y, grey N); footer shows `<count> Y`; Excel header renamed, cell writes `"Y"` / `"N"` text, numeric-format range adjusted so col 8 isn't formatted as a number.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.85 → 1.14.86.
+- `CHANGELOG.md` — this section.
+
+---
+
 ## 1.14.85 — Hotfix: WH SKU Investigation "Error converting data type varchar to bigint" (2026-05-21)
 
 ### What's wrong
