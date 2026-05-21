@@ -83,9 +83,14 @@ public class SkuMaxBuildJobManager
         var trimmed = country.Trim();
         using var diScope = _services.CreateScope();
         var dbFactory = diScope.ServiceProvider.GetRequiredService<IDbContextFactory<LpmDbContext>>();
-        await using var db = await dbFactory.CreateDbContextAsync(ct);
+        // 1.14.104 — ConfigureAwait(false) on every await so callers in a
+        // captured-context environment (e.g. Blazor circuit dispatcher) can
+        // safely use sync wait patterns without deadlocking. The sync wait
+        // in Start was removed in 1.14.104, but this defence stays in case
+        // future code reintroduces a sync caller.
+        await using var db = await dbFactory.CreateDbContextAsync(ct).ConfigureAwait(false);
         return await db.LpmSkuMaxLocks.AsNoTracking()
-            .FirstOrDefaultAsync(l => l.Country == trimmed, ct);
+            .FirstOrDefaultAsync(l => l.Country == trimmed, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -113,20 +118,21 @@ public class SkuMaxBuildJobManager
                 $"A SKU Max build is already running for {country} {year:D4}-{month:D2} " +
                 $"(started {existing.StartedAt:dd-MMM HH:mm:ss}{(string.IsNullOrEmpty(existing.StartedBy) ? "" : $" by {existing.StartedBy}")}).");
 
-        // 1.14.102 — Lock gate. Both callers (razor click handler + nightly
-        // scheduler) check LPM_SkuMaxLock asynchronously BEFORE invoking
-        // Start, but we re-check here so any future caller that forgets the
-        // pre-check still hits a clean refusal. The lookup is a single PK
-        // index seek on a tiny table — running it sync via GetAwaiter is
-        // acceptable (no real blocking happens).
-        var lockRow = GetLockAsync(country).GetAwaiter().GetResult();
-        if (lockRow is not null)
-            throw new InvalidOperationException(
-                $"Build SKU Max is LOCKED for {country} " +
-                $"(locked {lockRow.LockedAt:dd-MMM-yyyy HH:mm}" +
-                (string.IsNullOrEmpty(lockRow.LockedBy) ? "" : $" by {lockRow.LockedBy}") +
-                (string.IsNullOrEmpty(lockRow.Reason)   ? "" : $" — {lockRow.Reason}") +
-                "). Delete the LPM_SkuMaxLock row to unlock.");
+        // 1.14.104 — Removed sync lock pre-check that was here in 1.14.102.
+        // That check did `GetLockAsync(country).GetAwaiter().GetResult()` on
+        // the Blazor circuit's dispatcher, which deadlocked: the async EF
+        // continuations couldn't resume on the same captured context while
+        // the thread was blocked waiting for them. Symptom was "clicking
+        // Build does nothing" — the click handler hung indefinitely.
+        //
+        // Defence-in-depth is preserved by two ASYNC checks the callers
+        // run BEFORE invoking Start:
+        //   - LpmSimGenerate.razor → SkuMaxJobs.GetLockAsync (snackbar refusal)
+        //   - SkuMaxBuildScheduler  → _jobs.GetLockAsync (logs + skips)
+        // Plus LpmSimGenerator.BuildSkuMaxAsync re-checks the lock at the
+        // top of the generator method via plain async EF — the actual
+        // build cannot proceed for a locked country regardless of whether
+        // Start was reached.
 
         var cts = new CancellationTokenSource();
         var job = new SkuMaxBuildJob

@@ -23,6 +23,59 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.104 — Hotfix: Build SKU Max click handler deadlock from the 1.14.102 sync lock check (2026-05-21)
+
+### What was wrong
+
+1.14.102 introduced a "defence-in-depth" lock check inside `SkuMaxBuildJobManager.Start`:
+
+```csharp
+var lockRow = GetLockAsync(country).GetAwaiter().GetResult();  // BAD
+```
+
+`Start` is called synchronously from the razor click handler — which runs on the Blazor circuit's dispatcher. Blocking that thread with `.GetResult()` while `GetLockAsync`'s `await` continuations need to resume on the **same captured context** is the textbook sync-over-async deadlock.
+
+Symptom the planner saw on prod: opening the "Confirm SKU Max Build" dialog and clicking **Build** (or **Cancel**) did nothing. No banner, no error Snackbar, no log entry — the click handler hung indefinitely waiting for `Start` to return. The circuit eventually timed out and the page froze.
+
+I knew this was risky at the time (the comment I wrote said *"running it sync via GetAwaiter is acceptable (no real blocking happens)"*) — that was wrong. Owning it.
+
+### Fix
+
+Removed the sync defence-in-depth check from `Start` entirely. Two layers of async lock enforcement remain — every code path that reaches `Start` has already checked the lock asynchronously:
+
+| Path | Async lock check |
+|---|---|
+| Razor button click → `BuildSkuMaxAsync` (razor) | calls `SkuMaxJobs.GetLockAsync` and refuses with a Warning Snackbar BEFORE calling `Start` |
+| Nightly auto path → `SkuMaxBuildScheduler.RunAllCountriesAsync` | calls `_jobs.GetLockAsync` and logs + skips BEFORE calling `Start` |
+| **Final safety net** → `LpmSimGenerator.BuildSkuMaxAsync` | re-checks lock at the top of the generator method via plain async EF (`db.LpmSkuMaxLocks.FirstOrDefaultAsync`) — the SQL that does the real work cannot proceed for a locked country regardless of whether `Start` was reached |
+
+So removing the sync check loses zero safety while eliminating the deadlock.
+
+**Belt-and-suspenders:** added `ConfigureAwait(false)` to `GetLockAsync`'s two awaits so that if any future caller does sync-from-async on it, the async continuations won't try to resume on the captured context and won't deadlock.
+
+### Why 1.14.103 didn't fix this
+
+1.14.103 only touched the three preview/display methods (`PreviewSkuMaxBuildAsync` / `GetSkuMaxScopeCountsAsync` / `GetInputFreshnessAsync`) — the data path. The deadlock was on the **click handler**, which is unrelated. So 1.14.103 fixed the dialog's numbers but not the dialog's responsiveness.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/SkuMaxBuildJobManager.cs` — removed `GetLockAsync(country).GetAwaiter().GetResult()` and the surrounding `if (lockRow is not null) throw` from `Start`; replaced with a comment explaining the deadlock and the remaining safety layers. Added `ConfigureAwait(false)` to `GetLockAsync`'s two awaits.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.103 → 1.14.104.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar version `1.14.104`.
+2. SIM Generate → pick **OMAN** → click **Build SKU Max** → confirm dialog appears with real `Items to rebuild` count (from 1.14.103) → click **Build** → yellow "SKU Max Build — Running" banner appears immediately with live elapsed timer + stage messages.
+3. SIM Generate → pick **UAE** → red "Locked" badge still visible, button still greyed (no functional change to the lock itself; only the deadlock fix).
+4. SIM Generate → pick **UAE** → try anyway via dev tools / direct call → should still refuse with "Build SKU Max is LOCKED" (the Generator's async check at the top of `BuildSkuMaxAsync` is now the last line of defence, and it works correctly).
+
+### No DB changes
+
+Pure code fix. No migration.
+
+---
+
 ## 1.14.103 — Hotfix: country-link routing applied to the three OTHER SKU Max whboxitems reads (2026-05-21)
 
 ### What was wrong
