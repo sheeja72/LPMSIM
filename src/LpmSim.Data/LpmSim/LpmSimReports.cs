@@ -79,6 +79,13 @@ public class StoreSummaryRow
 
     /// <summary>Subset of SimQty produced by Phase 1b/2b override RR.</summary>
     public long OverrideQty { get; set; }
+
+    /// <summary>1.14.97 — Merch Need (Month) Balance = MerchNeedMonth − SOH.
+    /// Per planner: demand still un-met by current stock (ignoring the SIM
+    /// allocation in this batch). Can be negative when the store is already
+    /// over its monthly demand. Computed on read so it stays in sync with
+    /// whatever the SQL returns for the two source columns.</summary>
+    public long MerchNeedBalance => MerchNeedMonth - SOH;
 }
 
 /// <summary>
@@ -94,8 +101,19 @@ public class DivisionSummaryRow
     public decimal EOM          { get; set; }
     public long   SOH           { get; set; }
 
+    /// <summary>1.14.97 — Σ Merch Need (Month) across stores for this
+    /// division. Same role as the StoreSummaryRow.MerchNeedMonth — this is
+    /// the cap the 1.14.87 allocator uses; MerchNeedWeek below is kept as
+    /// informational only.</summary>
+    public long   MerchNeedMonth { get; set; }
+
     /// <summary>Σ Merch Need (Week) across stores for this division.</summary>
     public long   MerchNeedWeek { get; set; }
+
+    /// <summary>1.14.97 — Merch Need (Month) Balance = MerchNeedMonth − SOH.
+    /// Same definition as the store-level field. Negative when the division
+    /// is already over its monthly demand across stores.</summary>
+    public long   MerchNeedBalance => MerchNeedMonth - SOH;
 
     /// <summary>Σ full warehouse Box Qty for items in this division — same
     /// semantics as the Summary (Kind × Warehouse) tab's "Box Qty". Sources
@@ -860,9 +878,13 @@ BoxQtyAgg AS (
      GROUP BY id.DivCode
 ),
 EomAgg AS (
+    -- 1.14.97 — MerchNeedMonth added alongside MerchNeedWeek for the
+    -- division-level rollup. Same projection shape as Store Summary's
+    -- EomAgg (1.14.94).
     SELECT eo.DivCode,
-           EOM           = SUM(ISNULL(eo.TargetEOM, 0)),
-           MerchNeedWeek = SUM(CAST(ISNULL(eo.MerchNeedWeek, 0) AS bigint))
+           EOM            = SUM(ISNULL(eo.TargetEOM, 0)),
+           MerchNeedMonth = SUM(CAST(ISNULL(eo.MerchNeedMonth, 0) AS bigint)),
+           MerchNeedWeek  = SUM(CAST(ISNULL(eo.MerchNeedWeek,  0) AS bigint))
       FROM dbo.LPM_EOM_Output eo
      WHERE eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
      GROUP BY eo.DivCode
@@ -889,13 +911,14 @@ AllDivs AS (
 SELECT @batchNo                  AS LPMBatchNo,
        a.DivCode,
        div.Division               AS DivisionName,
-       EOM           = ISNULL(eo.EOM, 0),
-       SOH           = ISNULL(soh.SOH, 0),
-       MerchNeedWeek = ISNULL(eo.MerchNeedWeek, 0),
-       SimQty        = ISNULL(sim.SimQty, 0),
-       RrQty         = ISNULL(sim.RrQty, 0),
-       OverrideQty   = ISNULL(sim.OverrideQty, 0),
-       BoxQty        = ISNULL(bq.BoxQty, 0)
+       EOM            = ISNULL(eo.EOM, 0),
+       SOH            = ISNULL(soh.SOH, 0),
+       MerchNeedMonth = ISNULL(eo.MerchNeedMonth, 0),  -- 1.14.97
+       MerchNeedWeek  = ISNULL(eo.MerchNeedWeek,  0),
+       SimQty         = ISNULL(sim.SimQty, 0),
+       RrQty          = ISNULL(sim.RrQty, 0),
+       OverrideQty    = ISNULL(sim.OverrideQty, 0),
+       BoxQty         = ISNULL(bq.BoxQty, 0)
   FROM AllDivs a
   LEFT JOIN dbo.Division div ON div.DivCode = a.DivCode
   LEFT JOIN SimAgg sim       ON sim.DivCode = a.DivCode
@@ -919,18 +942,21 @@ DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
         });
     }
 
+    // 1.14.97 — MerchNeedMonth inserted at index 5; MerchNeedWeek shifts
+    // from 5 to 6; SimQty / RrQty / OverrideQty / BoxQty shift +1 each.
     private static DivisionSummaryRow ReadDivisionSummary(SqlDataReader r) => new()
     {
-        LPMBatchNo    = r.GetInt64(0),
-        DivCode       = r.IsDBNull(1) ? 0 : r.GetInt32(1),
-        DivisionName  = r.IsDBNull(2) ? "" : r.GetString(2),
-        EOM           = r.IsDBNull(3) ? 0 : r.GetDecimal(3),
-        SOH           = r.IsDBNull(4) ? 0 : r.GetInt64(4),
-        MerchNeedWeek = r.IsDBNull(5) ? 0 : r.GetInt64(5),
-        SimQty        = r.IsDBNull(6) ? 0 : r.GetInt64(6),
-        RrQty         = r.IsDBNull(7) ? 0 : r.GetInt64(7),
-        OverrideQty   = r.IsDBNull(8) ? 0 : r.GetInt64(8),
-        BoxQty        = r.IsDBNull(9) ? 0 : r.GetInt64(9),
+        LPMBatchNo     = r.GetInt64(0),
+        DivCode        = r.IsDBNull(1)  ? 0 : r.GetInt32(1),
+        DivisionName   = r.IsDBNull(2)  ? "" : r.GetString(2),
+        EOM            = r.IsDBNull(3)  ? 0 : r.GetDecimal(3),
+        SOH            = r.IsDBNull(4)  ? 0 : r.GetInt64(4),
+        MerchNeedMonth = r.IsDBNull(5)  ? 0 : r.GetInt64(5),
+        MerchNeedWeek  = r.IsDBNull(6)  ? 0 : r.GetInt64(6),
+        SimQty         = r.IsDBNull(7)  ? 0 : r.GetInt64(7),
+        RrQty          = r.IsDBNull(8)  ? 0 : r.GetInt64(8),
+        OverrideQty    = r.IsDBNull(9)  ? 0 : r.GetInt64(9),
+        BoxQty         = r.IsDBNull(10) ? 0 : r.GetInt64(10),
     };
 
     // 1.14.94 — MerchNeedMonth inserted at index 5; MerchNeedWeek shifts
@@ -2345,19 +2371,107 @@ SELECT {string.Join(", ", selectParts)}
         if (conn.State != System.Data.ConnectionState.Open)
             await db.Database.OpenConnectionAsync(ct);
 
-        const string sql = @"
-            ;WITH BoxLineEligible AS (
-                -- 1 row per (BoxNo, ItemCode). LineQty is identical across
-                -- store decisions for the same box-line, so MAX is fine.
-                SELECT BoxNo, ItemCode, LineQty = MAX(LineQty)
-                  FROM dbo.LPMSIM_AllocTrace
-                 WHERE LPMBatchNo = @batchNo
-                 GROUP BY BoxNo, ItemCode
-            ),
-            ItemEligible AS (
-                SELECT ItemCode, EligibleWhQty = SUM(CAST(LineQty AS bigint))
-                  FROM BoxLineEligible
-                 GROUP BY ItemCode
+        // 1.14.96 — Read the batch's persisted filter snapshot so we can
+        // replicate the eligibility filter the allocator used. Without this,
+        // the report's EligibleWhQty undercount badly (the previous source —
+        // LPMSIM_AllocTrace — only covers box-lines that produced at least
+        // one ALLOC row, AND skips per-store SKIP rows in non-verbose mode).
+        var b = await db.LpmSimBatches.AsNoTracking()
+            .FirstOrDefaultAsync(x => x.LPMBatchNo == batchNo, ct);
+        if (b is null) return new();
+
+        var country = b.Country ?? "UAE";
+        var whSrc   = await ResolveWhSrcAsync(db, country, ct);
+        // DataName needed to build the closed-box EXISTS expression for non-UAE.
+        var dataName = await Warehouse.WhBoxItemsSource.ResolveDataNameAsync((SqlConnection)conn, country, ct);
+        var isClosedExpr = Warehouse.WhBoxItemsSource.BuildIsClosedExpression(country, dataName);
+
+        // ── Parse batch.Sources ────────────────────────────────────────────
+        // Format: "LPM" / "Non-LPM" / "LPM,Non-LPM" with optional trailing
+        // "*" marker meaning IncludePurchasedBoxes = true.
+        var srcRaw = b.Sources ?? "";
+        var includePurchased = srcRaw.TrimEnd().EndsWith("*", StringComparison.Ordinal);
+        var srcTag = srcRaw.TrimEnd('*').Trim();
+        var hasLpm    = srcTag.Contains("LPM",     StringComparison.OrdinalIgnoreCase);
+        var hasNonLpm = srcTag.Contains("Non-LPM", StringComparison.OrdinalIgnoreCase);
+        // "LPM,Non-LPM" trips both. "Non-LPM" matches BOTH literally (it contains
+        // "LPM" as a substring), so detect Non-LPM first and adjust.
+        if (hasNonLpm && srcTag.Replace("Non-LPM", "", StringComparison.OrdinalIgnoreCase)
+                              .Replace(",", "").Trim().Length == 0)
+            hasLpm = false;  // pure "Non-LPM" → LPM not selected
+        string lpmDtClause = (hasLpm, hasNonLpm) switch
+        {
+            (true, true)   => "",                                // both → no LPMDt filter
+            (true, false)  => "AND w.LPMDt IS NOT NULL",          // LPM only
+            (false, true)  => "AND w.LPMDt IS NULL",              // Non-LPM only
+            _              => "AND 1 = 0",                        // safety — neither selected (shouldn't happen)
+        };
+
+        var shopEligibleClause = includePurchased
+            ? ""
+            : "AND (w.ShopEligible IS NULL OR w.ShopEligible <> 'E')";
+
+        // ── Parse batch.Seasons ────────────────────────────────────────────
+        // Format: "Summer" / "Winter" / "Summer,Winter". Season filter applied
+        // to pt.Season ('W' = Winter, anything else treated as Summer).
+        var seasonsRaw = (b.Seasons ?? "").Trim();
+        var hasSummer  = seasonsRaw.Contains("Summer", StringComparison.OrdinalIgnoreCase);
+        var hasWinter  = seasonsRaw.Contains("Winter", StringComparison.OrdinalIgnoreCase);
+        string seasonClause = (hasSummer, hasWinter) switch
+        {
+            (true, true)  => "",
+            (true, false) => "AND (UPPER(ISNULL(pt.Season, '')) <> 'W')",   // Summer = NOT Winter
+            (false, true) => "AND (UPPER(ISNULL(pt.Season, '')) = 'W')",
+            _             => "",   // neither selected — defensive; allocator would never have run
+        };
+
+        // ── Parse batch.Warehouses ─────────────────────────────────────────
+        // Format: "All" (or empty) means no filter. Comma-separated list of
+        // warehouse names otherwise.
+        var whRaw = (b.Warehouses ?? "").Trim();
+        var whClauseSb = new System.Text.StringBuilder();
+        var whParms    = new List<SqlParameter>();
+        if (!string.IsNullOrEmpty(whRaw) && !whRaw.Equals("All", StringComparison.OrdinalIgnoreCase))
+        {
+            var whs = whRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (whs.Length > 0)
+            {
+                whClauseSb.Append(" AND w.Warehouse IN (");
+                for (int i = 0; i < whs.Length; i++)
+                {
+                    if (i > 0) whClauseSb.Append(", ");
+                    whClauseSb.Append("@wh").Append(i);
+                    whParms.Add(new SqlParameter($"@wh{i}", whs[i]));
+                }
+                whClauseSb.Append(')');
+            }
+        }
+        var whClause = whClauseSb.ToString();
+
+        // 1.14.96 NOTE — PalletCategory and specific LPM Months are NOT
+        // stored on the LpmSimBatch row, so they CAN'T be replicated here.
+        // If the planner restricted those at generation time, this report's
+        // EligibleWhQty will be slightly larger than what the allocator
+        // actually saw. The Remaining number will then over-state the gap
+        // for the missing filters' worth of box-lines.
+
+        var sql = $@"
+            ;WITH ItemEligible AS (
+                -- 1.14.96 — Source switched from LPMSIM_AllocTrace to the
+                -- country-aware whboxitems with the batch's persisted filter
+                -- snapshot. Closed-box exclusion applied via the same
+                -- WhBoxItemsSource.BuildIsClosedExpression the allocator uses.
+                SELECT w.itemcode AS ItemCode,
+                       EligibleWhQty = SUM(CAST(ISNULL(w.Qty, 0) AS bigint))
+                  FROM {whSrc} w
+                  INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
+                 WHERE w.itemcode IS NOT NULL AND w.itemcode <> ''
+                   AND NOT ({isClosedExpr})            -- closed-box exclusion (matches allocator since 1.14.74)
+                   {shopEligibleClause}
+                   {seasonClause}
+                   {lpmDtClause}
+                   {whClause}
+                 GROUP BY w.itemcode
             ),
             ItemAllocated AS (
                 SELECT Itemcode AS ItemCode,
@@ -2367,8 +2481,12 @@ SELECT {string.Join(", ", selectParts)}
                  GROUP BY Itemcode
             ),
             ItemReasons AS (
-                -- Count of SKIP rows per (Item, Decision). Used to pick the
-                -- dominant skip reason per item.
+                -- TopReason still comes from LPMSIM_AllocTrace (the allocator
+                -- writes Decision codes per (Item, Store) decision). Items
+                -- that NEVER entered the allocator (filtered out at the box
+                -- level) won't have AllocTrace rows — their TopReason will
+                -- render as empty, which is correct: the reason for THOSE
+                -- items is one of the batch-level filters above.
                 SELECT ItemCode, Decision, Cnt = COUNT_BIG(*)
                   FROM dbo.LPMSIM_AllocTrace
                  WHERE LPMBatchNo = @batchNo
@@ -2410,7 +2528,8 @@ SELECT {string.Join(", ", selectParts)}
         using var cmd = (SqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
-        cmd.CommandTimeout = 180;
+        foreach (var p in whParms) cmd.Parameters.Add(p);
+        cmd.CommandTimeout = 300;
 
         var rows = new List<ItemAllocationGapRow>();
         using var rdr = await cmd.ExecuteReaderAsync(ct);

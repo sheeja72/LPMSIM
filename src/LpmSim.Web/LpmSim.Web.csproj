@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.95</Version>
-    <AssemblyVersion>1.14.95.0</AssemblyVersion>
-    <FileVersion>1.14.95.0</FileVersion>
-    <InformationalVersion>1.14.95 (Deploy recovery + WH SKU Investigation polish: (1) The 1.14.86 WhItemsReportService.cs change (IsSlashed bool record field + MAX(CASE) SQL) was stranded in the working tree — never committed. Subsequent commits (1.14.92, 1.14.93, 1.14.94) updated the razor to use r.IsSlashed but the deployed record still had SlashedQty long, causing Azure CI builds to fail with a compile error. Production was stuck on 1.14.91 with the broken Slashed column showing 0s. This release commits the missing service file so the build can finally succeed. (2) WH SKU Investigation column widths: min-width added to every multi-word right-aligned column so labels render on ONE line (HO Price, WH Qty, Stores SOH, Blocked Qty, Blocked Stores, To Fill Qty, Slashed) instead of wrapping awkwardly into two. (3) Includes the previously-pending 1.14.94 Store Summary Merch Need (Month) column.)</InformationalVersion>
+    <Version>1.14.97</Version>
+    <AssemblyVersion>1.14.97.0</AssemblyVersion>
+    <FileVersion>1.14.97.0</FileVersion>
+    <InformationalVersion>1.14.97 (Merch Need Balance + Division Summary parity: (1) Store Summary tab gets a new "Merch Need Balance" column (= MerchNeedMonth − SOH) right after Merch Need (Month). Negative values render in red (over-stocked). (2) Division Summary tab gets BOTH Merch Need (Month) AND Merch Need Balance columns, mirroring Store Summary's 1.14.94 + this release's additions. DivisionSummaryRow record gains MerchNeedMonth (read from a new SUM in the EomAgg CTE) and computed MerchNeedBalance property. Both tabs' Excel exports include the new columns.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

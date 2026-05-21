@@ -23,6 +23,112 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.97 — Merch Need Balance column + Division Summary parity (2026-05-21)
+
+### What's new
+
+#### A) Store Summary — new **Merch Need Balance** column
+
+Inserted right after Merch Need (Month). Formula:
+
+```
+Merch Need Balance = MerchNeedMonth − SOH
+```
+
+Per planner: demand still un-met by current stock (ignoring this batch's SIM allocation). Negative values render in red on the table (= the store is already over its monthly demand). Computed on the C# record (`StoreSummaryRow.MerchNeedBalance =>`) — no SQL change needed.
+
+#### B) Division Summary — gains both **Merch Need (Month)** AND **Merch Need Balance**
+
+The Division Summary tab was missing the Merch Need (Month) column (it only had Week). 1.14.97 adds both, in the same order as Store Summary: `... | EOM Balance | Current Fill Rate % | Merch Need (Month) | Merch Need Balance | Merch Need (Week) | Merch Need (Day) | Box Qty | SIM Qty | ...`.
+
+`DivisionSummaryRow` record gains:
+- `MerchNeedMonth (long)` — read from a new `SUM(MerchNeedMonth)` projection in the `EomAgg` CTE
+- `MerchNeedBalance (long)` — computed property `MerchNeedMonth − SOH`
+
+Caption below the Division Summary table updated to explain Month is the cap (1.14.87+), Balance is demand-vs-stock, Week is informational.
+
+### Excel exports
+
+| Tab | Before | After |
+|---|---|---|
+| Store Summary | 9 cols | 10 cols (Balance inserted at col 6; SIM/RR/Override shift +1 → 8/9/10) |
+| Division Summary | 12 cols | 14 cols (Month at col 7, Balance at col 8; Week/Day shift to 9/10; Box/SIM/RR/Override shift to 11/12/13/14) |
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `StoreSummaryRow.MerchNeedBalance` computed property added; `DivisionSummaryRow.MerchNeedMonth` field + `MerchNeedBalance` computed property added; Division Summary SQL `EomAgg` CTE projects `MerchNeedMonth`; main SELECT projects it; `ReadDivisionSummary` shifts indices (MerchNeedMonth at 5; MerchNeedWeek/SimQty/RrQty/OverrideQty/BoxQty each +1).
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — Store Summary table + Excel get Balance column; Division Summary table + Excel get Month + Balance columns; row cells render Balance in red when negative; footer totals + captions updated.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.96 → 1.14.97.
+- `CHANGELOG.md` — this section.
+
+### Not changed
+
+- **Summary (per Store × Division)** tab is not touched — it doesn't currently surface Merch Need numbers; flag if you want them there too.
+- Allocator unchanged from 1.14.96.
+
+---
+
+## 1.14.96 — Gap by UPC: switch EligibleWhQty source from AllocTrace to whboxitems with batch filters (2026-05-21)
+
+### What was wrong
+
+The 1.14.93 "Gap by UPC" tab read `EligibleWhQty` from `LPMSIM_AllocTrace`. Planner reported a real example: batch #77 ran against ~295K of eligible WH stock, placed 162K, leaving ~133K remaining — but the report showed only 9.7K. A 14× undercount.
+
+### Root cause
+
+`LPMSIM_AllocTrace` is **not** a complete record of every box-line that entered the allocator:
+
+| Trace situation | What gets written | What 1.14.93 sees |
+|---|---|---|
+| Box-line that produced at least one `ALLOC` row | `ALLOC` rows per chosen store + (if `VerboseTrace=ON`) per-store `SKIP_*` rows | ✓ Counted (via `MAX(LineQty)`) |
+| Box-line bailed at `SKIP_NO_DIV` / `SKIP_NO_EOM` | One trace row | ✓ Counted |
+| Box-line entered allocator, every store dead from cycle 1, **non-verbose mode** | **NO trace rows** | ✗ **Missed entirely** |
+| Box-line filtered out **before** reaching allocator (closed box, ShopEligible='E', wrong season, wrong PalletCategory, wrong Warehouse, etc.) | NO trace rows | ✗ **Missed entirely** |
+
+The planner's 133K gap is dominated by the last two buckets — box-lines that either never entered or fully failed in non-verbose mode.
+
+### Fix
+
+`EligibleWhQty` is now sourced from the country-aware **whboxitems** (UAE → `racks.dbo.whboxitems`; other countries → `[<DataName>].dbo.WHBoxItemsExport`) with the **batch's persisted filter snapshot** applied:
+
+| Filter | Source | Status |
+|---|---|---|
+| Country (whSrc resolution) | `LpmSimBatch.Country` | ✓ Applied |
+| Source (LPM / Non-LPM / both) | `LpmSimBatch.Sources` | ✓ Applied (parsed from string) |
+| IncludePurchasedBoxes | `LpmSimBatch.Sources` trailing `*` | ✓ Applied |
+| Season (Summer / Winter) | `LpmSimBatch.Seasons` | ✓ Applied (via `pt.Season`) |
+| Warehouses | `LpmSimBatch.Warehouses` | ✓ Applied (`All` = no filter) |
+| **Closed-box exclusion** | `WhBoxItemsSource.BuildIsClosedExpression` | ✓ Applied (matches 1.14.74+ allocator) |
+| **PalletCategory** | NOT stored on `LpmSimBatch` | ✗ **No filter** — flagged limitation |
+| **LPM Months** | NOT stored on `LpmSimBatch` | ✗ **No filter** — flagged limitation |
+
+If a batch was generated with restricted PalletCategory or specific LPM Months, this report's `EligibleWhQty` will be slightly larger than what the allocator actually saw (because we can't replay those filters from the persisted batch row). The `Remaining` would then over-state by the missing-filters' worth of box-lines.
+
+### TopReason behaviour
+
+`TopReason` still pulls from `LPMSIM_AllocTrace` (the allocator's per-`(Item, Store)` Decision codes). Items that **never entered the allocator** (filtered out at the box level) will show **TopReason = empty**. That's intentional: their "reason" is one of the batch-level filters above, not a per-store SKIP decision. The chip column renders an em-dash in those rows.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `GetItemAllocationGapAsync` rewritten. Reads batch row, parses Sources/Seasons/Warehouses, looks up DataName for non-UAE, builds the closed-box expression, runs a single SQL with the filtered whboxitems aggregation + LPMSIM_Output / AllocTrace joins as before.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.95 → 1.14.96.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar version shows `1.14.96`.
+2. Open batch #77 → Gap by UPC tab → Load. Totals should now read roughly:
+   - **Eligible WH Qty total** ≈ **295K** (matches the planner's universe)
+   - **SIM Qty total** ≈ **162K** (= batch's total LPMSIM_Output)
+   - **Remaining total** ≈ **133K**
+3. Items previously absent from the list (filtered-out items, e.g. closed-box items) should now appear with `TopReason = —`.
+
+### Follow-up (optional)
+
+If the EligibleWhQty over-states because the batch used PalletCategory / LPM Months restrictions, the right fix is to add those two fields to `LpmSimBatch` and stamp them at generation time (similar to how `Sources` / `Seasons` / `Warehouses` are stamped today). That's a small migration + persistence change — say the word if it matters.
+
+---
+
 ## 1.14.95 — Deploy recovery + WH SKU Investigation column widths (2026-05-21)
 
 ### What's wrong (and why production was stuck on 1.14.91)
