@@ -61,7 +61,12 @@ public record BoxSegmentCounts(
     int LpmSummerNpBoxes,    long LpmSummerNpQty,
     int NonLpmSummerNpBoxes, long NonLpmSummerNpQty,
     int LpmWinterNpBoxes,    long LpmWinterNpQty,
-    int NonLpmWinterNpBoxes, long NonLpmWinterNpQty)
+    int NonLpmWinterNpBoxes, long NonLpmWinterNpQty,
+    // 1.14.99 — Closed-box counts (LPM vs Non-LPM, no season breakdown).
+    // Closed boxes are EXCLUDED from the SIM allocator since 1.14.74; this
+    // pair lets the planner see how much of each kind got dropped out.
+    int ClosedLpmBoxes      = 0, long ClosedLpmQty    = 0,
+    int ClosedNonLpmBoxes   = 0, long ClosedNonLpmQty = 0)
 {
     // "Total" properties stay PURCHASED-only — what the eligibility row "Total"
     // column has always meant. Non-Purchased contributions are surfaced
@@ -72,6 +77,10 @@ public record BoxSegmentCounts(
     public long TotalWinterQty   => LpmWinterQty   + NonLpmWinterQty;
     public int  TotalBoxes       => TotalSummerBoxes + TotalWinterBoxes;
     public long TotalQty         => TotalSummerQty   + TotalWinterQty;
+
+    // 1.14.99 — Closed totals (LPM + Non-LPM combined).
+    public int  TotalClosedBoxes => ClosedLpmBoxes + ClosedNonLpmBoxes;
+    public long TotalClosedQty   => ClosedLpmQty   + ClosedNonLpmQty;
 }
 
 [Flags]

@@ -23,6 +23,49 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.99 — Eligible Boxes: new "Closed (excluded from SIM)" row (2026-05-21)
+
+### What's new
+
+The **Eligible Boxes** table inside the Input Readiness expansion gets a new red-tinted row at the bottom:
+
+| | LPM | LPM Non-Purchased | Non-LPM | Total |
+|---|---|---|---|---|
+| Summer | … | … | … | … |
+| Winter | … | … | … | … |
+| Total | … | … | … | … |
+| **Closed (excluded from SIM)** | `<closed LPM Box count> (<qty>)` | — | `<closed Non-LPM Box count> (<qty>)` | `<total closed>` |
+
+The row uses the **same closed-box predicate the allocator uses** to exclude boxes from SIM: `WhBoxItemsSource.BuildIsClosedExpression(country, dataName)`. For UAE that's `EXISTS … USA..upcboxhead WHERE Closed = 'Y'`; for non-UAE it's `EXISTS … [<DataName>]..Exclude_Transfers_Sim` OR `… CloseR1Pallet`.
+
+### Important — this row is a SUBSET, not a separate bucket
+
+The closed-box counts overlap with the LPM / Non-LPM rows above. The table deliberately shows the FULL `whboxitems` totals (operator preference set in 1.14.74) — closed boxes still count there. The new row breaks out how many of those are excluded from SIM by the closed-box rule, so the planner can see the "loss to closed".
+
+The "LPM Non-Purchased" cell is left blank because the closed-box rollup doesn't split by Purchased / Non-Purchased — that level of detail isn't required for the planner's "how much is being excluded" question.
+
+### Implementation notes
+
+- `BoxSegmentCounts` record gets 4 new fields with default `0` so existing call sites compile without changes: `ClosedLpmBoxes`, `ClosedLpmQty`, `ClosedNonLpmBoxes`, `ClosedNonLpmQty`. Plus computed `TotalClosedBoxes` / `TotalClosedQty` helpers.
+- The SQL in `CheckAsync` (the existing big SELECT against `{whSrc} × bfldata.dbo.pallettype`) gets 4 new SUM CASE columns at indices 20-23 with predicate `WHERE LPMDt {IS NULL / IS NOT NULL} AND ({isClosedExpr})`. Single round-trip, no extra scan — same WHERE filters as the rest of the table.
+- `WhBoxItemsSource.ResolveDataNameAsync` is called once (alongside `ResolveAsync`) to build the IsClosed expression.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimModels.cs` — `BoxSegmentCounts` gains 4 fields + 2 computed helpers.
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `CheckAsync` resolves DataName + builds IsClosed expr; SQL adds 4 SUM CASE columns; reader maps indices 20-23.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — new "Closed (excluded from SIM)" row in the Eligible Boxes table; caption explains it's a subset.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.98 → 1.14.99.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. Sidebar version `1.14.99`.
+2. SIM Generate → expand **Input Readiness** → the Eligible Boxes table now has a red-tinted "Closed (excluded from SIM)" row at the bottom.
+3. The LPM closed count should match the count of LPM boxes the allocator excludes (cross-check via the existing per-box Allocation Gap tab's `CLOSED_BOX` reason rows).
+
+---
+
 ## 1.14.98 — Gap by UPC: persist PalletCategories + LpmMonths on the batch (proper filter replay) (2026-05-21)
 
 ### What was wrong

@@ -73,6 +73,11 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
             // others use [<DataName>].dbo.WHBoxItemsExport.
             var whSrc      = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+            // 1.14.99 — DataName + IsClosed expression needed for the new
+            // closed-box aggregations added to the SELECT below. Resolved
+            // here once so the CASE expressions can splice it in.
+            var dataNameForClosed = await WhBoxItemsSource.ResolveDataNameAsync((SqlConnection)conn, country, ct);
+            var isClosedExpr      = WhBoxItemsSource.BuildIsClosedExpression(country, dataNameForClosed);
             // 1.14.74 — The closed-box exclusion (1.14.70) is now applied
             // ONLY in the allocator (ReadBoxesAsync) and surfaced in the
             // Allocation Gap diagnostic. The Input Readiness counts grid
@@ -170,7 +175,19 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
 
                     -- Non-LPM × Winter × Non-Purchased
                     SUM(CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS NonLpmWinterNpQty,
-                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL AND ISNULL(pt.Season, '') = 'W' AND w.ShopEligible = 'E' THEN w.BoxNo END) AS NonLpmWinterNpBoxes,
+
+                    -- 1.14.99 — Closed-box subsets (LPM + Non-LPM, no season
+                    -- breakdown). These are a SUBSET of the LPM / Non-LPM
+                    -- counts above (closed boxes still appear in the
+                    -- LPM/Non-LPM rows since the page deliberately shows the
+                    -- full whboxitems totals — see 1.14.74 comment). Surfaced
+                    -- here so the planner can see how much each kind loses
+                    -- to the closed-box exclusion that the allocator applies.
+                    SUM(CASE WHEN w.LPMDt IS NOT NULL AND ({isClosedExpr}) THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS ClosedLpmQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NOT NULL AND ({isClosedExpr}) THEN w.BoxNo END) AS ClosedLpmBoxes,
+                    SUM(CASE WHEN w.LPMDt IS NULL     AND ({isClosedExpr}) THEN CAST(ISNULL(w.Qty,0) AS bigint) ELSE 0 END) AS ClosedNonLpmQty,
+                    COUNT(DISTINCT CASE WHEN w.LPMDt IS NULL     AND ({isClosedExpr}) THEN w.BoxNo END) AS ClosedNonLpmBoxes
                   FROM {whSrc} w
                   INNER JOIN bfldata.dbo.pallettype pt ON pt.PalletType = w.PalletType
                  WHERE 1 = 1
@@ -211,6 +228,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                 int  lwBn = rdr.IsDBNull(17) ? 0 : rdr.GetInt32(17);
                 long nwQn = rdr.IsDBNull(18) ? 0 : rdr.GetInt64(18);
                 int  nwBn = rdr.IsDBNull(19) ? 0 : rdr.GetInt32(19);
+                // 1.14.99 — Closed-box subsets at indices 20-23 (Qty first,
+                // then Boxes, mirroring the SUM/COUNT order in the SELECT).
+                long clQ  = rdr.IsDBNull(20) ? 0 : rdr.GetInt64(20);
+                int  clB  = rdr.IsDBNull(21) ? 0 : rdr.GetInt32(21);
+                long cnQ  = rdr.IsDBNull(22) ? 0 : rdr.GetInt64(22);
+                int  cnB  = rdr.IsDBNull(23) ? 0 : rdr.GetInt32(23);
                 segments = new BoxSegmentCounts(
                     LpmSummerBoxes: lsB,      LpmSummerQty: lsQ,
                     NonLpmSummerBoxes: nsB,   NonLpmSummerQty: nsQ,
@@ -219,7 +242,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     LpmSummerNpBoxes: lsBn,   LpmSummerNpQty: lsQn,
                     NonLpmSummerNpBoxes: nsBn,NonLpmSummerNpQty: nsQn,
                     LpmWinterNpBoxes: lwBn,   LpmWinterNpQty: lwQn,
-                    NonLpmWinterNpBoxes: nwBn,NonLpmWinterNpQty: nwQn);
+                    NonLpmWinterNpBoxes: nwBn,NonLpmWinterNpQty: nwQn,
+                    ClosedLpmBoxes: clB,      ClosedLpmQty: clQ,        // 1.14.99
+                    ClosedNonLpmBoxes: cnB,   ClosedNonLpmQty: cnQ);    // 1.14.99
             }
         }
         catch { /* leave null */ }
