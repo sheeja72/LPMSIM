@@ -2884,7 +2884,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         // of YEAR(...)/MONTH(...) wrappers. Lets SQL use any index on LPMDt
         // and brings this query down from a multi-million-row scan to a
         // sub-second seek.
-        var freshSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+        // 1.14.103 — Route child countries (OMAN) to the parent's (UAE) WH
+        // source so the "Last WH Box load" timestamp reflects the warehouse
+        // OMAN actually ships from. Without this, the freshness panel
+        // showed (none) / 1900-01-01 because OMAN's own WHBoxItemsExport
+        // never gets loaded.
+        var whSourceCountry = await CountryLinkResolver
+            .ResolveWhSourceCountryAsync(db, country, ct);
+        var freshSrc = await WhBoxItemsSource.ResolveAsync(conn, whSourceCountry, ct);
         using (var cmd = conn.CreateCommand())
         {
             // 1.14.17: PalletCategory now read from whboxitems (w.PalletCategory)
@@ -2943,7 +2950,13 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         long all = 0, lpm = 0, nonLpm = 0;
         // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
         // others use [<DataName>].dbo.WHBoxItemsExport.
-        var scopeSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+        // 1.14.103 — Route child countries (OMAN) to the parent's (UAE) WH
+        // source so the SKU-count chip matches what the build will actually
+        // process. Without this, OMAN showed "0 SKUs · 0 LPM · 0 Non-LPM"
+        // and the planner couldn't tell whether a build would be meaningful.
+        var whSourceCountry = await CountryLinkResolver
+            .ResolveWhSourceCountryAsync(db, country, ct);
+        var scopeSrc = await WhBoxItemsSource.ResolveAsync(conn, whSourceCountry, ct);
         using (var cmd = conn.CreateCommand())
         {
             // Same ItemDiv + whboxitems shape as PreviewSkuMaxBuildAsync /
@@ -3008,7 +3021,14 @@ SELECT LPMBatchNo, Country, RunYear, RunMonth, RunDate, Status,
         long itemsInScope = 0, itemsInWhBoxes = 0, existingInScope = 0, existingKept = 0;
         // Country-aware whboxitems source — UAE uses racks.dbo.whboxitems,
         // others use [<DataName>].dbo.WHBoxItemsExport.
-        var previewSrc = await WhBoxItemsSource.ResolveAsync(conn, country, ct);
+        // 1.14.103 — Route child countries (OMAN) to the parent's (UAE) WH
+        // source so the preview matches what BuildItemSkuMaxAsync will
+        // actually read. Without this, OMAN's confirmation dialog reported
+        // "0 items to rebuild" because OMAN's own WHBoxItemsExport is empty
+        // (Oman ships from UAE warehouse).
+        var whSourceCountry = await CountryLinkResolver
+            .ResolveWhSourceCountryAsync(db, country, ct);
+        var previewSrc = await WhBoxItemsSource.ResolveAsync(conn, whSourceCountry, ct);
         using (var cmd = conn.CreateCommand())
         {
             // For the All scope the build does a FULL period wipe, so every

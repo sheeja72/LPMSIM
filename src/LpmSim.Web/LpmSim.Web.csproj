@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.102</Version>
-    <AssemblyVersion>1.14.102.0</AssemblyVersion>
-    <FileVersion>1.14.102.0</FileVersion>
-    <InformationalVersion>1.14.102 — Build SKU Max country-link routing + per-country lock. (1) Child-country builds now read the parent's whboxitems (OMAN → UAE racks.dbo.whboxitems) via the existing LPM_CountryLink table — same mechanism EOM Calculator has used since 1.14.77, just retro-fitted onto BuildItemSkuMaxAsync. (2) New LPM_SkuMaxLock table (migration 060): row presence per Country = locked. Both the manual Build SKU Max click AND the nightly SkuMaxBuildScheduler check this table and refuse / skip locked countries. UI shows a red "Locked" badge with tooltip (LockedAt / LockedBy / Reason); Build SKU Max button is greyed while locked. UAE is seeded locked by the migration — delete the row in SSMS to unlock.</InformationalVersion>
+    <Version>1.14.103</Version>
+    <AssemblyVersion>1.14.103.0</AssemblyVersion>
+    <FileVersion>1.14.103.0</FileVersion>
+    <InformationalVersion>1.14.103 hotfix — Country-link routing applied to the three OTHER SKU Max whboxitems reads that 1.14.102 missed. Was: OMAN's "Confirm SKU Max Build" dialog reported "0 items to rebuild / 0 existing rows" (preview), the chip next to the Scope dropdown showed "0 SKUs", and the "Last WH Box load" timestamp on the SKU Max status panel was blank — because PreviewSkuMaxBuildAsync, GetSkuMaxScopeCountsAsync, and GetInputFreshnessAsync still passed the raw country to WhBoxItemsSource.ResolveAsync (so they looked at OMAN's own empty WHBoxItemsExport). The actual build (BuildItemSkuMaxAsync) was already routed correctly in 1.14.102 — this hotfix aligns the three preview/display paths with the build itself.</InformationalVersion>
   </PropertyGroup>
 
 </Project>

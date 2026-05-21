@@ -23,6 +23,54 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.103 — Hotfix: country-link routing applied to the three OTHER SKU Max whboxitems reads (2026-05-21)
+
+### What was wrong
+
+1.14.102 routed `BuildItemSkuMaxAsync` (the SQL that actually builds `LPM_SimItemSkuMax`) through `CountryLinkResolver.ResolveWhSourceCountryAsync` — so OMAN's build correctly reads `racks.dbo.whboxitems` (UAE's warehouse). **But three OTHER methods that surface SKU-Max-context numbers in the UI were missed**, and each still passed the raw country to `WhBoxItemsSource.ResolveAsync`. The actual build was correct; the previews lied.
+
+Planner symptom (1.14.102): clicking Build SKU Max for OMAN opened a "Confirm SKU Max Build" dialog reading:
+
+> Items to rebuild: **0**
+> Existing rows for the period (will all be DELETED + rebuilt): **0**
+
+…even though the underlying build, if confirmed, would have correctly read UAE's whboxitems and produced a full row count. The preview ran against OMAN's own `[<DataName>].dbo.WHBoxItemsExport`, which is empty (OMAN physically ships from UAE).
+
+### Fix
+
+Three methods updated. Each now resolves a `whSourceCountry` via `CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct)` BEFORE calling `WhBoxItemsSource.ResolveAsync` — same pattern `BuildItemSkuMaxAsync` got in 1.14.102:
+
+| Method | Surfaces as | Was showing for OMAN | Now shows |
+|---|---|---|---|
+| `PreviewSkuMaxBuildAsync` | "Confirm SKU Max Build" dialog body | `0` items / `0` existing rows | Actual UAE-warehouse counts |
+| `GetSkuMaxScopeCountsAsync` | Chip next to the Scope dropdown — `"… SKUs (All N · LPM N · Non-LPM N)"` | `0 SKUs · 0 LPM · 0 Non-LPM` | Real counts from UAE's whboxitems |
+| `GetInputFreshnessAsync` | "Last WH Box load" timestamp on the SKU Max status panel | blank / never | `MAX(LPMDt)` from UAE's whboxitems |
+
+For any country WITHOUT a `LPM_CountryLink` row, `ResolveWhSourceCountryAsync` returns the country itself → zero behaviour change.
+
+### Why this slipped past 1.14.102 review
+
+I patched only `BuildItemSkuMaxAsync` because it was the "real" build path. I should have run `grep WhBoxItemsSource.ResolveAsync(conn, country` and audited every hit before declaring done. The 4 other call sites (CheckAsync, ReadBoxesAsync, gap report, diagnostic write) are SIM-Generate-side — those legitimately use the child country because SIM Generate runs for the PARENT (per the 1.14.77 design comment), so the planner picking "UAE" already passes the right country through. The 3 patched today were SKU-Max-side, and SKU Max IS run per-country (OMAN has its own SKU Max snapshot), so they need the same parent-routing as `BuildItemSkuMaxAsync`.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — added `whSourceCountry = await CountryLinkResolver.ResolveWhSourceCountryAsync(db, country, ct)` resolution at the top of `PreviewSkuMaxBuildAsync` / `GetSkuMaxScopeCountsAsync` / `GetInputFreshnessAsync`; each now passes `whSourceCountry` to `WhBoxItemsSource.ResolveAsync` instead of the raw `country`.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.102 → 1.14.103.
+- `CHANGELOG.md` — this section.
+
+### No database changes
+
+No migration. Pure code fix.
+
+### Verify after deploy
+
+1. Sidebar version `1.14.103`.
+2. SIM Generate → pick **OMAN** → the **chip next to the Scope dropdown** should show real SKU counts (e.g. "10,408 SKUs · LPM 4,500 · Non-LPM 5,908") instead of "0 · 0 · 0".
+3. Click Build SKU Max → the **"Confirm SKU Max Build" dialog** should show real `Items to rebuild` and `Existing rows for the period` numbers instead of `0 / 0`.
+4. The **"Last WH Box load"** timestamp on the SKU Max status panel should be a recent date (whatever the latest LPMDt is on UAE's whboxitems for the run period).
+
+---
+
 ## 1.14.102 — Build SKU Max: country-link routing (OMAN → UAE) + per-country lock (2026-05-21)
 
 Two changes shipped together — both touch the Build SKU Max pipeline.
