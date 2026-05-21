@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.97</Version>
-    <AssemblyVersion>1.14.97.0</AssemblyVersion>
-    <FileVersion>1.14.97.0</FileVersion>
-    <InformationalVersion>1.14.97 (Merch Need Balance + Division Summary parity: (1) Store Summary tab gets a new "Merch Need Balance" column (= MerchNeedMonth − SOH) right after Merch Need (Month). Negative values render in red (over-stocked). (2) Division Summary tab gets BOTH Merch Need (Month) AND Merch Need Balance columns, mirroring Store Summary's 1.14.94 + this release's additions. DivisionSummaryRow record gains MerchNeedMonth (read from a new SUM in the EomAgg CTE) and computed MerchNeedBalance property. Both tabs' Excel exports include the new columns.)</InformationalVersion>
+    <Version>1.14.98</Version>
+    <AssemblyVersion>1.14.98.0</AssemblyVersion>
+    <FileVersion>1.14.98.0</FileVersion>
+    <InformationalVersion>1.14.98 (Gap by UPC — persist PalletCategories + LpmMonths on LpmSimBatch so the report replays exactly what the allocator filtered. Migration 059 adds two NULL-able columns to dbo.LPMSIM_Batch: PalletCategories (varchar(500)) and LpmMonths (varchar(200)). GenerateAsync stamps them from req.PalletCategories / req.LpmMonths at Generate time. GetItemAllocationGapAsync reads them and applies the same PalletCategory IN(...) + LPMDt month-range / endExclusive cap the allocator's ReadBoxesAsync uses. Plus the small LPM endExclusive cap fix (was missing, allowed future-dated LPM boxes through). Pre-1.14.98 batches still over-count (NULL filters = no restriction) — flag in CHANGELOG.)</InformationalVersion>
   </PropertyGroup>
 
 </Project>

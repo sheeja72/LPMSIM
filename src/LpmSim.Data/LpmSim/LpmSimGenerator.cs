@@ -1174,6 +1174,16 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             Seasons              = SeasonLabel(req.Seasons),
             OverrideUsabilityPct = req.OverrideUsabilityPct,
             Warehouses           = WarehousesLabel(req.Warehouses),
+            // 1.14.98 — Persist PalletCategories + LpmMonths so the Gap by
+            // UPC report (and any future replays) can reproduce the exact
+            // box-eligibility filter the allocator used. Stored as
+            // comma-separated strings; NULL when not set (= no filter).
+            PalletCategories     = req.PalletCategories is { Count: > 0 }
+                                   ? string.Join(",", req.PalletCategories)
+                                   : null,
+            LpmMonths            = req.LpmMonths is { Count: > 0 }
+                                   ? string.Join(",", req.LpmMonths.Select(d => d.ToString("yyyy-MM")))
+                                   : null,
             // Append " (SM)" when MerchNeed was bypassed so the result page
             // makes the run mode obvious without a second column. Short suffix
             // is intentional — the FillStrategy column is varchar(20) (pre

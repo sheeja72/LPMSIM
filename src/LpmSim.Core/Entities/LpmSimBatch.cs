@@ -41,4 +41,25 @@ public class LpmSimBatch
     /// Week 1 for display purposes (no re-allocation).
     /// </summary>
     public byte? WeekNo { get; set; }
+
+    /// <summary>
+    /// 1.14.98 — Snapshot of the PalletCategories filter used at Generate
+    /// time (comma-separated list, e.g. "ELIGIBLE" or "ELIGIBLE,EXTRA").
+    /// NULL / empty = no category restriction (every category included).
+    /// Surfaced so reports like Gap by UPC can replay exactly what the
+    /// allocator saw. Pre-1.14.98 batches have NULL here — those rows
+    /// will have a broader Eligible WH Qty in the Gap by UPC report.
+    /// See migration 059.
+    /// </summary>
+    public string? PalletCategories { get; set; }
+
+    /// <summary>
+    /// 1.14.98 — Snapshot of the LPM Months filter used at Generate time.
+    /// Comma-separated <c>yyyy-MM</c> values (e.g. "2026-04,2026-05"). NULL
+    /// / empty = no specific-month restriction (allocator used the legacy
+    /// default — LPM boxes from any month up to first-of-next-month after
+    /// RunDate). Only meaningful when the run included LPM as a Box Source.
+    /// See migration 059.
+    /// </summary>
+    public string? LpmMonths { get; set; }
 }

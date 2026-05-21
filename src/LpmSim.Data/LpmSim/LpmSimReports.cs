@@ -2448,12 +2448,87 @@ SELECT {string.Join(", ", selectParts)}
         }
         var whClause = whClauseSb.ToString();
 
-        // 1.14.96 NOTE — PalletCategory and specific LPM Months are NOT
-        // stored on the LpmSimBatch row, so they CAN'T be replicated here.
-        // If the planner restricted those at generation time, this report's
-        // EligibleWhQty will be slightly larger than what the allocator
-        // actually saw. The Remaining number will then over-state the gap
-        // for the missing filters' worth of box-lines.
+        // ── Parse batch.PalletCategories (1.14.98) ─────────────────────────
+        // Persisted by migration 059 as a comma-separated list (e.g.
+        // "ELIGIBLE,EXTRA"). NULL/empty on pre-1.14.98 batches OR on runs
+        // where the planner cleared the filter — in both cases we apply no
+        // PalletCategory restriction (matches what the allocator did).
+        var pcRaw = (b.PalletCategories ?? "").Trim();
+        var pcClauseSb = new System.Text.StringBuilder();
+        var pcParms    = new List<SqlParameter>();
+        if (!string.IsNullOrEmpty(pcRaw))
+        {
+            var cats = pcRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            if (cats.Length > 0)
+            {
+                pcClauseSb.Append(" AND w.PalletCategory IN (");
+                for (int i = 0; i < cats.Length; i++)
+                {
+                    if (i > 0) pcClauseSb.Append(", ");
+                    pcClauseSb.Append("@pc").Append(i);
+                    pcParms.Add(new SqlParameter($"@pc{i}", cats[i]));
+                }
+                pcClauseSb.Append(')');
+            }
+        }
+        var pcClause = pcClauseSb.ToString();
+
+        // ── Parse batch.LpmMonths + LPM endExclusive cap (1.14.98) ─────────
+        // Persisted by migration 059 as a comma-separated list of "yyyy-MM"
+        // values. Only meaningful when the run included LPM as a source
+        // (otherwise the LPMDt IS NULL clause makes month filtering moot).
+        // When no specific months are set BUT the run is LPM-only / both,
+        // the allocator caps at the first of the month AFTER RunDate
+        // (excludes future-dated LPM tags) — replicate that with
+        // @endExclusive.
+        var lpmMonthsRaw = (b.LpmMonths ?? "").Trim();
+        var lpmMonthsParms = new List<SqlParameter>();
+        var lpmMonthsSb    = new System.Text.StringBuilder();
+        if (hasLpm && !string.IsNullOrEmpty(lpmMonthsRaw))
+        {
+            // Specific months — narrow the LPMDt filter to those month ranges.
+            var months = lpmMonthsRaw.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            var ors = new List<string>();
+            for (int i = 0; i < months.Length; i++)
+            {
+                if (!DateTime.TryParseExact(months[i], "yyyy-MM",
+                        System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.None, out var ms))
+                    continue;
+                var me = ms.AddMonths(1);
+                ors.Add($"(w.LPMDt >= @lm{i}_s AND w.LPMDt < @lm{i}_e)");
+                lpmMonthsParms.Add(new SqlParameter($"@lm{i}_s", ms));
+                lpmMonthsParms.Add(new SqlParameter($"@lm{i}_e", me));
+            }
+            if (ors.Count > 0)
+            {
+                // Wraps the LPMDt clause: when source = both, we add (LPMDt IS NULL
+                // OR month-ranges); when source = LPM-only the IS NOT NULL clause
+                // above already applies and we just AND the month ranges.
+                lpmMonthsSb.Append(" AND (").Append(string.Join(" OR ", ors)).Append(')');
+                // If we have both LPM and Non-LPM and specific months are set,
+                // the months only restrict the LPM portion — Non-LPM (LPMDt IS NULL)
+                // should still pass. Re-shape the clause to allow Non-LPM through.
+                if (hasNonLpm)
+                {
+                    var middle = lpmMonthsSb.ToString().Substring(" AND ".Length);
+                    lpmMonthsSb.Clear();
+                    lpmMonthsSb.Append(" AND (w.LPMDt IS NULL OR ").Append(middle.AsSpan(1, middle.Length - 2)).Append(')');
+                }
+            }
+        }
+        else if (hasLpm)
+        {
+            // No specific months — apply the default LPM endExclusive cap
+            // (first of next month after RunDate). For "both" sources, we
+            // wrap the cap so Non-LPM (LPMDt IS NULL) still passes through.
+            var endExclusive = new DateTime(b.RunYear, b.RunMonth, 1).AddMonths(1);
+            lpmMonthsParms.Add(new SqlParameter("@endExclusive", endExclusive));
+            lpmMonthsSb.Append(hasNonLpm
+                ? " AND (w.LPMDt IS NULL OR w.LPMDt < @endExclusive)"
+                : " AND w.LPMDt < @endExclusive");
+        }
+        var lpmMonthsClause = lpmMonthsSb.ToString();
 
         var sql = $@"
             ;WITH ItemEligible AS (
@@ -2470,7 +2545,9 @@ SELECT {string.Join(", ", selectParts)}
                    {shopEligibleClause}
                    {seasonClause}
                    {lpmDtClause}
+                   {lpmMonthsClause}                   -- 1.14.98 — LPM months filter + endExclusive cap
                    {whClause}
+                   {pcClause}                          -- 1.14.98 — PalletCategory filter (migration 059)
                  GROUP BY w.itemcode
             ),
             ItemAllocated AS (
@@ -2528,7 +2605,9 @@ SELECT {string.Join(", ", selectParts)}
         using var cmd = (SqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
-        foreach (var p in whParms) cmd.Parameters.Add(p);
+        foreach (var p in whParms)         cmd.Parameters.Add(p);
+        foreach (var p in pcParms)         cmd.Parameters.Add(p);   // 1.14.98
+        foreach (var p in lpmMonthsParms)  cmd.Parameters.Add(p);   // 1.14.98
         cmd.CommandTimeout = 300;
 
         var rows = new List<ItemAllocationGapRow>();

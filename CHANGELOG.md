@@ -23,6 +23,76 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.98 — Gap by UPC: persist PalletCategories + LpmMonths on the batch (proper filter replay) (2026-05-21)
+
+### What was wrong
+
+After 1.14.96 switched the Gap by UPC report's EligibleWhQty source to whboxitems, the planner saw 460K eligible vs ~295K expected. The over-count was due to two missing filters:
+
+1. **PalletCategories** — the page defaults to `["ELIGIBLE"]` (the typical run filter), but this list was never persisted on the batch row. The 1.14.96 report defaulted to "no filter" — pulling NON-PURCHASED / EXCLUDED / other-category boxes the allocator never saw.
+2. **LpmMonths** — same problem. The default `endExclusive` cap (`LPMDt < first-of-next-month after RunDate`) wasn't applied either, so future-dated LPM boxes leaked in.
+
+### Fix — migration 059 + persist + replay
+
+#### Schema (migration 059)
+
+```sql
+ALTER TABLE dbo.LPMSIM_Batch
+    ADD PalletCategories varchar(500) NULL;
+ALTER TABLE dbo.LPMSIM_Batch
+    ADD LpmMonths varchar(200) NULL;
+```
+
+Both NULL on pre-1.14.98 batches. Idempotent (guarded by `COL_LENGTH IS NULL`).
+
+#### Persistence at Generate time
+
+`LpmSimGenerator.GenerateAsync` now stamps both fields when inserting the Running batch row:
+
+```csharp
+PalletCategories = req.PalletCategories is { Count: > 0 }
+                   ? string.Join(",", req.PalletCategories)
+                   : null,
+LpmMonths        = req.LpmMonths is { Count: > 0 }
+                   ? string.Join(",", req.LpmMonths.Select(d => d.ToString("yyyy-MM")))
+                   : null,
+```
+
+#### Replay in Gap by UPC
+
+`GetItemAllocationGapAsync` reads the new fields and builds:
+
+- **PalletCategory filter**: `AND w.PalletCategory IN (@pc0, @pc1, …)` — only when the batch row has a non-empty list.
+- **LPM Months filter**: when specific months are persisted → `AND (w.LPMDt >= @lm0_s AND w.LPMDt < @lm0_e OR …)`; when not, the default LPM `endExclusive` cap is applied (`AND w.LPMDt < @endExclusive` where `@endExclusive = first day of (RunMonth+1)`). For "both LPM and Non-LPM" sources, the LPM cap is wrapped so Non-LPM rows (LPMDt IS NULL) still pass through.
+
+### Impact
+
+- **New batches (1.14.98+)**: Gap by UPC's EligibleWhQty will match the allocator exactly. Your batch #77's `460K` would drop to roughly `295K` on a fresh re-run.
+- **Pre-1.14.98 batches**: still over-count (PalletCategories/LpmMonths are NULL → no filter applied). The 460K stays 460K. Document this in the tab's tooltip if needed.
+
+### Files changed
+
+- `db/059_lpmsim_batch_pallet_categories_lpm_months.sql` — **NEW migration**. Adds two NULL columns to `dbo.LPMSIM_Batch`. Idempotent.
+- `src/LpmSim.Core/Entities/LpmSimBatch.cs` — `PalletCategories` + `LpmMonths` nullable properties added.
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — `GenerateAsync` stamps both fields from the request when inserting the Running batch row.
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — `GetItemAllocationGapAsync` reads `b.PalletCategories` + `b.LpmMonths`, builds the matching SQL clauses, threads new parameters through.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.97 → 1.14.98.
+- `CHANGELOG.md` — this section.
+
+### Verify after deploy
+
+1. **Run migration 059 on prod:** `db/059_lpmsim_batch_pallet_categories_lpm_months.sql`. Two new NULL columns added.
+2. **Sidebar version** shows `1.14.98`.
+3. **Run a fresh SIM Generate** with the typical filters (PalletCategories = ELIGIBLE, no LPM Months). The new batch will have those persisted.
+4. **Open Gap by UPC on the new batch.** EligibleWhQty total should now match the allocator's view (~ what you'd get with `SELECT SUM(Qty) FROM whboxitems WHERE Country=… AND PalletCategory='ELIGIBLE' AND …`).
+5. **Pre-1.14.98 batches** (e.g. your #77) will still show the over-count — flag in the description that those rows pre-date the snapshot.
+
+### Operator follow-up
+
+⚠️ **Migration 059 needs to run on prod** before the Generate code can write the new columns. Without it, the INSERT will fail with "invalid column name". Apply the migration first; THEN the deploy.
+
+---
+
 ## 1.14.97 — Merch Need Balance column + Division Summary parity (2026-05-21)
 
 ### What's new
