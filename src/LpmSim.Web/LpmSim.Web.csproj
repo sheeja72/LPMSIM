@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.105</Version>
-    <AssemblyVersion>1.14.105.0</AssemblyVersion>
-    <FileVersion>1.14.105.0</FileVersion>
-    <InformationalVersion>1.14.105 — WH SKU Investigation header alignment. New opt-in `lpm-table-tall-header` CSS class bumps the header row height to 56px and bottom-aligns labels so multi-line headers ("Total / SKU Max", "Avg / SKU Max", "Stores SOH", "Blocked Qty", "Blocked Stores") line up cleanly with single-word headers ("Slashed"). Applied ONLY to the WH SKU Investigation table — other tables keep their compact default header.</InformationalVersion>
+    <Version>1.14.106</Version>
+    <AssemblyVersion>1.14.106.0</AssemblyVersion>
+    <FileVersion>1.14.106.0</FileVersion>
+    <InformationalVersion>1.14.106 — SIM Result Preview reports now include child-country stores (OMAN under UAE batch). The 1.14.77 cross-country allocator design writes OMAN store allocations to LPMSIM_Output for UAE batches, but every report SQL filtered them out via `Country = @country`. This release replaces the single-country filter with `Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))` — driven by a new `ResolveReportCountriesAsync` helper that returns the parent + children CSV (e.g. "UAE,OMAN"). Applied across Store Summary, Division Summary, Summary per Store×Division, Item Details, Gap by UPC, and Custom Report (≈20 SQL filter sites in LpmSimReports.cs). SIM Boxes / Allocation Trace / Aggregates / Allocation Gap were already batch-only and needed no change. No DB migration.</InformationalVersion>
   </PropertyGroup>
 
 </Project>
