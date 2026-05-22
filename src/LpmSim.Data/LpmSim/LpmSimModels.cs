@@ -34,6 +34,12 @@ public record LpmSimReadiness(
     public int?    CurrentBatchOverrideUsabilityPct { get; init; }
     public string? CurrentBatchWarehouses           { get; init; }
     public string? CurrentBatchFillStrategy         { get; init; }
+    /// <summary>
+    /// 1.14.107 — Per-(Store, Div) cap formula the existing batch ran with.
+    /// "EOM_BAL" / "MNM" / null (legacy pre-migration-061 batches, treated
+    /// as "MNM" for display purposes since they all ran with MerchNeedMonth).
+    /// </summary>
+    public string? CurrentBatchCapMode              { get; init; }
 
     /// <summary>RunDate stored on the batch (the planning period the run targets).</summary>
     public DateTime? CurrentRunDate { get; init; }
@@ -127,6 +133,31 @@ public enum LpmSimFillStrategy
     EqualFillRate = 1,
 }
 
+/// <summary>
+/// 1.14.107 — Which per-(Store, Div) cap formula the allocator uses.
+/// SKU Max stays as the per-item cap in both modes; only the per-(Store, Div)
+/// cap differs.
+///
+/// <list type="bullet">
+/// <item><see cref="EomBalancePlusSkuMax"/> — cap = <c>TargetEOM − DivSOH − cumDiv</c>.
+/// Conservative: only fills to the EOM target, no expected-sell-through buffer.
+/// New default in 1.14.107.</item>
+/// <item><see cref="MerchNeedMonthPlusSkuMax"/> — cap =
+/// <c>MerchNeedMonth − cumDiv</c> where <c>MerchNeedMonth = TargetEOM − SOH + TargetSales</c>.
+/// Adds the month's expected sell-through cushion on top of EOM Balance so
+/// the store can sell through and still hit TargetEOM. Legacy behaviour
+/// (pre-1.14.107 default).</item>
+/// </list>
+///
+/// <para>Persisted on <c>LPMSIM_Batch.CapMode</c> ("EOM_BAL" / "MNM") so
+/// the Result Preview can show which mode the batch ran with.</para>
+/// </summary>
+public enum LpmSimCapMode
+{
+    EomBalancePlusSkuMax     = 0,
+    MerchNeedMonthPlusSkuMax = 1,
+}
+
 public class LpmSimGenerateRequest
 {
     public string Country { get; set; } = "";
@@ -190,6 +221,17 @@ public class LpmSimGenerateRequest
     ///     SKU Max when usability % is met.
     /// </summary>
     public bool IgnoreMerchNeed { get; set; } = false;
+
+    /// <summary>
+    /// 1.14.107 — Per-(Store, Div) cap formula. Default
+    /// <see cref="LpmSimCapMode.EomBalancePlusSkuMax"/> caps each store
+    /// at <c>TargetEOM − DivSOH − cumDiv</c>. Switch to
+    /// <see cref="LpmSimCapMode.MerchNeedMonthPlusSkuMax"/> to use the
+    /// legacy (pre-1.14.107) cap that adds the month's expected sell-through
+    /// cushion. Ignored when <see cref="IgnoreMerchNeed"/> is true
+    /// (SKU Max becomes the only cap regardless).
+    /// </summary>
+    public LpmSimCapMode CapMode { get; set; } = LpmSimCapMode.EomBalancePlusSkuMax;
 
     /// <summary>
     /// When true, the eligibility filter does NOT apply

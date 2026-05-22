@@ -22,10 +22,10 @@
          AssemblyInformationalVersion is what Assembly.GetCustomAttribute
          reads at runtime. See CHANGELOG.md at the repo root for the
          per-version release notes. -->
-    <Version>1.14.106</Version>
-    <AssemblyVersion>1.14.106.0</AssemblyVersion>
-    <FileVersion>1.14.106.0</FileVersion>
-    <InformationalVersion>1.14.106 — SIM Result Preview reports now include child-country stores (OMAN under UAE batch). The 1.14.77 cross-country allocator design writes OMAN store allocations to LPMSIM_Output for UAE batches, but every report SQL filtered them out via `Country = @country`. This release replaces the single-country filter with `Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))` — driven by a new `ResolveReportCountriesAsync` helper that returns the parent + children CSV (e.g. "UAE,OMAN"). Applied across Store Summary, Division Summary, Summary per Store×Division, Item Details, Gap by UPC, and Custom Report (≈20 SQL filter sites in LpmSimReports.cs). SIM Boxes / Allocation Trace / Aggregates / Allocation Gap were already batch-only and needed no change. No DB migration.</InformationalVersion>
+    <Version>1.14.107</Version>
+    <AssemblyVersion>1.14.107.0</AssemblyVersion>
+    <FileVersion>1.14.107.0</FileVersion>
+    <InformationalVersion>1.14.107 — New "EOM Balance + SKU Max" cap mode (now the DEFAULT Run Option). Cap = TargetEOM − DivSOH − cumDiv per (Store, Div), strictly more conservative than the legacy MerchNeedMonth + SKU Max cap (which adds the month's expected sell-through cushion on top of EOM Balance). Run Option dropdown is now a 3-way choice: "EOM Balance + SKU Max" (default), "MerchNeed (Month) + SKU Max" (legacy default, opt-in), "SKU Max only" (existing IgnoreMerchNeed mode). The chosen mode is persisted on LPMSIM_Batch.CapMode (migration 061 — varchar(20), 'EOM_BAL' / 'MNM'). Result Preview header shows a "Cap: …" chip per batch so planners see which cap drove each historical batch. Negative DivSOH intentionally inflates the EOM Balance cap (planner choice — represents real make-whole headroom). Apply migration 061 BEFORE deploy.</InformationalVersion>
   </PropertyGroup>
 
 </Project>

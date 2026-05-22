@@ -368,6 +368,8 @@ public class LpmDbContext(DbContextOptions<LpmDbContext> options) : DbContext(op
             e.Property(x => x.Seasons).HasMaxLength(20);
             e.Property(x => x.Warehouses).HasMaxLength(200);
             e.Property(x => x.FillStrategy).HasMaxLength(40);
+            // 1.14.107 — per-(Store, Div) cap formula short code: 'EOM_BAL' or 'MNM'.
+            e.Property(x => x.CapMode).HasMaxLength(20);
         });
 
         mb.Entity<LpmSimOutput>(e =>

@@ -430,19 +430,22 @@
             </div>
         </MudItem>
         <MudItem xs="12" sm="6" md="5" Class="d-flex flex-wrap align-center gap-2">
-            @* 1.14.89 — Run option dropdown replaces the "SKU Max only" checkbox.
-               Same underlying _ignoreMerchNeed bool, just clearer UX:
-                 * "MerchNeed (Month) Balance + SKU Max Balance"  → _ignoreMerchNeed = false  (default)
-                 * "SKU Max Balance only"                          → _ignoreMerchNeed = true
-               Behaviour at the allocator layer is unchanged from 1.14.88. *@
-            <MudTooltip Text="Pick the cap set used in Phase 1a/2a. 'MerchNeed (Month) + SKU Max' is the standard cap. 'SKU Max only' bypasses the monthly demand cap and lets allocation push past MerchNeedMonth — use when you want SKUMax to be the sole ceiling (EqualFillRate also switches its denominator to SkuMax)."
+            @* 1.14.107 — Run Option expanded to 3 mutually-exclusive choices.
+               Maps onto (CapMode, IgnoreMerchNeed) pair under the hood:
+                 * "EOM Balance + SKU Max"        → CapMode=EomBalancePlusSkuMax,   IgnoreMerchNeed=false (NEW DEFAULT)
+                 * "MerchNeed (Month) + SKU Max"  → CapMode=MerchNeedMonthPlusSkuMax, IgnoreMerchNeed=false (legacy default)
+                 * "SKU Max only"                 → CapMode=*, IgnoreMerchNeed=true (no Div cap)
+               Conservative move: EOM Balance allocates ≤ MerchNeed (no
+               TargetSales cushion). See LpmSimCapMode enum + db/061_lpmsim_batch_capmode.sql. *@
+            <MudTooltip Text="Pick the per-(Store, Div) cap. 'EOM Balance + SKU Max' (default) caps at TargetEOM − DivSOH, the most conservative — only fills to month-end target. 'MerchNeed (Month) + SKU Max' adds the month's expected sell-through buffer (legacy 1.14.87 behaviour). 'SKU Max only' bypasses the Div cap entirely and lets SKU Max be the sole ceiling."
                         Placement="Placement.Top">
-                <MudSelect T="bool" Value="_ignoreMerchNeed"
-                           ValueChanged="(bool v) => _ignoreMerchNeed = v"
+                <MudSelect T="LpmRunOption" Value="_runOption"
+                           ValueChanged="(LpmRunOption v) => _runOption = v"
                            Label="Run Option" Dense="true" Margin="Margin.Dense"
                            Variant="Variant.Outlined" Style="min-width:300px;">
-                    <MudSelectItem T="bool" Value="false">MerchNeed (Month) Balance + SKU Max Balance</MudSelectItem>
-                    <MudSelectItem T="bool" Value="true">SKU Max Balance only</MudSelectItem>
+                    <MudSelectItem T="LpmRunOption" Value="LpmRunOption.EomBalancePlusSkuMax">EOM Balance + SKU Max</MudSelectItem>
+                    <MudSelectItem T="LpmRunOption" Value="LpmRunOption.MerchNeedMonthPlusSkuMax">MerchNeed (Month) + SKU Max</MudSelectItem>
+                    <MudSelectItem T="LpmRunOption" Value="LpmRunOption.SkuMaxOnly">SKU Max only</MudSelectItem>
                 </MudSelect>
             </MudTooltip>
             <MudTooltip Text="When ON, drops the ShopEligible <> 'E' filter so already-shopped boxes (ShopEligible='E') are also pulled into SIM."
@@ -534,6 +537,7 @@
                     var _bRr   = _readiness.CurrentBatchOverrideUsabilityPct;
                     var _bWh   = _readiness.CurrentBatchWarehouses;
                     var _bFs   = _readiness.CurrentBatchFillStrategy;
+                    var _bCap  = _readiness.CurrentBatchCapMode;            // 1.14.107
                     var _stCol = _bSt == "Approved" ? "#16a34a" : (_bSt == "Draft" ? "#d97706" : "#475569");
                     <span style="font-size:1.35rem;font-weight:800;color:#2563eb;line-height:1;">
                         #@_bnNo
@@ -565,6 +569,7 @@
                         &nbsp;·&nbsp; Seasons: <strong style="color:#334155;">@(string.IsNullOrEmpty(_bSea) ? "(unknown)" : _bSea)</strong>
                         &nbsp;·&nbsp; Box%: <strong style="color:#334155;">@(_bRr?.ToString() ?? "—")</strong>
                         &nbsp;·&nbsp; Fill: <strong style="color:#334155;">@FillLabel(_bFs)</strong>
+                        &nbsp;·&nbsp; Cap: <strong style="color:#334155;">@CapModeLabel(_bCap)</strong>
                         &nbsp;·&nbsp; WH: <strong style="color:#334155;">@(string.IsNullOrEmpty(_bWh) ? "(All)" : _bWh)</strong>
                     </span>
                     @if (!FilterMatchesCurrent())
@@ -2583,12 +2588,38 @@
     // Equal fill % is still selectable on the radio for cases where the
     // planner wants proportional balancing across stores instead.
     private LpmSimFillStrategy _fillStrategy = LpmSimFillStrategy.EqualPerStore;
+
     /// <summary>
-    /// When TRUE the allocator ignores the Merch Need (Week) cap and sizes
-    /// allocations against SKU Max only. Surfaced as a checkbox next to the
-    /// fill-strategy radios — see LpmSimGenerateRequest.IgnoreMerchNeed.
+    /// 1.14.107 — Single dropdown for the per-(Store, Div) cap choice. Maps
+    /// to a (CapMode, IgnoreMerchNeed) pair when building the request — see
+    /// <see cref="GenerateRequestCapMode"/> and <see cref="GenerateRequestIgnoreMerch"/>.
     /// </summary>
-    private bool _ignoreMerchNeed = false;
+    private LpmRunOption _runOption = LpmRunOption.EomBalancePlusSkuMax;
+
+    /// <summary>
+    /// 1.14.107 — Single dropdown backing for the per-(Store, Div) cap.
+    /// Combines the legacy `IgnoreMerchNeed` flag with the new
+    /// `LpmSimCapMode` enum into one mutually-exclusive choice for the UI.
+    /// </summary>
+    private enum LpmRunOption
+    {
+        EomBalancePlusSkuMax     = 0,   // NEW DEFAULT (1.14.107)
+        MerchNeedMonthPlusSkuMax = 1,
+        SkuMaxOnly               = 2,
+    }
+
+    /// <summary>Derive the request-level CapMode from the dropdown choice.</summary>
+    private LpmSimCapMode GenerateRequestCapMode => _runOption switch
+    {
+        LpmRunOption.MerchNeedMonthPlusSkuMax => LpmSimCapMode.MerchNeedMonthPlusSkuMax,
+        // EOM Balance + SKU Max  AND  SKU Max only both use the EOM cap mode at
+        // the model layer; SKU Max only sets IgnoreMerchNeed=true which makes
+        // the cap mode moot (the Div cap isn't applied at all).
+        _                                      => LpmSimCapMode.EomBalancePlusSkuMax,
+    };
+
+    /// <summary>Derive the legacy IgnoreMerchNeed flag from the dropdown choice.</summary>
+    private bool GenerateRequestIgnoreMerch => _runOption == LpmRunOption.SkuMaxOnly;
 
     /// <summary>
     /// When TRUE the eligibility filter drops the ShopEligible &lt;&gt; 'E'
@@ -4116,7 +4147,10 @@
                 Warehouses           = _selectedWarehouses.ToList(),
                 VerboseTrace         = _verboseTrace,
                 FillStrategy         = _fillStrategy,
-                IgnoreMerchNeed      = _ignoreMerchNeed,
+                // 1.14.107 — Run Option is now a 3-way dropdown; map to the
+                // model's (CapMode, IgnoreMerchNeed) pair.
+                CapMode              = GenerateRequestCapMode,
+                IgnoreMerchNeed      = GenerateRequestIgnoreMerch,
                 IncludePurchasedBoxes = _includePurchasedBoxes,
                 PalletCategories     = _selectedPalletCategories.ToList(),
                 LpmMonths            = _selectedLpmMonths.ToList(),
@@ -4157,7 +4191,9 @@
                     seasons            = CurrentSeasons.ToString(),
                     overrideUsabilityPct = _overridePct,
                     fillStrategy       = _fillStrategy.ToString(),
-                    ignoreMerchNeed    = _ignoreMerchNeed,
+                    runOption          = _runOption.ToString(),                  // 1.14.107
+                    capMode            = GenerateRequestCapMode.ToString(),      // 1.14.107
+                    ignoreMerchNeed    = GenerateRequestIgnoreMerch,
                     includePurchased   = _includePurchasedBoxes,
                     palletCategories   = _selectedPalletCategories.ToList(),
                     warehouses         = _selectedWarehouses.ToList(),
@@ -4651,6 +4687,20 @@
         };
         return skuOnly ? $"{pretty} (SKU Max only)" : pretty;
     }
+
+    /// <summary>
+    /// 1.14.107 — Render the short CapMode code from LPMSIM_Batch into a
+    /// planner-friendly label. NULL on pre-migration-061 batches → "MerchNeed
+    /// (Month)" (those batches all ran under the legacy MNM cap).
+    /// </summary>
+    private static string CapModeLabel(string? raw)
+        => raw switch
+        {
+            "EOM_BAL" => "EOM Balance",
+            "MNM"     => "MerchNeed (Month)",
+            null or "" => "MerchNeed (Month)",   // legacy batches: pre-1.14.107
+            _         => raw,
+        };
 
     /// <summary>
     /// Format any exception with up to 5 levels of InnerException so the real

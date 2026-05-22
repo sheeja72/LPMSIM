@@ -23,6 +23,77 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.107 — Run Option: new "EOM Balance + SKU Max" cap mode (now the default) (2026-05-22)
+
+### What's new
+
+The **Run Option** dropdown on SIM Generate is now a 3-way choice:
+
+| Option | Per-(Store, Div) cap formula | Notes |
+|---|---|---|
+| **EOM Balance + SKU Max** | `TargetEOM − DivSOH − cumDiv` | **NEW DEFAULT** (1.14.107). Most conservative — only fills to the EOM target, no expected-sell-through buffer. |
+| **MerchNeed (Month) + SKU Max** | `MerchNeedMonth − cumDiv` = `(TargetEOM − SOH + TargetSales) − cumDiv` | Legacy default (1.14.87 onwards). Adds the month's expected sell-through cushion on top of EOM Balance so the store can sell through and still hit TargetEOM. |
+| **SKU Max only** | (no Div cap) | Existing `IgnoreMerchNeed` mode. SKU Max is the sole ceiling. |
+
+SKU Max stays as the per-item cap in all three modes; only the per-(Store, Div) cap differs.
+
+### Why the change
+
+The previous 1.14.87 default (MerchNeedMonth + SkuMax) routinely pushed Store Summary's "Merch Need Balance" column **negative** (e.g. −25,649 / −130K on multiple stores in May-2026 UAE), meaning the allocator was over-shipping past the monthly demand by the TargetSales cushion. The planner asked to default to a stricter cap that respects TargetEOM as a hard ceiling.
+
+### Trade-off (planner accepted)
+
+- New default allocates **less** per run than the legacy default — by exactly `TargetSales` per (Store, Div).
+- Saves WH stock for next month rather than pushing it into the current month's plan.
+- "MerchNeed (Month)" remains opt-in for cases where the planner wants the cushion (high-volume month, or explicitly trying to clear WH).
+
+### Migration 061 — `LPMSIM_Batch.CapMode`
+
+```sql
+ALTER TABLE LPMSIM.dbo.LPMSIM_Batch ADD CapMode varchar(20) NULL;
+UPDATE LPMSIM.dbo.LPMSIM_Batch SET CapMode = 'MNM' WHERE CapMode IS NULL;
+```
+
+Backfills existing batches to `'MNM'` because every batch generated before 1.14.107 ran under the legacy MerchNeedMonth cap. New batches stamp `'EOM_BAL'` or `'MNM'` based on the Run Option chosen at Generate time.
+
+### UI surfaces
+
+- **Generate** — Run Option dropdown gains the new default option at the top.
+- **Result Preview header** — new "Cap: …" chip showing which cap each batch ran with (EOM Balance / MerchNeed (Month) / blank for SKU Max only). Legacy NULL rows render as "MerchNeed (Month)".
+
+### Negative DivSOH — planner choice
+
+The EOM Balance cap uses raw `divSoh` (no `Math.Max(0, divSoh)` clamp), opposite of how SOH and SkuMax are clamped (1.14.31). Rationale: a store with negative DivSOH (oversold or LocStock ETL anomaly) is in arrears against the plan; the deficit represents real make-whole headroom and should let the cap stretch by that amount so a single shipment can bring them back to TargetEOM.
+
+If you want the symmetric clamp later, flip one line in `AllocateLineNormal`:
+```csharp
+decimal db = req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax
+    ? s.TargetEOM - Math.Max(0, divSoh) - cumDiv   // <-- add Math.Max here
+    : s.MerchNeedMonth - cumDiv;
+```
+
+### Files changed
+
+- `db/061_lpmsim_batch_capmode.sql` *(new)* — adds the column and backfills existing rows to 'MNM'.
+- `src/LpmSim.Core/Entities/LpmSimBatch.cs` — `CapMode` property.
+- `src/LpmSim.Data/LpmDbContext.cs` — column mapping (`HasMaxLength(20)`).
+- `src/LpmSim.Data/LpmSim/LpmSimModels.cs` — new `LpmSimCapMode` enum + `CapMode` property on `LpmSimGenerateRequest` + `CurrentBatchCapMode` on readiness.
+- `src/LpmSim.Data/LpmSim/LpmSimGenerator.cs` — 4 cap sites switched to mode-aware (`AllocateLineNormal` entry-gate cap; `AllocateLineNormal` EqualFillRate entry-gate; `AllocateLineNormal` EqualFillRate denominator; `AllocateLineRoundRobin` within-tier sort key). `BuildAsync` persists `CapMode` on insert. `CheckAsync` surfaces `CurrentBatchCapMode` for the UI chip.
+- `src/LpmSim.Web/Components/Pages/LPM/LpmSimGenerate.razor` — Run Option dropdown widened to 3 options; new `_runOption` field + `LpmRunOption` enum + `GenerateRequestCapMode` / `GenerateRequestIgnoreMerch` derivations; `_ignoreMerchNeed` field removed (replaced by derivation); Result Preview header gets the "Cap: …" chip; new `CapModeLabel` helper.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.106 → 1.14.107.
+- `CHANGELOG.md` — this section.
+
+### Deploy steps
+
+1. **Apply `db/061_lpmsim_batch_capmode.sql` to prod DB FIRST.** Without the column, the batch INSERT will throw "Invalid column name 'CapMode'".
+2. Merge PR + deploy.
+3. Sidebar version `1.14.107`.
+4. SIM Generate → Run Option dropdown shows 3 options with **EOM Balance + SKU Max** pre-selected.
+5. Generate a UAE batch with the default — Result Preview header shows `Cap: EOM Balance`.
+6. Compare to a previous batch (pre-1.14.107) which shows `Cap: MerchNeed (Month)`. Confirm the new batch's Store Summary `Merch Need Balance` column is no longer negative (or much less so).
+
+---
+
 ## 1.14.106 — SIM Result Preview: include child-country stores (OMAN under UAE batch) (2026-05-21)
 
 ### What was wrong
