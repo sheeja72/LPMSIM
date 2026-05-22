@@ -442,6 +442,9 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             CurrentBatchOverrideUsabilityPct = existing?.OverrideUsabilityPct,
             CurrentBatchWarehouses           = existing?.Warehouses,
             CurrentBatchFillStrategy         = existing?.FillStrategy,
+            // 1.14.107 — Surface the cap-formula short code so the Result
+            // Preview header can show a "Cap: …" chip per batch.
+            CurrentBatchCapMode              = existing?.CapMode,
             CurrentRunDate                   = existing?.RunDate,
             CurrentCreateTS                  = existing?.CreateTS,
             CurrentCreatedBy                 = existing?.CreatedBy,
@@ -1277,6 +1280,12 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // (ADM, Reports, Production Schedule) can tell which week's
             // Merch Need cap drove the allocation.
             WeekNo               = req.WeekNo,
+            // 1.14.107 — Persist the cap-formula mode so the Result Preview
+            // can show planners which cap drove the allocation. Short code
+            // matches migration 061: "EOM_BAL" / "MNM".
+            CapMode              = req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax
+                                       ? "EOM_BAL"
+                                       : "MNM",
         };
         db.LpmSimBatches.Add(batch);
         await db.SaveChangesAsync(ct);   // get LPMBatchNo
@@ -1924,31 +1933,45 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
             // divSohArr) keep the RAW values so the planner can spot the
             // underlying negative-stock anomaly in the Allocation Trace tab.
             var effSoh    = Math.Max(0, soh);
-            // 1.14.87 — effDivSoh no longer needed: the EOM Balance entry gate
-            // (TargetEOM − DivSOH ≤ 0) was removed. MerchNeedMonth (TargetEOM −
-            // SOH + TargetSales) subsumes it — a store with no headroom for the
-            // month will have MerchNeedMonth ≤ 0 and fail the cap check below.
             var sb = skuMax - effSoh - cumItem;
-            // 1.14.87 — MerchNeedWeek cap → MerchNeedMonth cap. The variable
-            // is still named `db` (DivBalance) inside the allocator for
-            // brevity; only the source column changed.
-            var db = s.MerchNeedMonth - cumDiv;
+            // 1.14.107 — Cap formula is mode-driven (req.CapMode):
+            //   • EomBalancePlusSkuMax (default since 1.14.107):
+            //       db = TargetEOM − DivSOH − cumDiv
+            //   • MerchNeedMonthPlusSkuMax (legacy, opt-in):
+            //       db = MerchNeedMonth − cumDiv   (matches 1.14.87 default)
+            //
+            // EOM Balance mode does NOT clamp divSoh at 0 — chosen by the
+            // planner in 1.14.107. A negative DivSOH (store currently in
+            // arrears: oversold or data anomaly in LPM_LocStock) INFLATES
+            // the cap by the deficit so the make-whole shipment can reach
+            // TargetEOM. This is opposite of how SOH/SkuMax is clamped
+            // (1.14.31) — the planner's reasoning is that the deficit
+            // represents real headroom in the store's plan.
+            decimal db = req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax
+                ? s.TargetEOM - divSoh - cumDiv
+                : s.MerchNeedMonth - cumDiv;
             skuBalArr[i] = sb; divBalArr[i] = db;
             if (sb <= 0)         { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_SKUMAX"); continue; }
             if (!ignoreMerch && db <= 0)
-            { dead[i] = true; if (req.VerboseTrace) skipDecision.TryAdd(s.StoreID, "SKIP_MNM"); continue; }
-            // 1.14.87 — Removed: the separate EOM Balance entry gate
-            // ((TargetEOM − DivSOH) ≤ 0). MerchNeedMonth = TargetEOM − SOH +
-            // TargetSales already encodes "is there room before the month
-            // ceiling?" — if MNM is ≤ 0, the cap check above kills the store.
-            // The Reports/Trace tab will stop seeing SKIP_EOM_BALANCE rows on
-            // new batches; old batches retain the legacy reason text.
-            // EqualFillRate normally requires MerchNeedMonth > 0 to compute fillRate.
-            // In IgnoreMerchNeed mode the denominator becomes SkuMax instead, so
-            // stores with MerchNeedMonth = 0 are still candidates.
-            if (req.FillStrategy == LpmSimFillStrategy.EqualFillRate
-                && !ignoreMerch && s.MerchNeedMonth <= 0m)
-            { dead[i] = true; }
+            {
+                dead[i] = true;
+                if (req.VerboseTrace)
+                    skipDecision.TryAdd(s.StoreID,
+                        req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax ? "SKIP_EOM_BAL" : "SKIP_MNM");
+                continue;
+            }
+            // EqualFillRate normally requires the cap headroom denominator > 0
+            // to compute fillRate. In IgnoreMerchNeed mode the denominator
+            // becomes SkuMax instead, so stores with cap = 0 are still candidates.
+            // 1.14.107 — denominator picks TargetEOM − DivSOH (EOM mode) or
+            // MerchNeedMonth (MNM mode).
+            if (req.FillStrategy == LpmSimFillStrategy.EqualFillRate && !ignoreMerch)
+            {
+                decimal capCeiling = req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax
+                    ? s.TargetEOM - divSoh
+                    : s.MerchNeedMonth;
+                if (capCeiling <= 0m) dead[i] = true;
+            }
             if (req.FillStrategy == LpmSimFillStrategy.EqualFillRate
                 && ignoreMerch && skuMax <= 0)
             { dead[i] = true; }
@@ -1987,7 +2010,16 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
                     {
                         // current cumDiv = startCumDv[i] + deltaDiv[i]
                         var cur = startCumDv[i] + deltaDiv[i];
-                        fr = (decimal)cur / s.MerchNeedMonth;   // 1.14.87 — MNW → MNM
+                        // 1.14.107 — Denominator matches the active cap formula.
+                        // EOM mode: TargetEOM − DivSOH (cap ceiling). MNM mode:
+                        // MerchNeedMonth (legacy 1.14.87 behaviour). Guard against
+                        // div-by-zero: a store with capCeiling ≤ 0 is already in
+                        // `dead[]` (entry gate above) so we wouldn't reach here,
+                        // but the safety check costs nothing.
+                        decimal capDenom = req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax
+                            ? s.TargetEOM - divSohArr[i]
+                            : s.MerchNeedMonth;
+                        fr = capDenom > 0m ? (decimal)cur / capDenom : 1m;
                     }
                     if (fr < bestFill) { bestFill = fr; bestIdx = i; }
                 }
@@ -2248,11 +2280,24 @@ public class LpmSimGenerator(IDbContextFactory<LpmDbContext> dbFactory, ICurrent
         foreach (var g in GradeOrder)
         {
             if (!byGrade.TryGetValue(g, out var gStores)) continue;
+            // 1.14.107 — Within-tier sort key matches the active cap formula
+            // so the "most-undersupplied store first" ordering stays meaningful:
+            //   • EOM mode: TargetEOM − DivSOH − cumDiv (DESC)
+            //   • MNM mode: MerchNeedMonth − cumDiv      (DESC; legacy 1.14.87)
+            // MNM is still NOT a hard cap in 1b/2b (planner spec: RR can push
+            // past monthly demand for partial-box fill); it only drives ORDER.
             byGrade[g] = gStores
                 .OrderBy(s => s.CountryPriority)        // 1.14.88 — parent country first
                 .ThenByDescending(s =>
-                    s.MerchNeedMonth
-                    - allocStoreDiv.GetValueOrDefault((s.StoreID, divCode), 0))
+                {
+                    var cumDivForSort = allocStoreDiv.GetValueOrDefault((s.StoreID, divCode), 0);
+                    if (req.CapMode == LpmSimCapMode.EomBalancePlusSkuMax)
+                    {
+                        var divSohForSort = sohByStoreDiv.GetValueOrDefault((s.StoreID, divCode), 0);
+                        return s.TargetEOM - divSohForSort - cumDivForSort;
+                    }
+                    return (decimal)(s.MerchNeedMonth - cumDivForSort);
+                })
                 .ToList();
         }
 

@@ -62,4 +62,17 @@ public class LpmSimBatch
     /// See migration 059.
     /// </summary>
     public string? LpmMonths { get; set; }
+
+    /// <summary>
+    /// 1.14.107 — Per-(Store, Div) cap formula the allocator used. Short
+    /// codes persisted as varchar(20):
+    /// <list type="bullet">
+    ///   <item><c>"EOM_BAL"</c> — <c>TargetEOM − DivSOH − cumDiv</c> (new default).</item>
+    ///   <item><c>"MNM"</c>     — <c>MerchNeedMonth − cumDiv</c> (legacy / pre-1.14.107).</item>
+    /// </list>
+    /// NULL on pre-migration-061 batches; reports treat NULL as <c>"MNM"</c>
+    /// for back-compat (those batches definitely ran with MerchNeedMonth
+    /// since EOM Balance mode didn't exist yet). See migration 061.
+    /// </summary>
+    public string? CapMode { get; set; }
 }
