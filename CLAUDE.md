@@ -78,13 +78,17 @@ Before deleting any file, overwriting existing code, dropping database records, 
 
 The following actions require explicit in-session confirmation before executing, no exceptions:
 
-\- Deploying or pushing to any environment (staging, production, etc.)
+\- Merging a pull request into `main` (this is the prod deploy trigger — GitHub Actions ships every merge to `main` straight to Azure App Service `bfl-lpmsim`)
 
 \- Running migrations or schema changes on any database
 
 \- Sending any email, message, or external API call
 
 \- Executing any command with irreversible external side effects
+
+
+
+Pushes to feature branches are EXEMPT from per-push confirmation: branch protection on `main` means a pushed feature branch cannot deploy without an explicit PR-merge approval. Push freely to feature branches; the merge is the prod gate.
 
 
 
