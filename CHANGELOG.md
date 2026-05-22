@@ -23,6 +23,74 @@ The version surfaces in the sidebar footer at runtime so operators can verify wh
 
 ---
 
+## 1.14.106 — SIM Result Preview: include child-country stores (OMAN under UAE batch) (2026-05-21)
+
+### What was wrong
+
+The 1.14.77 allocator design ships UAE batches with OMAN stores included (since OMAN physically ships from UAE's warehouse). The allocator writes those OMAN allocations into `LPMSIM_Output` correctly — but **every report SQL filtered them out** at multiple sites via `WHERE Country = @country` (where `@country` was the batch's single country, "UAE").
+
+Symptom on the SIM Generate Result Preview: 53 UAE stores shown on Store Summary, but no OMAN stores — even though the allocator did allocate to them. Aggregates undercounted by the OMAN portion. Same blind spot on every other tab driven by an EOM / DataSettings / SkuMax join.
+
+### Fix
+
+New helper in `LpmSimReportService`:
+
+```csharp
+private static async Task<string> ResolveReportCountriesAsync(
+    LpmDbContext db, string batchCountry, CancellationToken ct)
+{
+    var parent   = batchCountry.Trim();
+    var children = await CountryLinkResolver.GetChildCountriesAsync(db, parent, ct);
+    return children.Count == 0 ? parent : parent + "," + string.Join(",", children);
+}
+```
+
+Returns `"UAE,OMAN"` for a UAE batch (because of the existing `LPM_CountryLink(ChildCountry=OMAN, ParentCountry=UAE, IsActive=1)` row), or `"KSA"` alone for a KSA batch.
+
+Every country-filter site in `LpmSimReports.cs` switched from `= @country` to `IN (SELECT value FROM STRING_SPLIT(@countries, ','))`, and the parameter dict now passes `@countries` (CSV) instead of `@country` (single string). `STRING_SPLIT` requires SQL Server 2016+ compatibility — we're well past that.
+
+### Reports updated
+
+| Report method | Tab name | Sites patched |
+|---|---|---|
+| `GetStoreSummaryAsync` | Store Summary | EomAgg, SohAgg, AllStores, CROSS APPLY ds (4) |
+| `GetEomSummaryAsync` | Summary (Per Store × Division) | ItemDivLs, SohAgg, OUTER APPLY ds, final WHERE (4) |
+| `GetDivisionSummaryAsync` | Division Summary | #ItemDivLs, EomAgg, SohAgg (3) |
+| `GetItemDetailsAsync` | Item Details | ItemDivLs, SohAgg, SkuMaxAgg, OUTER APPLY ds, LPM_EOM_Output join (5) |
+| `GetItemAllocationGapAsync` | Gap by UPC | ItemSoh, ItemSkuMaxAgg (2) |
+| `RunCustomReportAsync` | Custom Report | ItemDivLs, SohAgg, DivSohAgg, SkuMaxAgg, OUTER APPLY ds, LPM_EOM_Output join (6) |
+
+Plus the 6 parameter-dict changes (one per method).
+
+### Reports NOT changed (already correct)
+
+- **SIM Boxes** (`GetBoxDetailsAsync`) — batch-only filter; OMAN allocations land in the batch automatically.
+- **Allocation Trace** (`GetAllocTraceAsync` / `GetAllocTraceCountsAsync`) — batch-only filter.
+- **Batch Aggregates** (`GetBatchAggregatesAsync`) — batch-only filter.
+- **Allocation Gap** (`GetUnallocatedDiagnosticAsync`) — LINQ on `LPMSIM_UnallocatedDiagnostic`; batch-only.
+
+### Reports NOT in scope
+
+`Reports/WH SKU Investigation` (`WhItemsReportService.cs`) is a per-country WH-stock view, not a batch view. Country-link routing for THAT report is a separate question — the planner didn't ask for it.
+
+### Files changed
+
+- `src/LpmSim.Data/LpmSim/LpmSimReports.cs` — new helper + 20 SQL country-filter sites + 6 parameter-dict changes.
+- `src/LpmSim.Web/LpmSim.Web.csproj` — version 1.14.105 → 1.14.106.
+- `CHANGELOG.md` — this section.
+
+### No DB changes
+
+Pure code change. `STRING_SPLIT` is a built-in T-SQL function (SQL Server 2016+).
+
+### Expected user impact
+
+A UAE batch's Store Summary that showed 53 stores yesterday will show **~60+ stores** today (UAE's 53 + OMAN's ~7-10). All top-line aggregates (`EOM`, `SOH`, `Merch Need (Month)`, `Merch Need Balance`, `Merch Need (Week)`, `SIM Qty`, `RR Qty`, `Override Qty`) will go up by the OMAN portion. Excel exports inherit the change automatically (they re-use the same report methods).
+
+KSA batches (no children) and any other un-linked country = zero change.
+
+---
+
 ## 1.14.105 — WH SKU Investigation header alignment (2026-05-21)
 
 ### What's new

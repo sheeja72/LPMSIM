@@ -387,6 +387,37 @@ public class LpmSimReportService(IDbContextFactory<LpmDbContext> dbFactory)
     }
 
     /// <summary>
+    /// 1.14.106 — Returns the country filter list (CSV string) for a report
+    /// whose batch is for <paramref name="batchCountry"/>. The list includes
+    /// the batch country itself plus every child country linked to it via
+    /// <c>LPM_CountryLink</c> with <c>IsActive = 1</c>.
+    ///
+    /// <para>
+    /// Example: a UAE batch returns <c>"UAE,OMAN"</c> because the SIM
+    /// allocator (since 1.14.77) includes OMAN stores in UAE's run. KSA
+    /// batches return <c>"KSA"</c> alone since no children are linked.
+    /// </para>
+    ///
+    /// <para>
+    /// The CSV is consumed by SQL via
+    /// <c>WHERE Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))</c>
+    /// (and similarly for <c>SIMCountry</c>). Each report method's
+    /// parameters dict passes the CSV under <c>@countries</c>.
+    /// </para>
+    /// </summary>
+    private static async Task<string> ResolveReportCountriesAsync(
+        LpmDbContext db, string batchCountry, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(batchCountry)) return "";
+        var parent = batchCountry.Trim();
+        var children = await CountryLinkResolver.GetChildCountriesAsync(db, parent, ct);
+        if (children.Count == 0) return parent;
+        // Parent first, then children alphabetically (GetChildCountriesAsync
+        // already sorts) — keeps CSV deterministic so SQL plan caching works.
+        return parent + "," + string.Join(",", children);
+    }
+
+    /// <summary>
     /// SKU Max Detail report — reads <c>LPM_SimItemSkuMax</c> for the run period.
     /// At least one of <paramref name="divCode"/>, <paramref name="storeId"/>,
     /// or <paramref name="itemCode"/> must be supplied (mandatory filter).
@@ -521,10 +552,14 @@ WITH BatchItems AS (
 ),
 ItemDivLs AS (
     -- Primary source: denormalized DivCode on LPM_LocStock (matches engine).
+    -- 1.14.106 — Country IN (...) so OMAN LocStock rows count for items in
+    -- a UAE batch that allocated to OMAN stores.
     SELECT bi.Itemcode, DivCode = MIN(ls.DivCode)
       FROM BatchItems bi
       INNER JOIN racks.dbo.LPM_LocStock ls
-              ON ls.Itemcode = bi.Itemcode AND ls.Country = @country AND ls.DivCode IS NOT NULL
+              ON ls.Itemcode = bi.Itemcode
+             AND ls.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+             AND ls.DivCode IS NOT NULL
      GROUP BY bi.Itemcode
 ),
 ItemDivUpc AS (
@@ -577,10 +612,11 @@ SohAgg AS (
     -- for some stores by the daily ETL. Joining via DataSettings means a store
     -- with the right StoreID is always counted regardless of what LocStock's
     -- denormalised Country column says.
+    -- 1.14.106 — SIMCountry IN (...) covers OMAN stores in a UAE batch.
     SELECT ls.StoreID, ls.DivCode, SOH = SUM(ISNULL(ls.SOH,0))
       FROM racks.dbo.LPM_LocStock ls
       INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-     WHERE ds.SIMCountry = @country
+     WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND ls.DivCode IS NOT NULL
        AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
      GROUP BY ls.StoreID, ls.DivCode
@@ -603,24 +639,27 @@ SELECT @batchNo                  AS LPMBatchNo,
   -- OUTER APPLY guarantees one DataSettings row per Store, even if the
   -- master table has duplicate (StoreID, SIMCountry) entries. A plain LEFT
   -- JOIN would multiply Summary rows and inflate the LPM SIM Qty column total.
+  -- 1.14.106 — SIMCountry IN (...) covers OMAN store names too.
   OUTER APPLY (
       SELECT TOP 1 PBFullname
         FROM dbo.DataSettings d
        WHERE d.StoreID = eo.StoreID
-         AND (d.SIMCountry = @country OR d.SIMCountry IS NULL)
+         AND (d.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ',')) OR d.SIMCountry IS NULL)
   ) ds
   LEFT JOIN dbo.Division div     ON div.DivCode = eo.DivCode
- WHERE eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
+ WHERE eo.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+   AND eo.Year1 = @y AND eo.Month1 = @m
  ORDER BY div.Division, eo.StoreID;";
 
         return await ExecAsync(db, sql, ReadEomSummary, ct, new Dictionary<string, object>
         {
-            ["@batchNo"] = batchNo,
-            ["@country"] = b.Country,
-            ["@y"]       = b.RunYear,
-            ["@m"]       = b.RunMonth,
-            ["@minPct"]  = (object?)minBoxUsabilityPct ?? DBNull.Value,
-            ["@maxPct"]  = (object?)maxBoxUsabilityPct ?? DBNull.Value,
+            ["@batchNo"]   = batchNo,
+            // 1.14.106 — CSV of parent + child countries (see ResolveReportCountriesAsync).
+            ["@countries"] = await ResolveReportCountriesAsync(db, b.Country, ct),
+            ["@y"]         = b.RunYear,
+            ["@m"]         = b.RunMonth,
+            ["@minPct"]    = (object?)minBoxUsabilityPct ?? DBNull.Value,
+            ["@maxPct"]    = (object?)maxBoxUsabilityPct ?? DBNull.Value,
         });
     }
 
@@ -684,12 +723,16 @@ SimAgg AS (
 EomAgg AS (
     -- 1.14.94 — MerchNeedMonth added (the cap the 1.14.87 allocator uses).
     -- MerchNeedWeek kept alongside as informational for the planner.
+    -- 1.14.106 — Country filter expanded to include child countries (e.g.
+    -- a UAE batch also pulls OMAN's EOM rows) so the SIM allocator's
+    -- cross-country runs show every store in the report.
     SELECT eo.StoreID,
            EOM            = SUM(ISNULL(eo.TargetEOM, 0)),
            MerchNeedMonth = SUM(CAST(ISNULL(eo.MerchNeedMonth, 0) AS bigint)),
            MerchNeedWeek  = SUM(CAST(ISNULL(eo.MerchNeedWeek,  0) AS bigint))
       FROM dbo.LPM_EOM_Output eo
-     WHERE eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
+     WHERE eo.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+       AND eo.Year1 = @y AND eo.Month1 = @m
      GROUP BY eo.StoreID
 ),
 SohAgg AS (
@@ -697,19 +740,21 @@ SohAgg AS (
     -- mapping) so the planner sees the true on-hand quantity.
     -- Country resolved via DataSettings join (LocStock.Country occasionally
     -- carries empty string '' for some stores from the ETL — see Store×Div SQL).
+    -- 1.14.106 — SIMCountry IN (...) so OMAN stores in a UAE batch show SOH.
     SELECT ls.StoreID, SOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
       FROM racks.dbo.LPM_LocStock ls
       INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-     WHERE ds.SIMCountry = @country
+     WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
      GROUP BY ls.StoreID
 ),
 AllStores AS (
-    -- Every active store in the country appears, even if it produced no SIM
-    -- this run. This guarantees the Store Summary mirrors the planning roster
-    -- (one row per store) regardless of whether any allocation happened.
+    -- Every active store in the country (parent + children) appears, even
+    -- if it produced no SIM this run. Mirrors the planning roster.
+    -- 1.14.106 — IN (...) covers parent + child countries.
     SELECT StoreID FROM dbo.DataSettings
-     WHERE ActiveStore = 'Y' AND SIMCountry = @country
+     WHERE ActiveStore = 'Y'
+       AND SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND StoreID IS NOT NULL AND StoreID <> ''
     UNION SELECT StoreID FROM SimAgg
     UNION SELECT StoreID FROM EomAgg
@@ -730,21 +775,26 @@ SELECT @batchNo                  AS LPMBatchNo,
   LEFT JOIN EomAgg eo  ON eo.StoreID  = a.StoreID
   LEFT JOIN SohAgg soh ON soh.StoreID = a.StoreID
   -- One DataSettings row per Store (defensive — see Summary tab note).
+  -- 1.14.106 — SIMCountry IN (...) so OMAN stores' names resolve too.
   CROSS APPLY (
       SELECT TOP 1 PBFullname, SIMCountry
         FROM dbo.DataSettings d
-       WHERE d.StoreID = a.StoreID AND d.SIMCountry = @country
+       WHERE d.StoreID = a.StoreID
+         AND d.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
   ) ds
  ORDER BY ds.PBFullname, a.StoreID;";
 
         return await ExecAsync(db, sql, ReadStoreSummary, ct, new Dictionary<string, object>
         {
-            ["@batchNo"] = batchNo,
-            ["@country"] = b.Country,
-            ["@y"]       = b.RunYear,
-            ["@m"]       = b.RunMonth,
-            ["@minPct"]  = (object?)minBoxUsabilityPct ?? DBNull.Value,
-            ["@maxPct"]  = (object?)maxBoxUsabilityPct ?? DBNull.Value,
+            ["@batchNo"]   = batchNo,
+            // 1.14.106 — Country filter now uses a CSV of parent + children
+            // so reports for a UAE batch also show OMAN stores allocated by
+            // the cross-country SIM run.
+            ["@countries"] = await ResolveReportCountriesAsync(db, b.Country, ct),
+            ["@y"]         = b.RunYear,
+            ["@m"]         = b.RunMonth,
+            ["@minPct"]    = (object?)minBoxUsabilityPct ?? DBNull.Value,
+            ["@maxPct"]    = (object?)maxBoxUsabilityPct ?? DBNull.Value,
         });
     }
 
@@ -841,12 +891,13 @@ CREATE CLUSTERED INDEX IX_BR ON #BoxRows (itemcode);
 -- Sourced from DISTINCT itemcodes in #BoxRows (was BoxItems CTE) so
 -- phantom items get resolved too — necessary for the 1.14.34 Box Qty
 -- semantics.
+-- 1.14.106 — Country IN (...) so OMAN LocStock rows count for items in a UAE batch.
 SELECT bi.itemcode, DivCode = MIN(ls.DivCode)
   INTO #ItemDivLs
   FROM (SELECT DISTINCT itemcode FROM #BoxRows) bi
   INNER JOIN racks.dbo.LPM_LocStock ls
           ON ls.Itemcode = bi.itemcode
-         AND ls.Country  = @country
+         AND ls.Country  IN (SELECT value FROM STRING_SPLIT(@countries, ','))
          AND ls.DivCode  IS NOT NULL
  GROUP BY bi.itemcode;
 
@@ -894,21 +945,24 @@ EomAgg AS (
     -- 1.14.97 — MerchNeedMonth added alongside MerchNeedWeek for the
     -- division-level rollup. Same projection shape as Store Summary's
     -- EomAgg (1.14.94).
+    -- 1.14.106 — Country IN (...) so UAE batch aggregates also include OMAN.
     SELECT eo.DivCode,
            EOM            = SUM(ISNULL(eo.TargetEOM, 0)),
            MerchNeedMonth = SUM(CAST(ISNULL(eo.MerchNeedMonth, 0) AS bigint)),
            MerchNeedWeek  = SUM(CAST(ISNULL(eo.MerchNeedWeek,  0) AS bigint))
       FROM dbo.LPM_EOM_Output eo
-     WHERE eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
+     WHERE eo.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+       AND eo.Year1 = @y AND eo.Month1 = @m
      GROUP BY eo.DivCode
 ),
 SohAgg AS (
     -- Per-Division SOH from LocStock (Country resolved via DataSettings join,
     -- same defensive pattern as Store×Div).
+    -- 1.14.106 — SIMCountry IN (...) so OMAN stores' SOH joins in too.
     SELECT ls.DivCode, SOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
       FROM racks.dbo.LPM_LocStock ls
       INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-     WHERE ds.SIMCountry = @country
+     WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND ls.DivCode IS NOT NULL
        AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
      GROUP BY ls.DivCode
@@ -946,12 +1000,13 @@ DROP TABLE #BoxUsability, #QB, #BoxRows, #ItemDivLs, #ItemDivUpc, #ItemDiv;";
 
         return await ExecAsync(db, sql, ReadDivisionSummary, ct, new Dictionary<string, object>
         {
-            ["@batchNo"] = batchNo,
-            ["@country"] = b.Country,
-            ["@y"]       = b.RunYear,
-            ["@m"]       = b.RunMonth,
-            ["@minPct"]  = (object?)minBoxUsabilityPct ?? DBNull.Value,
-            ["@maxPct"]  = (object?)maxBoxUsabilityPct ?? DBNull.Value,
+            ["@batchNo"]   = batchNo,
+            // 1.14.106 — CSV of parent + child countries.
+            ["@countries"] = await ResolveReportCountriesAsync(db, b.Country, ct),
+            ["@y"]         = b.RunYear,
+            ["@m"]         = b.RunMonth,
+            ["@minPct"]    = (object?)minBoxUsabilityPct ?? DBNull.Value,
+            ["@maxPct"]    = (object?)maxBoxUsabilityPct ?? DBNull.Value,
         });
     }
 
@@ -1542,11 +1597,12 @@ QualifyingBoxes AS (
 -- × Division is only used for items that aren't yet stocked anywhere in
 -- the country).
 ItemDivLs AS (
+    -- 1.14.106 — Country IN (...) so OMAN LocStock rows are considered too.
     SELECT bi.Itemcode, DivCode = MIN(ls.DivCode)
       FROM BatchItems bi
       INNER JOIN racks.dbo.LPM_LocStock ls
               ON ls.Itemcode = bi.Itemcode
-             AND ls.Country  = @country
+             AND ls.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
              AND ls.DivCode IS NOT NULL
      GROUP BY bi.Itemcode
 ),
@@ -1565,18 +1621,23 @@ ItemDiv AS (
     SELECT Itemcode, DivCode FROM ItemDivUpc
 ),
 SohAgg AS (
+    -- 1.14.106 — SIMCountry IN (...) so OMAN stores' SOH joins in.
     SELECT ls.StoreID, ls.Itemcode, SUM(ISNULL(ls.SOH,0)) AS SOH
       FROM racks.dbo.LPM_LocStock ls
       INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-     WHERE ds.SIMCountry = @country
+     WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
        AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> ''
      GROUP BY ls.StoreID, ls.Itemcode
 ),
 SkuMaxAgg AS (
+    -- 1.14.106 — Country IN (...) picks up each child country's own SKU Max
+    -- snapshot (UAE stores → UAE SKU Max; OMAN stores → OMAN SKU Max).
+    -- The (StoreID, ItemCode) join key keeps each store with its own caps.
     SELECT StoreID, ItemCode, MAX(SKUMax) AS SKUMax
       FROM dbo.LPM_SimItemSkuMax
-     WHERE Country = @country AND Year1 = @y AND Month1 = @m
+     WHERE Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+       AND Year1 = @y AND Month1 = @m
      GROUP BY StoreID, ItemCode
 )
 SELECT s.LPMBatchNo,
@@ -1602,30 +1663,34 @@ SELECT s.LPMBatchNo,
   LEFT  JOIN BoxTotals bt       ON bt.BoxNo    = s.BoxNo
   -- One DataSettings row per Store (defensive against duplicate StoreID
   -- entries in bfldata.dbo.DataSettings — would otherwise multiply rows).
+  -- 1.14.106 — SIMCountry IN (...) so OMAN stores' names resolve too.
   OUTER APPLY (
       SELECT TOP 1 PBFullname FROM dbo.DataSettings d
        WHERE d.StoreID = s.StoreID
-         AND (d.SIMCountry = @country OR d.SIMCountry IS NULL)
+         AND (d.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ',')) OR d.SIMCountry IS NULL)
   ) ds
   LEFT  JOIN dbo.Division div   ON div.DivCode = id.DivCode
   LEFT  JOIN SkuMaxAgg sk       ON sk.StoreID  = s.StoreID  AND sk.ItemCode = s.Itemcode
   LEFT  JOIN SohAgg soh         ON soh.StoreID = s.StoreID  AND soh.Itemcode = s.Itemcode
   -- LPM_EOM_Output gives us the per-(Store, Div) priority rank — surfaced
   -- in the report so the planner can spot rank vs allocation anomalies.
+  -- 1.14.106 — Country IN (...) joins UAE rows to UAE stores, OMAN to OMAN.
   LEFT  JOIN dbo.LPM_EOM_Output eo
-         ON eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
+         ON eo.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+        AND eo.Year1 = @y AND eo.Month1 = @m
         AND eo.StoreID = s.StoreID AND eo.DivCode = id.DivCode
  WHERE s.LPMBatchNo = @batchNo
  ORDER BY div.Division, s.StoreID, s.BoxNo, s.Itemcode;";
 
         return await ExecAsync(db, sql, ReadItemDetail, ct, new Dictionary<string, object>
         {
-            ["@batchNo"] = batchNo,
-            ["@country"] = b.Country,
-            ["@y"]       = b.RunYear,
-            ["@m"]       = b.RunMonth,
-            ["@minPct"]  = (object?)minBoxUsabilityPct ?? DBNull.Value,
-            ["@maxPct"]  = (object?)maxBoxUsabilityPct ?? DBNull.Value,
+            ["@batchNo"]   = batchNo,
+            // 1.14.106 — CSV of parent + child countries.
+            ["@countries"] = await ResolveReportCountriesAsync(db, b.Country, ct),
+            ["@y"]         = b.RunYear,
+            ["@m"]         = b.RunMonth,
+            ["@minPct"]    = (object?)minBoxUsabilityPct ?? DBNull.Value,
+            ["@maxPct"]    = (object?)maxBoxUsabilityPct ?? DBNull.Value,
         });
     }
 
@@ -2179,11 +2244,12 @@ BatchBoxes AS (
     SELECT DISTINCT BoxNo    FROM dbo.LPMSIM_Output WHERE LPMBatchNo = @batchNo
 ),
 ItemDivLs AS (
+    -- 1.14.106 — Country IN (...) so OMAN LocStock rows are considered too.
     SELECT bi.Itemcode, DivCode = MIN(ls.DivCode)
       FROM BatchItems bi
       INNER JOIN racks.dbo.LPM_LocStock ls
               ON ls.Itemcode = bi.Itemcode
-             AND ls.Country  = @country
+             AND ls.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
              AND ls.DivCode IS NOT NULL
      GROUP BY bi.Itemcode
 ),
@@ -2222,28 +2288,32 @@ BoxTotals AS (
      GROUP BY BoxNo
 ),
 SohAgg AS (
+    -- 1.14.106 — SIMCountry IN (...) for OMAN stores in UAE batches.
     SELECT ls.StoreID, ls.Itemcode, SOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
       FROM racks.dbo.LPM_LocStock ls
       INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-     WHERE ds.SIMCountry = @country
+     WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND ls.StoreID  IS NOT NULL AND ls.StoreID  <> ''
        AND ls.Itemcode IS NOT NULL AND ls.Itemcode <> ''
      GROUP BY ls.StoreID, ls.Itemcode
 ),
 DivSohAgg AS (
     -- (Store, Div) SOH for DivEOMBalance and DivSOH columns.
+    -- 1.14.106 — SIMCountry IN (...) for OMAN stores in UAE batches.
     SELECT ls.StoreID, ls.DivCode, DivSOH = SUM(CAST(ISNULL(ls.SOH, 0) AS bigint))
       FROM racks.dbo.LPM_LocStock ls
       INNER JOIN dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-     WHERE ds.SIMCountry = @country
+     WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
        AND ls.DivCode IS NOT NULL
        AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
      GROUP BY ls.StoreID, ls.DivCode
 ),
 SkuMaxAgg AS (
+    -- 1.14.106 — Country IN (...) picks up each country's own SKU Max snapshot.
     SELECT StoreID, ItemCode, SKUMax = MAX(SKUMax)
       FROM dbo.LPM_SimItemSkuMax
-     WHERE Country = @country AND Year1 = @y AND Month1 = @m
+     WHERE Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+       AND Year1 = @y AND Month1 = @m
      GROUP BY StoreID, ItemCode
 )";
 
@@ -2254,15 +2324,18 @@ SELECT {string.Join(", ", selectParts)}
   LEFT  JOIN BoxAttrs    ba   ON ba.BoxNo     = s.BoxNo  AND ba.ItemCode = s.Itemcode
   LEFT  JOIN BoxTotals   bt   ON bt.BoxNo     = s.BoxNo
   LEFT  JOIN dbo.Division div ON div.DivCode  = id.DivCode
+  -- 1.14.106 — SIMCountry IN (...) so OMAN stores' names resolve.
   OUTER APPLY (
       SELECT TOP 1 PBFullname FROM dbo.DataSettings d
        WHERE d.StoreID = s.StoreID
-         AND (d.SIMCountry = @country OR d.SIMCountry IS NULL)
+         AND (d.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ',')) OR d.SIMCountry IS NULL)
   ) ds
   LEFT  JOIN SohAgg      soh  ON soh.StoreID  = s.StoreID AND soh.Itemcode = s.Itemcode
   LEFT  JOIN DivSohAgg   dsoh ON dsoh.StoreID = s.StoreID AND dsoh.DivCode = id.DivCode
+  -- 1.14.106 — eo.Country IN (...) so UAE+OMAN rows both join in.
   LEFT  JOIN dbo.LPM_EOM_Output eo
-         ON eo.Country = @country AND eo.Year1 = @y AND eo.Month1 = @m
+         ON eo.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
+        AND eo.Year1 = @y AND eo.Month1 = @m
         AND eo.StoreID = s.StoreID AND eo.DivCode = id.DivCode
   LEFT  JOIN SkuMaxAgg   sk   ON sk.StoreID   = s.StoreID AND sk.ItemCode = s.Itemcode
  WHERE s.LPMBatchNo = @batchNo
@@ -2279,7 +2352,8 @@ SELECT {string.Join(", ", selectParts)}
         {
             cmd.CommandText = sql;
             cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
-            cmd.Parameters.Add(new SqlParameter("@country", b.Country));
+            // 1.14.106 — CSV of parent + child countries.
+            cmd.Parameters.Add(new SqlParameter("@countries", await ResolveReportCountriesAsync(db, b.Country, ct)));
             cmd.Parameters.Add(new SqlParameter("@y",       b.RunYear));
             cmd.Parameters.Add(new SqlParameter("@m",       b.RunMonth));
             cmd.CommandTimeout = 300;
@@ -2602,6 +2676,7 @@ SELECT {string.Join(", ", selectParts)}
             -- 1.14.100 — SOH per item across active stores in the country.
             -- Same source + DataSettings join shape used by WH SKU Investigation
             -- (StoresSoh) so the numbers reconcile byte-for-byte.
+            -- 1.14.106 — SIMCountry IN (...) so OMAN stores' SOH joins in.
             ItemSoh AS (
                 SELECT ls.Itemcode AS ItemCode,
                        SOH = SUM(CAST(
@@ -2609,7 +2684,7 @@ SELECT {string.Join(", ", selectParts)}
                                 ELSE ls.SOH END AS bigint))
                   FROM racks.dbo.LPM_LocStock ls
                   INNER JOIN bfldata.dbo.DataSettings ds ON ds.StoreID = ls.StoreID
-                 WHERE ds.SIMCountry  = @country
+                 WHERE ds.SIMCountry IN (SELECT value FROM STRING_SPLIT(@countries, ','))
                    AND ds.ActiveStore = 'Y'
                    AND ls.StoreID IS NOT NULL AND ls.StoreID <> ''
                  GROUP BY ls.Itemcode
@@ -2617,11 +2692,12 @@ SELECT {string.Join(", ", selectParts)}
             -- 1.14.100 — SKU Max per item for the batch's country at the
             -- latest period in LPM_SimItemSkuMax (matches the existing
             -- SkuMax projection in WH SKU Investigation).
+            -- 1.14.106 — Country IN (...) picks up each child's SKU Max snapshot.
             ItemSkuMaxAgg AS (
                 SELECT sm.ItemCode,
                        SkuMax = SUM(CAST(ISNULL(sm.SKUMax, 0) AS bigint))
                   FROM LPMSIM.dbo.LPM_SimItemSkuMax sm
-                 WHERE sm.Country = @country
+                 WHERE sm.Country IN (SELECT value FROM STRING_SPLIT(@countries, ','))
                    AND sm.Year1   = @y
                    AND sm.Month1  = @m
                  GROUP BY sm.ItemCode
@@ -2653,8 +2729,9 @@ SELECT {string.Join(", ", selectParts)}
         using var cmd = (SqlCommand)conn.CreateCommand();
         cmd.CommandText = sql;
         cmd.Parameters.Add(new SqlParameter("@batchNo", batchNo));
-        // 1.14.100 — @country/@y/@m needed by the new ItemSoh + ItemSkuMaxAgg CTEs.
-        cmd.Parameters.Add(new SqlParameter("@country", country));
+        // 1.14.106 — CSV of parent + children for SOH / SkuMax aggregation
+        // (was @country single-value pre-1.14.106).
+        cmd.Parameters.Add(new SqlParameter("@countries", await ResolveReportCountriesAsync(db, country, ct)));
         cmd.Parameters.Add(new SqlParameter("@y",       b.RunYear));
         cmd.Parameters.Add(new SqlParameter("@m",       b.RunMonth));
         foreach (var p in whParms)         cmd.Parameters.Add(p);
